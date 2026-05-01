@@ -1354,6 +1354,38 @@ fn nonresumable_pending_lexical_rebuild_status_without_fingerprint(
     }))
 }
 
+fn nonresumable_pending_lexical_rebuild_status_from_readonly_db(
+    index_path: &Path,
+    db_path: &Path,
+) -> Result<Option<(MatchingLexicalRebuildStateStatus, usize)>> {
+    let mut storage = FrankenStorage::open_readonly(db_path).with_context(|| {
+        format!(
+            "opening readonly storage to classify pending lexical rebuild checkpoint: {}",
+            db_path.display()
+        )
+    })?;
+    let total_conversations = count_total_conversations_exact(&storage)?;
+    storage.close_best_effort_in_place();
+
+    let status = nonresumable_pending_lexical_rebuild_status_without_fingerprint(
+        index_path,
+        db_path,
+        total_conversations,
+    )?;
+    Ok(status.map(|status| (status, total_conversations)))
+}
+
+fn should_try_readonly_nonresumable_lexical_resume(opts: &IndexOptions) -> bool {
+    !opts.full
+        && !opts.force_rebuild
+        && !opts.watch
+        && !opts.semantic
+        && opts
+            .watch_once_paths
+            .as_ref()
+            .is_none_or(|paths| paths.is_empty())
+}
+
 fn should_preserve_matching_completed_lexical_checkpoint_during_full_scan(
     full_rebuild: bool,
     resume_lexical_rebuild: bool,
@@ -8987,6 +9019,60 @@ pub fn run_index(
         Arc::clone(&index_run_lock.metadata_write_lock),
     );
 
+    let index_path = index_dir(&opts.data_dir)?;
+    if should_try_readonly_nonresumable_lexical_resume(&opts) {
+        match nonresumable_pending_lexical_rebuild_status_from_readonly_db(
+            &index_path,
+            &opts.db_path,
+        ) {
+            Ok(Some((_status, total_conversations))) => {
+                tracing::info!(
+                    db_path = %opts.db_path.display(),
+                    total_conversations,
+                    "restarting non-resumable lexical rebuild from a readonly canonical DB before writable storage open"
+                );
+                record_lexical_population_strategy(
+                    opts.progress.as_ref(),
+                    LexicalPopulationStrategy::DeferredAuthoritativeDbRebuild,
+                    "readonly_fast_resume_incomplete_nonresumable_lexical_rebuild",
+                );
+                tracing::info!(
+                    strategy = LexicalPopulationStrategy::DeferredAuthoritativeDbRebuild.as_str(),
+                    reason = "readonly_fast_resume_incomplete_nonresumable_lexical_rebuild",
+                    "selected_lexical_population_strategy"
+                );
+                let rebuild = rebuild_tantivy_from_db_deferred_startup(
+                    &opts.db_path,
+                    &opts.data_dir,
+                    total_conversations,
+                    opts.progress.clone(),
+                )?;
+                if let Some(p) = &opts.progress
+                    && let Ok(mut stats) = p.stats.lock()
+                {
+                    stats.scan_ms = 0;
+                    stats.total_conversations = total_conversations;
+                }
+                if let Some(observed_messages) = rebuild.observed_messages {
+                    record_exact_total_counts_in_progress(
+                        opts.progress.as_ref(),
+                        total_conversations,
+                        observed_messages,
+                    );
+                }
+                return Ok(());
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::debug!(
+                    db_path = %opts.db_path.display(),
+                    error = %err,
+                    "readonly lexical resume preflight failed; falling back to writable storage open"
+                );
+            }
+        }
+    }
+
     let (storage, canonical_storage_rebuilt, opened_fresh_for_full) =
         open_storage_for_index(&opts.db_path, opts.full)?;
     let defer_checkpoints = !opts.watch;
@@ -9052,7 +9138,6 @@ pub fn run_index(
         );
     }
 
-    let index_path = index_dir(&opts.data_dir)?;
     let mut initial_canonical_sessions_before_salvage = count_total_conversations_exact(&storage)?;
     if opts.full
         && !opened_fresh_for_full
@@ -32356,6 +32441,38 @@ mod tests {
             .is_none(),
             "shared-writer checkpoints still require the exact fingerprint path"
         );
+    }
+
+    #[test]
+    fn readonly_db_probe_classifies_nonresumable_staged_checkpoint() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("agent_search.db");
+        let storage = FrankenStorage::open(&db_path).unwrap();
+        assert_eq!(count_total_conversations_exact(&storage).unwrap(), 0);
+        storage.close().unwrap();
+
+        let index_path = tmp.path().join("index");
+        fs::create_dir_all(&index_path).unwrap();
+        let checkpoint_db_state = LexicalRebuildDbState {
+            db_path: db_path.to_string_lossy().into_owned(),
+            total_conversations: 0,
+            total_messages: 0,
+            storage_fingerprint: "content-v1:0:0:0".to_string(),
+        };
+        let mut state =
+            LexicalRebuildState::new(checkpoint_db_state, LEXICAL_REBUILD_PAGE_SIZE);
+        state.set_execution_mode(LexicalRebuildExecutionMode::StagedShardBuild);
+        persist_lexical_rebuild_state(&index_path, &state).unwrap();
+
+        let (status, total_conversations) =
+            nonresumable_pending_lexical_rebuild_status_from_readonly_db(
+                &index_path,
+                &db_path,
+            )
+            .unwrap()
+            .expect("readonly probe should classify matching staged checkpoint");
+        assert!(status.has_pending_resume);
+        assert_eq!(total_conversations, 0);
     }
 
     #[test]
