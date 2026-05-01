@@ -3670,9 +3670,34 @@ impl FrankenStorage {
             return Ok(report);
         }
 
+        let cleanup_orphan_message_dependents = to_delete
+            .iter()
+            .any(|entry| entry.child_table == "messages");
         let mut tx = self.conn.transaction()?;
+        if cleanup_orphan_message_dependents {
+            for entry in ORPHAN_MESSAGE_DEPENDENT_TABLES {
+                if let Err(err) = tx.execute_compat(entry.delete_sql, fparams![]) {
+                    if error_indicates_missing_table(&err) {
+                        tracing::debug!(
+                            target: "cass::fk_repair",
+                            child_table = entry.child_table,
+                            error = %err,
+                            "skipping orphan-message dependent cleanup (table unavailable)"
+                        );
+                        continue;
+                    }
+                    return Err(err).with_context(|| {
+                        format!(
+                            "deleting rows from {} that depend on orphan messages",
+                            entry.child_table
+                        )
+                    });
+                }
+            }
+        }
         for entry in &to_delete {
-            tx.execute_compat(entry.delete_sql, fparams![])?;
+            tx.execute_compat(entry.delete_sql, fparams![])
+                .with_context(|| format!("deleting orphan rows from {}", entry.child_table))?;
         }
         tx.commit()?;
 
@@ -4845,18 +4870,58 @@ const ORPHAN_FK_TABLES: &[OrphanFkTable] = &[
     },
 ];
 
+struct OrphanMessageDependentTable {
+    child_table: &'static str,
+    delete_sql: &'static str,
+}
+
+const ORPHAN_MESSAGE_DEPENDENT_TABLES: &[OrphanMessageDependentTable] = &[
+    OrphanMessageDependentTable {
+        child_table: "message_metrics",
+        delete_sql: "DELETE FROM message_metrics
+                     WHERE message_id IN (
+                         SELECT id FROM messages
+                         WHERE NOT EXISTS (
+                             SELECT 1 FROM conversations
+                             WHERE conversations.id = messages.conversation_id
+                         )
+                     )",
+    },
+    OrphanMessageDependentTable {
+        child_table: "token_usage",
+        delete_sql: "DELETE FROM token_usage
+                     WHERE message_id IN (
+                         SELECT id FROM messages
+                         WHERE NOT EXISTS (
+                             SELECT 1 FROM conversations
+                             WHERE conversations.id = messages.conversation_id
+                         )
+                     )",
+    },
+    OrphanMessageDependentTable {
+        child_table: "snippets",
+        delete_sql: "DELETE FROM snippets
+                     WHERE message_id IN (
+                         SELECT id FROM messages
+                         WHERE NOT EXISTS (
+                             SELECT 1 FROM conversations
+                             WHERE conversations.id = messages.conversation_id
+                         )
+                     )",
+    },
+];
+
 /// Summary of orphan rows detected and removed by `cleanup_orphan_fk_rows`.
 ///
 /// Counts come from the count-phase `SELECT COUNT(*)` rather than from the
 /// `DELETE`'s rows-changed return, so they reflect "orphans observed before
 /// the delete transaction started." Under the function's intended use — a
 /// single indexer-startup pass holding the index run lock — no concurrent
-/// writers exist, so these counts match the rows the function's own `DELETE`
-/// statements removed. Additional rows can be removed by `ON DELETE CASCADE`
-/// triggers when an orphan message is deleted (its `message_metrics` /
-/// `token_usage` / `snippets` children cascade away with it); those cascade
-/// removals are an expected consequence of the cleanup but are *not*
-/// separately counted in `total` or `per_table`.
+/// writers exist, so these counts match the primary orphan roots identified
+/// before the delete transaction starts. Dependent rows below an orphan
+/// message (`message_metrics` / `token_usage` / `snippets`) are an expected
+/// consequence of removing that root orphan and are *not* separately counted in
+/// `total` or `per_table`.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct OrphanFkCleanupReport {
     pub total: i64,
@@ -22947,6 +23012,33 @@ mod tests {
                 .unwrap();
         }
 
+        // Rows below are not directly orphaned because their immediate
+        // `messages` parent exists, but that parent is itself orphaned. The
+        // cleanup deletes them explicitly before deleting orphan messages so the
+        // FK cascade engine does not have to run one delete program per orphan.
+        for message_id in [1_i64, 101_i64, 102_i64] {
+            storage
+                .raw()
+                .execute_compat(
+                    "INSERT INTO message_metrics(
+                         message_id, created_at_ms, hour_id, day_id, agent_slug,
+                         role, content_chars, content_tokens_est
+                     ) VALUES(?1, 0, 0, 0, 'test-agent', 'user', 13, 2)",
+                    fparams![message_id],
+                )
+                .unwrap();
+            storage
+                .raw()
+                .execute_compat(
+                    "INSERT INTO token_usage(
+                         message_id, conversation_id, agent_id, timestamp_ms, day_id,
+                         role, content_chars
+                     ) VALUES(?1, 1, 1, 0, 0, 'user', 13)",
+                    fparams![message_id],
+                )
+                .unwrap();
+        }
+
         // Plant a directly-orphan snippet — message_id=99999 does not exist
         // anywhere, so this exercises the snippets DELETE path rather than
         // riding on the cascade from the orphan-message DELETE.
@@ -22976,12 +23068,28 @@ mod tests {
             })
             .unwrap();
         assert_eq!(snippets_before, 1);
+        let metrics_before: i64 = storage
+            .raw()
+            .query_row_map("SELECT COUNT(*) FROM message_metrics", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        assert_eq!(metrics_before, 3);
+        let token_usage_before: i64 = storage
+            .raw()
+            .query_row_map("SELECT COUNT(*) FROM token_usage", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        assert_eq!(token_usage_before, 3);
 
         // Run the self-heal.
         let report = storage.cleanup_orphan_fk_rows().unwrap();
 
-        // 3 orphan messages + 1 directly-orphan snippet = 4 deletions reported.
-        // The real message (id=1) must still be present afterwards.
+        // 3 orphan messages + 1 directly-orphan snippet = 4 primary orphans
+        // reported. Dependent message_metrics/token_usage rows for orphan
+        // messages are pruned too, but they are not double-counted because the
+        // orphan message is the root row that made them invalid.
         let messages_after: i64 = storage
             .raw()
             .query_row_map("SELECT COUNT(*) FROM messages", fparams![], |row| {
@@ -22996,6 +23104,20 @@ mod tests {
             })
             .unwrap();
         assert_eq!(snippets_after, 0);
+        let metrics_after: i64 = storage
+            .raw()
+            .query_row_map("SELECT COUNT(*) FROM message_metrics", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        assert_eq!(metrics_after, 1, "real message metric must be preserved");
+        let token_usage_after: i64 = storage
+            .raw()
+            .query_row_map("SELECT COUNT(*) FROM token_usage", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        assert_eq!(token_usage_after, 1, "real token row must be preserved");
 
         assert_eq!(report.total, 4, "report total: {:?}", report);
         let messages_count = report
