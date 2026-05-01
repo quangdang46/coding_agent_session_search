@@ -3639,8 +3639,25 @@ impl FrankenStorage {
     /// commit so the upstream `drop_close` condition stays visible.
     pub(crate) fn cleanup_orphan_fk_rows(&self) -> Result<OrphanFkCleanupReport> {
         let mut report = OrphanFkCleanupReport::default();
+        let orphan_message_ids = match collect_orphan_message_ids(&self.conn) {
+            Ok(ids) => ids,
+            Err(err) if error_indicates_missing_table(&err) => {
+                tracing::debug!(
+                    target: "cass::fk_repair",
+                    child_table = "messages",
+                    error = %err,
+                    "skipping orphan-message probe (table or column unavailable)"
+                );
+                Vec::new()
+            }
+            Err(err) => return Err(err),
+        };
+        if !orphan_message_ids.is_empty() {
+            report.record("messages", orphan_message_ids.len() as i64);
+        }
+
         let mut to_delete: SmallVec<[&'static OrphanFkTable; 8]> = SmallVec::new();
-        for entry in ORPHAN_FK_TABLES {
+        for entry in ORPHAN_DIRECT_CHILD_TABLES {
             let count: i64 = match self
                 .conn
                 .query_row_map(entry.count_sql, fparams![], |row| row.get_typed::<i64>(0))
@@ -3666,17 +3683,16 @@ impl FrankenStorage {
             }
         }
 
-        if to_delete.is_empty() {
+        if orphan_message_ids.is_empty() && to_delete.is_empty() {
             return Ok(report);
         }
 
-        let cleanup_orphan_message_dependents = to_delete
-            .iter()
-            .any(|entry| entry.child_table == "messages");
         let mut tx = self.conn.transaction()?;
-        if cleanup_orphan_message_dependents {
+        if !orphan_message_ids.is_empty() {
             for entry in ORPHAN_MESSAGE_DEPENDENT_TABLES {
-                if let Err(err) = tx.execute_compat(entry.delete_sql, fparams![]) {
+                if let Err(err) =
+                    delete_rows_by_i64_chunks(&tx, entry.delete_prefix, &orphan_message_ids)
+                {
                     if error_indicates_missing_table(&err) {
                         tracing::debug!(
                             target: "cass::fk_repair",
@@ -3698,6 +3714,14 @@ impl FrankenStorage {
         for entry in &to_delete {
             tx.execute_compat(entry.delete_sql, fparams![])
                 .with_context(|| format!("deleting orphan rows from {}", entry.child_table))?;
+        }
+        if !orphan_message_ids.is_empty() {
+            delete_rows_by_i64_chunks(
+                &tx,
+                "DELETE FROM messages WHERE id IN (",
+                &orphan_message_ids,
+            )
+            .context("deleting orphan rows from messages")?;
         }
         tx.commit()?;
 
@@ -4820,6 +4844,133 @@ fn error_indicates_missing_table(err: &impl std::fmt::Display) -> bool {
         .contains("no such table")
 }
 
+const ORPHAN_FK_ID_CHUNK_SIZE: usize = 256;
+
+fn collect_orphan_message_ids(conn: &FrankenConnection) -> Result<Vec<i64>> {
+    let min_conversation_id = conn
+        .query_map_collect(
+            "SELECT conversation_id
+             FROM messages
+             ORDER BY conversation_id ASC
+             LIMIT 1",
+            fparams![],
+            |row| row.get_typed(0),
+        )
+        .context("finding minimum message conversation id for orphan FK cleanup")?
+        .into_iter()
+        .next();
+    let Some(min_conversation_id) = min_conversation_id else {
+        return Ok(Vec::new());
+    };
+    let max_conversation_id: i64 = conn
+        .query_row_map(
+            "SELECT conversation_id
+             FROM messages
+             ORDER BY conversation_id DESC
+             LIMIT 1",
+            fparams![],
+            |row| row.get_typed(0),
+        )
+        .context("finding maximum message conversation id for orphan FK cleanup")?;
+
+    let parent_conversation_ids: Vec<i64> = conn
+        .query_map_collect(
+            "SELECT id
+             FROM conversations
+             WHERE id BETWEEN ?1 AND ?2
+             ORDER BY id",
+            fparams![min_conversation_id, max_conversation_id],
+            |row| row.get_typed(0),
+        )
+        .context("listing parent conversation ids for orphan FK cleanup")?;
+
+    let mut message_ids = Vec::new();
+    let mut gap_start = min_conversation_id;
+    for parent_id in parent_conversation_ids {
+        if parent_id < gap_start {
+            continue;
+        }
+        if parent_id > max_conversation_id {
+            break;
+        }
+        if gap_start < parent_id {
+            collect_message_ids_for_conversation_gap(
+                conn,
+                gap_start,
+                parent_id.saturating_sub(1),
+                &mut message_ids,
+            )?;
+        }
+        if parent_id == i64::MAX {
+            return Ok(message_ids);
+        }
+        gap_start = parent_id + 1;
+    }
+    if gap_start <= max_conversation_id {
+        collect_message_ids_for_conversation_gap(
+            conn,
+            gap_start,
+            max_conversation_id,
+            &mut message_ids,
+        )?;
+    }
+
+    Ok(message_ids)
+}
+
+fn collect_message_ids_for_conversation_gap(
+    conn: &FrankenConnection,
+    gap_start: i64,
+    gap_end: i64,
+    message_ids: &mut Vec<i64>,
+) -> Result<()> {
+    let (sql, params) = if gap_start == gap_end {
+        (
+            "SELECT id FROM messages WHERE conversation_id = ?1",
+            vec![SqliteValue::from(gap_start)],
+        )
+    } else {
+        (
+            "SELECT id FROM messages WHERE conversation_id BETWEEN ?1 AND ?2",
+            vec![SqliteValue::from(gap_start), SqliteValue::from(gap_end)],
+        )
+    };
+    let rows = conn.query_with_params(sql, &params).with_context(|| {
+        format!("listing orphan message ids for conversation-id gap {gap_start}..={gap_end}")
+    })?;
+    message_ids.reserve(rows.len());
+    for row in rows {
+        message_ids.push(row.get_typed(0)?);
+    }
+    Ok(())
+}
+
+fn delete_rows_by_i64_chunks(
+    tx: &FrankenTransaction<'_>,
+    delete_prefix: &'static str,
+    ids: &[i64],
+) -> Result<usize> {
+    let mut deleted = 0;
+    for chunk in ids.chunks(ORPHAN_FK_ID_CHUNK_SIZE) {
+        let sql = format!("{}{})", delete_prefix, sql_placeholders(chunk.len()));
+        let params: Vec<SqliteValue> = chunk.iter().copied().map(SqliteValue::from).collect();
+        deleted += tx.execute_with_params(&sql, &params)?;
+    }
+    Ok(deleted)
+}
+
+fn sql_placeholders(count: usize) -> String {
+    debug_assert!(count > 0);
+    let mut placeholders = String::with_capacity(count.saturating_mul(2).saturating_sub(1));
+    for idx in 0..count {
+        if idx > 0 {
+            placeholders.push(',');
+        }
+        placeholders.push('?');
+    }
+    placeholders
+}
+
 /// Tables whose FK parent rows can go missing when an index transaction is
 /// dropped mid-flight. The count and delete SQL strings are intentionally
 /// static (no dynamic table names) so they can be audited at a glance and so
@@ -4832,14 +4983,7 @@ struct OrphanFkTable {
     delete_sql: &'static str,
 }
 
-const ORPHAN_FK_TABLES: &[OrphanFkTable] = &[
-    OrphanFkTable {
-        child_table: "messages",
-        count_sql: "SELECT COUNT(*) FROM messages \
-                    WHERE NOT EXISTS (SELECT 1 FROM conversations WHERE conversations.id = messages.conversation_id)",
-        delete_sql: "DELETE FROM messages \
-                     WHERE NOT EXISTS (SELECT 1 FROM conversations WHERE conversations.id = messages.conversation_id)",
-    },
+const ORPHAN_DIRECT_CHILD_TABLES: &[OrphanFkTable] = &[
     OrphanFkTable {
         child_table: "message_metrics",
         count_sql: "SELECT COUNT(*) FROM message_metrics \
@@ -4872,42 +5016,21 @@ const ORPHAN_FK_TABLES: &[OrphanFkTable] = &[
 
 struct OrphanMessageDependentTable {
     child_table: &'static str,
-    delete_sql: &'static str,
+    delete_prefix: &'static str,
 }
 
 const ORPHAN_MESSAGE_DEPENDENT_TABLES: &[OrphanMessageDependentTable] = &[
     OrphanMessageDependentTable {
         child_table: "message_metrics",
-        delete_sql: "DELETE FROM message_metrics
-                     WHERE message_id IN (
-                         SELECT id FROM messages
-                         WHERE NOT EXISTS (
-                             SELECT 1 FROM conversations
-                             WHERE conversations.id = messages.conversation_id
-                         )
-                     )",
+        delete_prefix: "DELETE FROM message_metrics WHERE message_id IN (",
     },
     OrphanMessageDependentTable {
         child_table: "token_usage",
-        delete_sql: "DELETE FROM token_usage
-                     WHERE message_id IN (
-                         SELECT id FROM messages
-                         WHERE NOT EXISTS (
-                             SELECT 1 FROM conversations
-                             WHERE conversations.id = messages.conversation_id
-                         )
-                     )",
+        delete_prefix: "DELETE FROM token_usage WHERE message_id IN (",
     },
     OrphanMessageDependentTable {
         child_table: "snippets",
-        delete_sql: "DELETE FROM snippets
-                     WHERE message_id IN (
-                         SELECT id FROM messages
-                         WHERE NOT EXISTS (
-                             SELECT 1 FROM conversations
-                             WHERE conversations.id = messages.conversation_id
-                         )
-                     )",
+        delete_prefix: "DELETE FROM snippets WHERE message_id IN (",
     },
 ];
 
