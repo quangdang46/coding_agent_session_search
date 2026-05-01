@@ -1296,6 +1296,7 @@ struct MatchingLexicalRebuildStateStatus {
     completed_storage_fingerprint: Option<String>,
 }
 
+#[cfg(test)]
 fn matching_lexical_rebuild_state_status(
     index_path: &Path,
     db_state: &LexicalRebuildDbState,
@@ -1303,8 +1304,30 @@ fn matching_lexical_rebuild_state_status(
     let Some(state) = load_lexical_rebuild_state(index_path)? else {
         return Ok(MatchingLexicalRebuildStateStatus::default());
     };
-    if !state.matches_run(db_state, LEXICAL_REBUILD_PAGE_SIZE) {
+    Ok(matching_lexical_rebuild_state_status_for_loaded_state(
+        state, db_state,
+    ))
+}
+
+fn matching_lexical_rebuild_state_status_if_present(
+    index_path: &Path,
+    load_current_db_state: impl FnOnce() -> Result<LexicalRebuildDbState>,
+) -> Result<MatchingLexicalRebuildStateStatus> {
+    let Some(state) = load_lexical_rebuild_state(index_path)? else {
         return Ok(MatchingLexicalRebuildStateStatus::default());
+    };
+    let db_state = load_current_db_state()?;
+    Ok(matching_lexical_rebuild_state_status_for_loaded_state(
+        state, &db_state,
+    ))
+}
+
+fn matching_lexical_rebuild_state_status_for_loaded_state(
+    state: LexicalRebuildState,
+    db_state: &LexicalRebuildDbState,
+) -> MatchingLexicalRebuildStateStatus {
+    if !state.matches_run(db_state, LEXICAL_REBUILD_PAGE_SIZE) {
+        return MatchingLexicalRebuildStateStatus::default();
     }
 
     let has_completed_checkpoint = state.completed
@@ -1312,7 +1335,7 @@ fn matching_lexical_rebuild_state_status(
         && state.execution_mode == LexicalRebuildExecutionMode::SharedWriter
         && !state.runtime.is_observed();
 
-    Ok(MatchingLexicalRebuildStateStatus {
+    MatchingLexicalRebuildStateStatus {
         has_pending_resume: state.is_incomplete(),
         has_completed_checkpoint,
         completed_indexed_docs: has_completed_checkpoint.then_some(state.indexed_docs),
@@ -1320,7 +1343,7 @@ fn matching_lexical_rebuild_state_status(
             .then_some((state.db.total_conversations, state.indexed_docs)),
         completed_storage_fingerprint: has_completed_checkpoint
             .then_some(state.db.storage_fingerprint),
-    })
+    }
 }
 
 fn nonresumable_pending_lexical_rebuild_status_without_fingerprint(
@@ -6447,6 +6470,7 @@ fn deferred_lexical_rebuild_db_state(
     }
 }
 
+#[cfg(test)]
 fn lexical_rebuild_db_state(
     storage: &FrankenStorage,
     db_path: &Path,
@@ -9319,9 +9343,14 @@ pub fn run_index(
             initial_matching_lexical_checkpoint = status;
             restart_pending_lexical_rebuild_from_zero = true;
         } else {
-            let db_state = lexical_rebuild_db_state(&storage, &opts.db_path)?;
             initial_matching_lexical_checkpoint =
-                matching_lexical_rebuild_state_status(&index_path, &db_state)?;
+                matching_lexical_rebuild_state_status_if_present(&index_path, || {
+                    lexical_rebuild_db_state_with_total_conversations(
+                        &storage,
+                        &opts.db_path,
+                        initial_canonical_sessions_before_salvage,
+                    )
+                })?;
         }
         initial_matching_lexical_checkpoint.has_pending_resume
     } else {
@@ -32692,6 +32721,28 @@ mod tests {
         assert!(status.has_completed_checkpoint);
         assert_eq!(status.completed_indexed_docs, Some(0));
         assert_eq!(status.completed_exact_totals, Some((0, 0)));
+    }
+
+    #[test]
+    fn matching_lexical_rebuild_state_status_if_present_skips_db_state_without_checkpoint() {
+        let tmp = TempDir::new().unwrap();
+        let index_path = tmp.path().join("index");
+        fs::create_dir_all(&index_path).unwrap();
+        let load_current_db_state_called = std::cell::Cell::new(false);
+
+        let status = matching_lexical_rebuild_state_status_if_present(&index_path, || {
+            load_current_db_state_called.set(true);
+            Ok(LexicalRebuildDbState {
+                db_path: "unused.db".to_string(),
+                total_conversations: 1,
+                total_messages: 0,
+                storage_fingerprint: "content-v1:1:1:1".to_string(),
+            })
+        })
+        .unwrap();
+
+        assert_eq!(status, MatchingLexicalRebuildStateStatus::default());
+        assert!(!load_current_db_state_called.get());
     }
 
     #[test]
