@@ -968,8 +968,8 @@ dependencies = [
  "franken-agent-detection",
  "frankensearch",
  "fs2",
- "fsqlite 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
+ "fsqlite 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
  "ftui",
  "ftui-extras",
  "ftui-runtime",
@@ -2167,16 +2167,16 @@ dependencies = [
 [[package]]
 name = "fsqlite"
 version = "0.1.2"
-source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e#5eabd23e79c5ab5ba36edebccbbb79b923e1cd5f"
+source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f#266dc98fddf84e4c27b84b11454e568a203abd8a"
 dependencies = [
- "fsqlite-core 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-ext-fts5 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-ext-json 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-ext-rtree 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-parser 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-vfs 0.1.3 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
+ "fsqlite-core 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-ext-fts5 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-ext-json 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-ext-rtree 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-parser 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-vfs 0.1.3 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
 ]
 
 [[package]]
@@ -2197,9 +2197,9 @@ dependencies = [
 [[package]]
 name = "fsqlite-ast"
 version = "0.1.2"
-source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e#5eabd23e79c5ab5ba36edebccbbb79b923e1cd5f"
+source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f#266dc98fddf84e4c27b84b11454e568a203abd8a"
 dependencies = [
- "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
+ "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
 ]
 
 [[package]]
@@ -2213,13 +2213,13 @@ dependencies = [
 [[package]]
 name = "fsqlite-btree"
 version = "0.1.2"
-source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e#5eabd23e79c5ab5ba36edebccbbb79b923e1cd5f"
+source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f#266dc98fddf84e4c27b84b11454e568a203abd8a"
 dependencies = [
  "foldhash 0.2.0",
- "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-func 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-pager 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
+ "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-func 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-pager 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
  "hashbrown 0.14.5",
  "serde",
  "smallvec",
@@ -2247,29 +2247,29 @@ dependencies = [
 [[package]]
 name = "fsqlite-core"
 version = "0.1.2"
-source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e#5eabd23e79c5ab5ba36edebccbbb79b923e1cd5f"
+source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f#266dc98fddf84e4c27b84b11454e568a203abd8a"
 dependencies = [
  "asupersync",
  "blake3",
  "foldhash 0.2.0",
- "fsqlite-ast 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-btree 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-ext-fts5 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-ext-icu 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-ext-json 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-ext-misc 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-ext-rtree 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-func 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-mvcc 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-observability 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-pager 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-parser 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-planner 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-vdbe 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-vfs 0.1.3 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-wal 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
+ "fsqlite-ast 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-btree 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-ext-fts5 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-ext-icu 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-ext-json 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-ext-misc 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-ext-rtree 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-func 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-mvcc 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-observability 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-pager 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-parser 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-planner 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-vdbe 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-vfs 0.1.3 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-wal 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
  "hashbrown 0.14.5",
  "itoa",
  "lazy_static",
@@ -2325,7 +2325,7 @@ dependencies = [
 [[package]]
 name = "fsqlite-error"
 version = "0.1.2"
-source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e#5eabd23e79c5ab5ba36edebccbbb79b923e1cd5f"
+source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f#266dc98fddf84e4c27b84b11454e568a203abd8a"
 dependencies = [
  "thiserror 2.0.18",
 ]
@@ -2341,11 +2341,11 @@ dependencies = [
 [[package]]
 name = "fsqlite-ext-fts5"
 version = "0.1.2"
-source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e#5eabd23e79c5ab5ba36edebccbbb79b923e1cd5f"
+source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f#266dc98fddf84e4c27b84b11454e568a203abd8a"
 dependencies = [
- "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-func 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
+ "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-func 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
  "smallvec",
  "tracing",
 ]
@@ -2365,11 +2365,11 @@ dependencies = [
 [[package]]
 name = "fsqlite-ext-icu"
 version = "0.1.2"
-source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e#5eabd23e79c5ab5ba36edebccbbb79b923e1cd5f"
+source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f#266dc98fddf84e4c27b84b11454e568a203abd8a"
 dependencies = [
- "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-func 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
+ "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-func 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
  "tracing",
 ]
 
@@ -2387,11 +2387,11 @@ dependencies = [
 [[package]]
 name = "fsqlite-ext-json"
 version = "0.1.2"
-source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e#5eabd23e79c5ab5ba36edebccbbb79b923e1cd5f"
+source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f#266dc98fddf84e4c27b84b11454e568a203abd8a"
 dependencies = [
- "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-func 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
+ "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-func 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
  "json5",
  "serde_json",
 ]
@@ -2411,11 +2411,11 @@ dependencies = [
 [[package]]
 name = "fsqlite-ext-misc"
 version = "0.1.2"
-source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e#5eabd23e79c5ab5ba36edebccbbb79b923e1cd5f"
+source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f#266dc98fddf84e4c27b84b11454e568a203abd8a"
 dependencies = [
- "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-func 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
+ "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-func 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
  "getrandom 0.2.17",
  "rand 0.8.6",
  "tracing",
@@ -2437,11 +2437,11 @@ dependencies = [
 [[package]]
 name = "fsqlite-ext-rtree"
 version = "0.1.2"
-source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e#5eabd23e79c5ab5ba36edebccbbb79b923e1cd5f"
+source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f#266dc98fddf84e4c27b84b11454e568a203abd8a"
 dependencies = [
- "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-func 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
+ "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-func 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
 ]
 
 [[package]]
@@ -2457,11 +2457,11 @@ dependencies = [
 [[package]]
 name = "fsqlite-func"
 version = "0.1.2"
-source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e#5eabd23e79c5ab5ba36edebccbbb79b923e1cd5f"
+source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f#266dc98fddf84e4c27b84b11454e568a203abd8a"
 dependencies = [
  "chrono",
- "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
+ "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
  "tracing",
 ]
 
@@ -2479,19 +2479,19 @@ dependencies = [
 [[package]]
 name = "fsqlite-mvcc"
 version = "0.1.2"
-source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e#5eabd23e79c5ab5ba36edebccbbb79b923e1cd5f"
+source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f#266dc98fddf84e4c27b84b11454e568a203abd8a"
 dependencies = [
  "asupersync",
  "blake3",
  "crc32c",
  "crossbeam-epoch",
- "fsqlite-btree 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-observability 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-pager 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-vfs 0.1.3 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-wal 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
+ "fsqlite-btree 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-observability 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-pager 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-vfs 0.1.3 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-wal 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
  "nix 0.29.0",
  "parking_lot",
  "serde",
@@ -2529,9 +2529,9 @@ dependencies = [
 [[package]]
 name = "fsqlite-observability"
 version = "0.1.2"
-source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e#5eabd23e79c5ab5ba36edebccbbb79b923e1cd5f"
+source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f#266dc98fddf84e4c27b84b11454e568a203abd8a"
 dependencies = [
- "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
+ "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
  "parking_lot",
  "serde",
  "tracing",
@@ -2551,18 +2551,18 @@ dependencies = [
 [[package]]
 name = "fsqlite-pager"
 version = "0.1.2"
-source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e#5eabd23e79c5ab5ba36edebccbbb79b923e1cd5f"
+source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f#266dc98fddf84e4c27b84b11454e568a203abd8a"
 dependencies = [
  "argon2",
  "bumpalo",
  "chacha20poly1305",
  "dashmap",
  "foldhash 0.2.0",
- "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-observability 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-vfs 0.1.3 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-wal 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
+ "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-observability 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-vfs 0.1.3 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-wal 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
  "hashbrown 0.14.5",
  "parking_lot",
  "smallvec",
@@ -2595,11 +2595,11 @@ dependencies = [
 [[package]]
 name = "fsqlite-parser"
 version = "0.1.2"
-source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e#5eabd23e79c5ab5ba36edebccbbb79b923e1cd5f"
+source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f#266dc98fddf84e4c27b84b11454e568a203abd8a"
 dependencies = [
- "fsqlite-ast 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
+ "fsqlite-ast 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
  "hashbrown 0.14.5",
  "memchr",
  "tracing",
@@ -2621,13 +2621,13 @@ dependencies = [
 [[package]]
 name = "fsqlite-planner"
 version = "0.1.2"
-source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e#5eabd23e79c5ab5ba36edebccbbb79b923e1cd5f"
+source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f#266dc98fddf84e4c27b84b11454e568a203abd8a"
 dependencies = [
  "blake3",
- "fsqlite-ast 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-parser 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
+ "fsqlite-ast 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-parser 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
  "lru 0.16.4",
  "serde",
  "serde_json",
@@ -2655,12 +2655,12 @@ dependencies = [
 [[package]]
 name = "fsqlite-types"
 version = "0.1.2"
-source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e#5eabd23e79c5ab5ba36edebccbbb79b923e1cd5f"
+source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f#266dc98fddf84e4c27b84b11454e568a203abd8a"
 dependencies = [
  "asupersync",
  "bitflags 2.11.1",
  "blake3",
- "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
+ "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
  "memchr",
  "parking_lot",
  "serde",
@@ -2691,19 +2691,19 @@ dependencies = [
 [[package]]
 name = "fsqlite-vdbe"
 version = "0.1.2"
-source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e#5eabd23e79c5ab5ba36edebccbbb79b923e1cd5f"
+source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f#266dc98fddf84e4c27b84b11454e568a203abd8a"
 dependencies = [
  "asupersync",
  "crossbeam-deque",
- "fsqlite-ast 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-btree 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-func 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-mvcc 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-pager 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-parser 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-wal 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
+ "fsqlite-ast 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-btree 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-func 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-mvcc 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-pager 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-parser 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-wal 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
  "hashbrown 0.14.5",
  "smallvec",
  "tempfile",
@@ -2735,13 +2735,13 @@ dependencies = [
 [[package]]
 name = "fsqlite-vfs"
 version = "0.1.3"
-source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e#5eabd23e79c5ab5ba36edebccbbb79b923e1cd5f"
+source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f#266dc98fddf84e4c27b84b11454e568a203abd8a"
 dependencies = [
  "advisory-lock",
  "asupersync",
- "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-observability 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
+ "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-observability 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
  "libc",
  "nix 0.29.0",
  "pollster",
@@ -2769,14 +2769,14 @@ dependencies = [
 [[package]]
 name = "fsqlite-wal"
 version = "0.1.2"
-source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e#5eabd23e79c5ab5ba36edebccbbb79b923e1cd5f"
+source = "git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f#266dc98fddf84e4c27b84b11454e568a203abd8a"
 dependencies = [
  "asupersync",
  "blake3",
  "crc32c",
- "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
- "fsqlite-vfs 0.1.3 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=5eabd23e)",
+ "fsqlite-error 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-types 0.1.2 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
+ "fsqlite-vfs 0.1.3 (git+https://github.com/Dicklesworthstone/frankensqlite?rev=266dc98f)",
  "parking_lot",
  "serde",
  "tracing",
