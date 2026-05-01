@@ -7828,6 +7828,86 @@ impl StreamingByteLimiter {
     }
 }
 
+#[derive(Debug)]
+struct LexicalRebuildReservationOrderState {
+    next_sequence: u64,
+    closed: bool,
+}
+
+#[derive(Debug)]
+struct LexicalRebuildReservationOrder {
+    state: Mutex<LexicalRebuildReservationOrderState>,
+    cv: Condvar,
+}
+
+impl LexicalRebuildReservationOrder {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(LexicalRebuildReservationOrderState {
+                next_sequence: 0,
+                closed: false,
+            }),
+            cv: Condvar::new(),
+        }
+    }
+
+    fn wait_for_turn(&self, sequence: u64) -> Result<()> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if state.closed {
+                return Err(anyhow::anyhow!(
+                    "lexical rebuild reservation order closed while waiting for sequence {}",
+                    sequence
+                ));
+            }
+            if sequence < state.next_sequence {
+                return Err(anyhow::anyhow!(
+                    "lexical rebuild page sequence {} tried to reserve after sequence {}",
+                    sequence,
+                    state.next_sequence
+                ));
+            }
+            if sequence == state.next_sequence {
+                return Ok(());
+            }
+            state = self.cv.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    fn finish_turn(&self, sequence: u64) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.next_sequence == sequence {
+            state.next_sequence = state.next_sequence.saturating_add(1);
+        }
+        self.cv.notify_all();
+    }
+
+    fn close(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.closed = true;
+        self.cv.notify_all();
+    }
+}
+
+fn acquire_ordered_lexical_rebuild_page_budget(
+    reservation_order: &LexicalRebuildReservationOrder,
+    flow_limiter: &StreamingByteLimiter,
+    sequence: u64,
+    page_message_bytes: usize,
+) -> Result<(usize, Duration, bool)> {
+    reservation_order.wait_for_turn(sequence)?;
+    match flow_limiter.acquire_with_wait(page_message_bytes) {
+        Ok(acquired) => {
+            reservation_order.finish_turn(sequence);
+            Ok(acquired)
+        }
+        Err(err) => {
+            reservation_order.close();
+            Err(err)
+        }
+    }
+}
+
 fn conversation_batch_footprint(conv: &NormalizedConversation) -> (usize, usize) {
     let message_count = conv.messages.len();
     let char_count = conv.messages.iter().map(|msg| msg.content.len()).sum();
@@ -10951,6 +11031,7 @@ fn prepare_lexical_rebuild_page_work(
     storage: &mut FrankenStorage,
     source_map: &HashMap<String, (SourceKind, Option<String>)>,
     flow_limiter: &StreamingByteLimiter,
+    reservation_order: &LexicalRebuildReservationOrder,
     producer_telemetry: &LexicalRebuildProducerTelemetry,
     lexical_rebuild_worker_pool: Option<&ThreadPool>,
     work: LexicalRebuildPagePrepWork,
@@ -11024,8 +11105,13 @@ fn prepare_lexical_rebuild_page_work(
         .iter()
         .map(|packet| packet.message_count)
         .sum::<usize>();
-    let (reserved_bytes, budget_wait_duration, waited_for_budget) = flow_limiter
-        .acquire_with_wait(page_message_bytes)
+    let (reserved_bytes, budget_wait_duration, waited_for_budget) =
+        acquire_ordered_lexical_rebuild_page_budget(
+            reservation_order,
+            flow_limiter,
+            sequence,
+            page_message_bytes,
+        )
         .with_context(|| {
             format!(
                 "acquiring lexical rebuild pipeline byte budget for ordered page sequence {}",
@@ -11089,6 +11175,7 @@ fn spawn_lexical_rebuild_page_prep_workers(
     work_rx: Receiver<LexicalRebuildPagePrepWork>,
     result_tx: Sender<LexicalRebuildPagePrepResult>,
     flow_limiter: Arc<StreamingByteLimiter>,
+    reservation_order: Arc<LexicalRebuildReservationOrder>,
     producer_telemetry: Arc<LexicalRebuildProducerTelemetry>,
     lexical_rebuild_worker_pool: Option<Arc<ThreadPool>>,
 ) -> Result<Vec<JoinHandle<()>>> {
@@ -11100,6 +11187,7 @@ fn spawn_lexical_rebuild_page_prep_workers(
             let worker_rx = work_rx.clone();
             let worker_result_tx = result_tx.clone();
             let worker_flow_limiter = Arc::clone(&flow_limiter);
+            let worker_reservation_order = Arc::clone(&reservation_order);
             let worker_producer_telemetry = Arc::clone(&producer_telemetry);
             let worker_pool = lexical_rebuild_worker_pool.clone();
             let worker_dispatch = tracing_dispatch.clone();
@@ -11131,6 +11219,7 @@ fn spawn_lexical_rebuild_page_prep_workers(
                                 &mut storage,
                                 worker_source_map.as_ref(),
                                 worker_flow_limiter.as_ref(),
+                                worker_reservation_order.as_ref(),
                                 worker_producer_telemetry.as_ref(),
                                 worker_pool.as_deref(),
                                 work,
@@ -11142,11 +11231,13 @@ fn spawn_lexical_rebuild_page_prep_workers(
                                         .send(LexicalRebuildPagePrepResult::Prepared(prepared))
                                         .is_err()
                                     {
+                                        worker_reservation_order.close();
                                         worker_flow_limiter.release(reserved_bytes);
                                         break;
                                     }
                                 }
                                 Err(err) => {
+                                    worker_reservation_order.close();
                                     let _ = worker_result_tx.send(LexicalRebuildPagePrepResult::Error {
                                         sequence,
                                         error: format!("{err:#}"),
@@ -11291,6 +11382,7 @@ fn spawn_lexical_rebuild_packet_producer(
             log_prep_step("load_resume_cursor", &mut prep_step_started);
 
             let page_prep_worker_count = lexical_rebuild_page_prep_worker_parallelism();
+            let reservation_order = Arc::new(LexicalRebuildReservationOrder::new());
             let (work_tx, work_rx) = bounded::<LexicalRebuildPagePrepWork>(page_prep_worker_count);
             let (result_tx, result_rx) =
                 bounded::<LexicalRebuildPagePrepResult>(page_prep_worker_count);
@@ -11302,6 +11394,7 @@ fn spawn_lexical_rebuild_packet_producer(
                 work_rx,
                 result_tx,
                 Arc::clone(&flow_limiter),
+                Arc::clone(&reservation_order),
                 Arc::clone(&producer_telemetry),
                 lexical_rebuild_worker_pool.clone(),
             ) {
@@ -11544,6 +11637,7 @@ fn spawn_lexical_rebuild_packet_producer(
                             Err(TrySendError::Full(message)) => {
                                 let handoff_wait_started = Instant::now();
                                 if tx.send(message).is_err() {
+                                    reservation_order.close();
                                     flow_limiter.release(reserved_bytes);
                                     release_completed_lexical_rebuild_pages(
                                         &mut completed_pages,
@@ -11557,6 +11651,7 @@ fn spawn_lexical_rebuild_packet_producer(
                                     .record_handoff_wait(handoff_wait_started.elapsed());
                             }
                             Err(TrySendError::Disconnected(_message)) => {
+                                reservation_order.close();
                                 flow_limiter.release(reserved_bytes);
                                 release_completed_lexical_rebuild_pages(
                                     &mut completed_pages,
@@ -11659,6 +11754,7 @@ fn spawn_lexical_rebuild_packet_producer(
                                     &prepared.page,
                                     flow_limiter.as_ref(),
                                 );
+                                reservation_order.close();
                                 release_completed_lexical_rebuild_pages(
                                     &mut completed_pages,
                                     flow_limiter.as_ref(),
@@ -11676,6 +11772,7 @@ fn spawn_lexical_rebuild_packet_producer(
                                     &previous,
                                     flow_limiter.as_ref(),
                                 );
+                                reservation_order.close();
                                 release_completed_lexical_rebuild_pages(
                                     &mut completed_pages,
                                     flow_limiter.as_ref(),
@@ -11698,6 +11795,7 @@ fn spawn_lexical_rebuild_packet_producer(
                             );
                         }
                         Ok(LexicalRebuildPagePrepResult::Error { sequence, error }) => {
+                            reservation_order.close();
                             release_completed_lexical_rebuild_pages(
                                 &mut completed_pages,
                                 flow_limiter.as_ref(),
@@ -11709,6 +11807,7 @@ fn spawn_lexical_rebuild_packet_producer(
                             ));
                         }
                         Err(_) => {
+                            reservation_order.close();
                             release_completed_lexical_rebuild_pages(
                                 &mut completed_pages,
                                 flow_limiter.as_ref(),
@@ -11723,6 +11822,9 @@ fn spawn_lexical_rebuild_packet_producer(
                 Ok(())
             })();
 
+            if producer_result.is_err() {
+                reservation_order.close();
+            }
             drop(work_tx);
             drop(result_rx);
             for worker_handle in worker_handles {
@@ -23938,6 +24040,49 @@ mod tests {
         assert_eq!(limiter.max_bytes_in_flight(), 128);
         assert_eq!(result_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 64);
         limiter.release(first);
+        waiter.join().unwrap();
+    }
+
+    #[test]
+    fn lexical_rebuild_reservation_order_keeps_later_pages_from_spending_budget_first() {
+        let order = Arc::new(LexicalRebuildReservationOrder::new());
+        let limiter = Arc::new(StreamingByteLimiter::new(64));
+        let (ready_tx, ready_rx) = bounded(1);
+        let (result_tx, result_rx) = bounded(1);
+        let waiter = {
+            let order = order.clone();
+            let limiter = limiter.clone();
+            thread::spawn(move || {
+                ready_tx.send(()).unwrap();
+                let (reserved, _, _) =
+                    acquire_ordered_lexical_rebuild_page_budget(&order, &limiter, 1, 64).unwrap();
+                result_tx.send(reserved).unwrap();
+            })
+        };
+
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(
+            result_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "sequence 1 must wait even though the byte limiter is empty"
+        );
+        assert_eq!(
+            limiter.bytes_in_flight(),
+            0,
+            "later pages must not reserve bytes before earlier sequences"
+        );
+
+        let (first, _, _) =
+            acquire_ordered_lexical_rebuild_page_budget(&order, &limiter, 0, 1).unwrap();
+        assert_eq!(first, 1);
+        assert_eq!(limiter.bytes_in_flight(), 1);
+        assert!(
+            result_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "sequence 1 should still respect normal byte capacity after order opens"
+        );
+
+        limiter.release(first);
+        assert_eq!(result_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 64);
+        limiter.release(64);
         waiter.join().unwrap();
     }
 
