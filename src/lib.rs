@@ -8984,15 +8984,40 @@ fn resolve_field_mask(
             .as_ref()
             .is_some_and(|field_list| field_list.iter().any(|f| f == "title"));
 
-    let needs_content = wants_content || wants_snippet;
-    let allows_cache = needs_content;
-    let preview_content_limit = if needs_content {
+    let needs_content_for_rendering = wants_content || wants_snippet;
+    let allows_cache = needs_content_for_rendering;
+    let preview_content_limit = if needs_content_for_rendering {
         max_content_length.filter(|max_chars| *max_chars <= 400)
     } else {
         None
     };
-    FieldMask::new(needs_content, wants_snippet, wants_title, allows_cache)
+    FieldMask::new(wants_content, wants_snippet, wants_title, allows_cache)
         .with_preview_content_limit(preview_content_limit)
+}
+
+#[cfg(test)]
+mod field_mask_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn snippet_projection_does_not_materialize_content_field() {
+        let fields = Some(vec!["snippet".to_string()]);
+        let mask = resolve_field_mask(&fields, None, Some(RobotFormat::Json), None);
+
+        assert!(mask.wants_snippet());
+        assert!(!mask.needs_content());
+        assert!(mask.allows_cache());
+    }
+
+    #[test]
+    fn content_projection_materializes_content_field() {
+        let fields = Some(vec!["content".to_string()]);
+        let mask = resolve_field_mask(&fields, None, Some(RobotFormat::Json), None);
+
+        assert!(!mask.wants_snippet());
+        assert!(mask.needs_content());
+        assert!(mask.allows_cache());
+    }
 }
 
 /// Filter a search hit to only include the requested fields

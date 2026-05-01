@@ -2959,6 +2959,18 @@ fn should_try_wildcard_fallback(
     returned_hits < effective_sparse_threshold
 }
 
+fn snippet_from_preview_without_full_content(
+    field_mask: FieldMask,
+    stored_preview: &str,
+    query: &str,
+) -> Option<String> {
+    if field_mask.needs_content() || !field_mask.wants_snippet() || stored_preview.is_empty() {
+        return None;
+    }
+
+    cached_prefix_snippet(stored_preview, query, 160)
+}
+
 impl SearchClient {
     pub fn open(index_path: &Path, db_path: Option<&Path>) -> Result<Option<Self>> {
         Self::open_with_options(index_path, db_path, SearchClientOptions::default())
@@ -5498,6 +5510,7 @@ impl SearchClient {
             workspace_original: Option<String>,
             created_at: Option<i64>,
             line_number: Option<usize>,
+            stored_preview_snippet: Option<String>,
             source_id: String,
             conversation_id: Option<i64>,
             raw_origin_kind: Option<String>,
@@ -5533,17 +5546,6 @@ impl SearchClient {
         let q: Box<dyn Query> = fs_cass_build_tantivy_query(raw_query, &fs_filters, fields);
 
         let prefix_only = is_prefix_only(sanitized_query);
-        let snippet_generator = if prefix_only || !wants_snippet {
-            None
-        } else {
-            let snippet_cfg = FsSnippetConfig {
-                max_chars: 160,
-                highlight_prefix: "<b>".to_string(),
-                highlight_postfix: "</b>".to_string(),
-            };
-            fs_try_build_snippet_generator(&searcher, &*q, fields.content, &snippet_cfg)
-        };
-
         let top_docs = fs_execute_query_with_offset(&searcher, &*q, limit, offset)?;
         let tantivy_total_count = top_docs.total_count;
         let query_match_type = dominant_match_type(sanitized_query);
@@ -5572,6 +5574,11 @@ impl SearchClient {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            let stored_preview_snippet = snippet_from_preview_without_full_content(
+                field_mask,
+                &stored_preview,
+                sanitized_query,
+            );
             let agent = doc
                 .get_first(fields.agent)
                 .and_then(|v| v.as_str())
@@ -5630,6 +5637,7 @@ impl SearchClient {
                     .and_then(|line| i64::try_from(line).ok())
                 && stored_content.is_empty()
                 && !preview_satisfies_bounded_content
+                && stored_preview_snippet.is_none()
             {
                 if let Some(conversation_id) = conversation_id {
                     missing_exact_content_keys.push((conversation_id, line_idx));
@@ -5654,6 +5662,7 @@ impl SearchClient {
                 workspace_original,
                 created_at,
                 line_number,
+                stored_preview_snippet,
                 source_id,
                 conversation_id,
                 raw_origin_kind,
@@ -5670,6 +5679,21 @@ impl SearchClient {
             )?
         } else {
             (HashMap::new(), HashMap::new())
+        };
+        let needs_tantivy_snippet_generator = wants_snippet
+            && !prefix_only
+            && pending_hits
+                .iter()
+                .any(|pending| pending.stored_preview_snippet.is_none());
+        let snippet_generator = if needs_tantivy_snippet_generator {
+            let snippet_cfg = FsSnippetConfig {
+                max_chars: 160,
+                highlight_prefix: "<b>".to_string(),
+                highlight_postfix: "</b>".to_string(),
+            };
+            fs_try_build_snippet_generator(&searcher, &*q, fields.content, &snippet_cfg)
+        } else {
+            None
         };
         let mut hits = Vec::with_capacity(pending_hits.len());
         for pending in pending_hits {
@@ -5702,7 +5726,9 @@ impl SearchClient {
                 pending.stored_preview.clone()
             };
             let snippet = if wants_snippet {
-                if let Some(r#gen) = &snippet_generator {
+                if let Some(snippet) = pending.stored_preview_snippet.clone() {
+                    snippet
+                } else if let Some(r#gen) = &snippet_generator {
                     let rendered = if !pending.stored_content.is_empty() {
                         fs_render_snippet_html(r#gen, &pending.doc, "<b>", "</b>")
                     } else if !effective_content.is_empty() {
@@ -12996,6 +13022,37 @@ mod tests {
         assert!(
             should_try_wildcard_fallback(1, 0, 0, 3),
             "limit zero preserves the legacy sparse-threshold semantics"
+        );
+    }
+
+    #[test]
+    fn snippet_preview_fast_path_requires_snippet_only_match() {
+        let snippet_only = FieldMask::new(false, true, false, false);
+        let snippet = snippet_from_preview_without_full_content(
+            snippet_only,
+            "migration checks the database constraint before writing",
+            "database",
+        )
+        .expect("preview should satisfy a snippet-only request when it contains the query");
+        assert!(snippet.contains("**database**"));
+
+        assert!(
+            snippet_from_preview_without_full_content(
+                FieldMask::FULL,
+                "migration checks the database constraint before writing",
+                "database",
+            )
+            .is_none(),
+            "full-content requests must keep the sqlite hydration path"
+        );
+        assert!(
+            snippet_from_preview_without_full_content(
+                snippet_only,
+                "migration checks constraints before writing",
+                "database",
+            )
+            .is_none(),
+            "snippet-only requests hydrate when the preview cannot show the match"
         );
     }
 
