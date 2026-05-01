@@ -5287,23 +5287,14 @@ impl SearchClient {
                 }
             }
 
-            for chunk in unique_exact_keys.chunks(CHUNK_SIZE) {
-                let mut sql = String::from(
-                    "SELECT c.id, m.idx, m.content
-                     FROM messages m
-                     JOIN conversations c ON m.conversation_id = c.id
-                     WHERE ",
+            for (conversation_id, line_idx) in unique_exact_keys {
+                let sql = format!(
+                    "SELECT m.conversation_id, m.idx, m.content
+                     FROM messages m INDEXED BY sqlite_autoindex_messages_1
+                     WHERE m.conversation_id = {conversation_id} AND m.idx = {line_idx}
+                     LIMIT 1"
                 );
-                let mut params = Vec::with_capacity(chunk.len().saturating_mul(2));
-                for (idx, (conversation_id, line_idx)) in chunk.iter().enumerate() {
-                    if idx > 0 {
-                        sql.push_str(" OR ");
-                    }
-                    sql.push_str("(c.id = ? AND m.idx = ?)");
-                    params.push(ParamValue::from(*conversation_id));
-                    params.push(ParamValue::from(*line_idx));
-                }
-
+                let params: [ParamValue; 0] = [];
                 let rows: Vec<(i64, i64, String)> =
                     franken_query_map_collect_retry(conn, &sql, &params, |row| {
                         Ok((row.get_typed(0)?, row.get_typed(1)?, row.get_typed(2)?))
@@ -5316,8 +5307,6 @@ impl SearchClient {
         }
 
         if !fallback_keys.is_empty() {
-            let normalized_source_sql =
-                normalized_search_source_id_sql_expr("c.source_id", "s.kind", "c.origin_host");
             let mut unique_fallback_keys = Vec::with_capacity(fallback_keys.len());
             let mut seen = HashSet::with_capacity(fallback_keys.len());
             for key in fallback_keys {
@@ -5326,39 +5315,102 @@ impl SearchClient {
                 }
             }
 
-            for chunk in unique_fallback_keys.chunks(CHUNK_SIZE) {
-                let mut sql = format!(
-                    "SELECT {normalized_source_sql}, c.source_path, m.idx, m.content
-                     FROM messages m
-                     JOIN conversations c ON m.conversation_id = c.id
-                     LEFT JOIN sources s ON c.source_id = s.id
-                     WHERE "
-                );
-                let mut params = Vec::with_capacity(chunk.len().saturating_mul(3));
-                for (idx, (source_id, source_path, line_idx)) in chunk.iter().enumerate() {
-                    if idx > 0 {
-                        sql.push_str(" OR ");
-                    }
-                    sql.push_str(&format!(
-                        "({normalized_source_sql} = ? AND c.source_path = ? AND m.idx = ?)"
-                    ));
-                    params.push(ParamValue::from(source_id.clone()));
-                    params.push(ParamValue::from(source_path.clone()));
-                    params.push(ParamValue::from(*line_idx));
+            let mut unique_source_paths = Vec::with_capacity(unique_fallback_keys.len());
+            let mut seen_source_paths = HashSet::with_capacity(unique_fallback_keys.len());
+            for (_, source_path, _) in &unique_fallback_keys {
+                if seen_source_paths.insert(source_path.clone()) {
+                    unique_source_paths.push(source_path.clone());
                 }
+            }
 
-                let rows: Vec<(String, String, i64, String)> =
+            let mut conversations_by_key: HashMap<(String, String), Vec<i64>> = HashMap::new();
+            for chunk in unique_source_paths.chunks(CHUNK_SIZE) {
+                let placeholders = sql_placeholders(chunk.len());
+                let sql = format!(
+                    "SELECT c.id,
+                            c.source_path,
+                            COALESCE(c.source_id, ''),
+                            COALESCE(c.origin_host, ''),
+                            COALESCE(s.kind, '')
+                     FROM conversations c
+                     LEFT JOIN sources s ON c.source_id = s.id
+                     WHERE c.source_path IN ({placeholders})
+                     ORDER BY c.id"
+                );
+                let params = chunk
+                    .iter()
+                    .map(|source_path| ParamValue::from(source_path.clone()))
+                    .collect::<Vec<_>>();
+                let rows: Vec<(i64, String, String, String, String)> =
                     franken_query_map_collect_retry(conn, &sql, &params, |row| {
                         Ok((
                             row.get_typed(0)?,
                             row.get_typed(1)?,
                             row.get_typed(2)?,
                             row.get_typed(3)?,
+                            row.get_typed(4)?,
                         ))
                     })?;
 
-                for (source_id, source_path, line_idx, content) in rows {
-                    hydrated_fallback.insert((source_id, source_path, line_idx), content);
+                for (conversation_id, source_path, raw_source_id, origin_host, origin_kind) in rows
+                {
+                    let normalized_source_id = normalized_search_hit_source_id_parts(
+                        &raw_source_id,
+                        &origin_kind,
+                        (!origin_host.trim().is_empty()).then_some(origin_host.as_str()),
+                    );
+                    conversations_by_key
+                        .entry((normalized_source_id, source_path))
+                        .or_default()
+                        .push(conversation_id);
+                }
+            }
+
+            let mut message_requests = Vec::new();
+            let mut fallback_keys_by_exact: HashMap<
+                TantivyContentExactKey,
+                Vec<TantivyContentFallbackKey>,
+            > = HashMap::new();
+            let mut seen_message_requests = HashSet::new();
+            for (source_id, source_path, line_idx) in &unique_fallback_keys {
+                let key = (source_id.clone(), source_path.clone());
+                let Some(conversation_ids) = conversations_by_key.get(&key) else {
+                    continue;
+                };
+                for &conversation_id in conversation_ids {
+                    let exact_key = (conversation_id, *line_idx);
+                    if seen_message_requests.insert(exact_key) {
+                        message_requests.push(exact_key);
+                    }
+                    fallback_keys_by_exact.entry(exact_key).or_default().push((
+                        source_id.clone(),
+                        source_path.clone(),
+                        *line_idx,
+                    ));
+                }
+            }
+
+            for (conversation_id, line_idx) in message_requests {
+                let sql = format!(
+                    "SELECT m.conversation_id, m.idx, m.content
+                     FROM messages m INDEXED BY sqlite_autoindex_messages_1
+                     WHERE m.conversation_id = {conversation_id} AND m.idx = {line_idx}
+                     LIMIT 1"
+                );
+                let params: [ParamValue; 0] = [];
+                let rows: Vec<(i64, i64, String)> =
+                    franken_query_map_collect_retry(conn, &sql, &params, |row| {
+                        Ok((row.get_typed(0)?, row.get_typed(1)?, row.get_typed(2)?))
+                    })?;
+
+                for (conversation_id, line_idx, content) in rows {
+                    if let Some(fallback_keys) =
+                        fallback_keys_by_exact.get(&(conversation_id, line_idx))
+                    {
+                        for fallback_key in fallback_keys {
+                            hydrated_fallback.insert(fallback_key.clone(), content.clone());
+                        }
+                    }
                 }
             }
         }
@@ -10197,6 +10249,76 @@ mod tests {
                 .all(|chunk_size| *chunk_size <= SQLITE_MAX_VARIABLE_NUMBER),
             "every hydration chunk must fit under frankensqlite's bind-variable ceiling"
         );
+    }
+
+    #[test]
+    fn tantivy_fallback_hydration_narrows_by_normalized_source_before_message_lookup() -> Result<()>
+    {
+        let conn = Connection::open(":memory:")?;
+        conn.execute_batch(
+            "CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                source_id TEXT,
+                origin_host TEXT,
+                source_path TEXT NOT NULL
+             );
+             CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                idx INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                UNIQUE(conversation_id, idx)
+             );
+             CREATE TABLE sources (id TEXT PRIMARY KEY, kind TEXT);",
+        )?;
+        conn.execute(
+            "INSERT INTO conversations(id, source_id, origin_host, source_path)
+             VALUES(1, '', 'devbox', '/tmp/shared-fallback.jsonl')",
+        )?;
+        conn.execute(
+            "INSERT INTO conversations(id, source_id, origin_host, source_path)
+             VALUES(2, 'local', NULL, '/tmp/shared-fallback.jsonl')",
+        )?;
+        conn.execute(
+            "INSERT INTO messages(id, conversation_id, idx, content)
+             VALUES(10, 1, 2, 'remote fallback content')",
+        )?;
+        conn.execute(
+            "INSERT INTO messages(id, conversation_id, idx, content)
+             VALUES(20, 2, 2, 'local content must not win')",
+        )?;
+
+        let client = SearchClient {
+            reader: None,
+            sqlite: Mutex::new(Some(SendConnection(conn))),
+            sqlite_path: None,
+            prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
+            last_reload: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
+            warm_tx: None,
+            _warm_handle: None,
+            metrics: Metrics::default(),
+            cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
+            semantic: Mutex::new(None),
+            last_tantivy_total_count: Mutex::new(None),
+        };
+
+        let fallback_key = (
+            "devbox".to_string(),
+            "/tmp/shared-fallback.jsonl".to_string(),
+            2,
+        );
+        let (_, hydrated_fallback) =
+            client.hydrate_tantivy_hit_contents(&[], std::slice::from_ref(&fallback_key))?;
+
+        assert_eq!(
+            hydrated_fallback.get(&fallback_key).map(String::as_str),
+            Some("remote fallback content")
+        );
+
+        Ok(())
     }
 
     #[test]
