@@ -157,26 +157,29 @@ fn hydrate_message_content_by_conversation(
     let mut conversation_ids = wanted_by_conversation.keys().copied().collect::<Vec<_>>();
     conversation_ids.sort_unstable();
     let mut hydrated = HashMap::with_capacity(requests.len());
-    let params: [ParamValue; 0] = [];
 
     for conversation_id in conversation_ids {
+        let Some(wanted_indices) = wanted_by_conversation.get(&conversation_id) else {
+            continue;
+        };
+        let mut wanted_indices = wanted_indices.iter().copied().collect::<Vec<_>>();
+        wanted_indices.sort_unstable();
+        let placeholders = sql_placeholders(wanted_indices.len());
         let sql = format!(
             "SELECT m.conversation_id, m.idx, m.content
              FROM messages m INDEXED BY sqlite_autoindex_messages_1
-             WHERE m.conversation_id = {conversation_id}
+             WHERE m.conversation_id = ? AND m.idx IN ({placeholders})
              ORDER BY m.idx"
         );
+        let mut params = Vec::with_capacity(wanted_indices.len() + 1);
+        params.push(ParamValue::from(conversation_id));
+        params.extend(wanted_indices.iter().copied().map(ParamValue::from));
         let rows: Vec<(i64, i64, String)> =
             franken_query_map_collect_retry(conn, &sql, &params, |row| {
                 Ok((row.get_typed(0)?, row.get_typed(1)?, row.get_typed(2)?))
             })?;
-        let Some(wanted_indices) = wanted_by_conversation.get(&conversation_id) else {
-            continue;
-        };
         for (conversation_id, line_idx, content) in rows {
-            if wanted_indices.contains(&line_idx) {
-                hydrated.insert((conversation_id, line_idx), content);
-            }
+            hydrated.insert((conversation_id, line_idx), content);
         }
     }
 
@@ -10406,6 +10409,51 @@ mod tests {
             hydrated_fallback.get(&fallback_key).map(String::as_str),
             Some("remote fallback content")
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn exact_content_hydration_returns_only_requested_message_indices() -> Result<()> {
+        let conn = Connection::open(":memory:")?;
+        conn.execute_batch(
+            "CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                idx INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                UNIQUE(conversation_id, idx)
+             );",
+        )?;
+
+        for idx in 0..8 {
+            conn.execute_with_params(
+                "INSERT INTO messages(conversation_id, idx, content) VALUES(?1, ?2, ?3)",
+                params![1_i64, idx, format!("conversation one row {idx}")],
+            )?;
+        }
+        conn.execute_with_params(
+            "INSERT INTO messages(conversation_id, idx, content) VALUES(?1, ?2, ?3)",
+            params![2_i64, 0_i64, "conversation two row 0"],
+        )?;
+
+        let hydrated =
+            hydrate_message_content_by_conversation(&conn, &[(1, 6), (1, 2), (2, 0), (1, 99)])?;
+
+        assert_eq!(hydrated.len(), 3);
+        assert_eq!(
+            hydrated.get(&(1, 2)).map(String::as_str),
+            Some("conversation one row 2")
+        );
+        assert_eq!(
+            hydrated.get(&(1, 6)).map(String::as_str),
+            Some("conversation one row 6")
+        );
+        assert_eq!(
+            hydrated.get(&(2, 0)).map(String::as_str),
+            Some("conversation two row 0")
+        );
+        assert!(!hydrated.contains_key(&(1, 99)));
 
         Ok(())
     }
