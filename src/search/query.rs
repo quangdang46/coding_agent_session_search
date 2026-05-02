@@ -2472,7 +2472,7 @@ pub struct CacheStats {
     pub eviction_count: u64,
     /// Approximate bytes used by cache (rough estimate)
     pub approx_bytes: usize,
-    /// Byte cap if set (0 = no byte limit)
+    /// Effective byte cap for cached hits (0 = disabled by explicit operator override)
     pub byte_cap: usize,
 }
 
@@ -2501,15 +2501,16 @@ static CACHE_DEBUG_ENABLED: Lazy<bool> = Lazy::new(|| {
         .unwrap_or(false)
 });
 
-// Optional byte-based cap for cache memory; 0 means no byte limit (entry-based only).
-// Approximate sizing: ~500 bytes per cached hit typical (content/title/snippets).
-// Example: CASS_CACHE_BYTE_CAP=10485760 for approx 10MB limit.
-static CACHE_BYTE_CAP: Lazy<usize> = Lazy::new(|| {
-    dotenvy::var("CASS_CACHE_BYTE_CAP")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(0) // 0 = disabled (entry-based cap only)
+// Byte-based cap for cache memory. Unset defaults to a memory-proportional cap;
+// explicit CASS_CACHE_BYTE_CAP=0 disables the byte guard.
+static CACHE_BYTE_CAP: Lazy<usize> = Lazy::new(|| match dotenvy::var("CASS_CACHE_BYTE_CAP") {
+    Ok(value) => value.parse::<usize>().unwrap_or(0),
+    Err(_) => default_cache_byte_cap(),
 });
+
+const DEFAULT_CACHE_BYTE_CAP_FALLBACK: usize = 64 * 1024 * 1024;
+const DEFAULT_CACHE_BYTE_CAP_MEMORY_FRACTION_DENOMINATOR: u64 = 128;
+const DEFAULT_CACHE_BYTE_CAP_CEILING: u64 = 2 * 1024 * 1024 * 1024;
 
 const CACHE_KEY_VERSION: &str = "1";
 
@@ -2521,6 +2522,21 @@ static WARM_DEBOUNCE_MS: Lazy<u64> = Lazy::new(|| {
         .filter(|v| *v > 0)
         .unwrap_or(120)
 });
+
+fn default_cache_byte_cap() -> usize {
+    default_cache_byte_cap_for_available(available_memory_bytes())
+}
+
+fn default_cache_byte_cap_for_available(available_bytes: Option<u64>) -> usize {
+    let Some(available_bytes) = available_bytes else {
+        return DEFAULT_CACHE_BYTE_CAP_FALLBACK;
+    };
+    let ceiling = usize::try_from(DEFAULT_CACHE_BYTE_CAP_CEILING).unwrap_or(usize::MAX);
+    let budget = available_bytes / DEFAULT_CACHE_BYTE_CAP_MEMORY_FRACTION_DENOMINATOR;
+    let budget = budget.min(DEFAULT_CACHE_BYTE_CAP_CEILING);
+    let budget = usize::try_from(budget).unwrap_or(ceiling);
+    budget.clamp(DEFAULT_CACHE_BYTE_CAP_FALLBACK, ceiling)
+}
 
 #[derive(Clone)]
 struct CachedHit {
@@ -12301,6 +12317,31 @@ mod tests {
         );
         assert!(stats.total_cost <= 2, "should be at or below cap");
         assert!(stats.approx_bytes > 0, "should track bytes used");
+    }
+
+    #[test]
+    fn default_cache_byte_cap_scales_with_available_memory() {
+        let gib = 1024_u64 * 1024 * 1024;
+
+        assert_eq!(
+            default_cache_byte_cap_for_available(None),
+            DEFAULT_CACHE_BYTE_CAP_FALLBACK
+        );
+        assert_eq!(
+            default_cache_byte_cap_for_available(Some(2 * gib)),
+            DEFAULT_CACHE_BYTE_CAP_FALLBACK,
+            "small hosts keep a conservative cache byte budget"
+        );
+        assert_eq!(
+            default_cache_byte_cap_for_available(Some(64 * gib)),
+            512 * 1024 * 1024,
+            "larger hosts get a proportionally larger cache byte budget"
+        );
+        assert_eq!(
+            default_cache_byte_cap_for_available(Some(256 * gib)),
+            usize::try_from(DEFAULT_CACHE_BYTE_CAP_CEILING).unwrap_or(usize::MAX),
+            "large swarm hosts still have a bounded default cache budget"
+        );
     }
 
     #[test]
