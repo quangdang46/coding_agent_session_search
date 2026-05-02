@@ -358,7 +358,12 @@ fn codex_iso_timestamp(ts_ms: u64) -> String {
         .to_rfc3339()
 }
 
-fn make_codex_session(root: &std::path::Path, date_path: &str, filename: &str, content: &str) {
+fn make_codex_session(
+    root: &std::path::Path,
+    date_path: &str,
+    filename: &str,
+    content: &str,
+) -> std::path::PathBuf {
     let sessions = root.join(format!("sessions/{date_path}"));
     fs::create_dir_all(&sessions).unwrap();
     let file = sessions.join(filename);
@@ -401,7 +406,84 @@ fn make_codex_session(root: &std::path::Path, date_path: &str, filename: &str, c
         sample.push_str(&serde_json::to_string(&line).unwrap());
         sample.push('\n');
     }
-    fs::write(file, sample).unwrap();
+    fs::write(&file, sample).unwrap();
+    file
+}
+
+#[test]
+#[serial]
+fn watch_once_indexes_real_session_with_deferred_tantivy_open() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path();
+    let codex_home = home.join(".codex");
+    let data_dir = home.join("cass_data");
+    fs::create_dir_all(&data_dir).unwrap();
+    let _guard_home = EnvGuard::set("HOME", home.to_string_lossy());
+    let _guard_codex = EnvGuard::set("CODEX_HOME", codex_home.to_string_lossy());
+
+    let session_file = make_codex_session(
+        &codex_home,
+        "2025/11/24",
+        "watch-once-lazy.jsonl",
+        "lazywatchprobe",
+    );
+
+    let mut index = base_cmd(home);
+    index
+        .args(["index", "--watch-once"])
+        .arg(&session_file)
+        .args(["--json", "--data-dir"])
+        .arg(&data_dir);
+    let output = index.output().expect("run watch-once index");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "watch-once index should succeed. stdout: {stdout}, stderr: {stderr}"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("index --json should emit valid JSON");
+    assert_eq!(payload.get("success").and_then(|value| value.as_bool()), Some(true));
+    assert!(
+        payload
+            .get("messages")
+            .and_then(|value| value.as_i64())
+            .unwrap_or_default()
+            >= 2,
+        "watch-once should ingest the real session messages; payload: {payload}"
+    );
+    assert!(data_dir.join("index").exists(), "lazy Tantivy open should publish an index");
+
+    let mut search = base_cmd(home);
+    search
+        .args([
+            "search",
+            "lazywatchprobe",
+            "--json",
+            "--data-dir",
+        ])
+        .arg(&data_dir)
+        .args(["--limit", "5", "--mode", "lexical", "--color=never"]);
+    let output = search.output().expect("run search after watch-once index");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "search should find the watch-once indexed session. stdout: {stdout}, stderr: {stderr}"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("search --json should emit valid JSON");
+    let hits = payload["hits"]
+        .as_array()
+        .expect("search JSON should contain hits array");
+    assert!(
+        hits.iter().any(|hit| {
+            hit.get("content")
+                .and_then(|value| value.as_str())
+                .is_some_and(|content| content.contains("lazywatchprobe"))
+        }),
+        "search results should include the watch-once session content; payload: {payload}"
+    );
 }
 
 #[test]
