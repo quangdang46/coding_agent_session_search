@@ -412,26 +412,24 @@ fn make_codex_session(
 
 #[test]
 #[serial]
-fn watch_once_indexes_real_session_with_deferred_tantivy_open() {
+fn watch_once_indexes_real_aider_session_with_deferred_tantivy_open() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path();
-    let codex_home = home.join(".codex");
     let data_dir = home.join("cass_data");
     fs::create_dir_all(&data_dir).unwrap();
     let _guard_home = EnvGuard::set("HOME", home.to_string_lossy());
-    let _guard_codex = EnvGuard::set("CODEX_HOME", codex_home.to_string_lossy());
-
-    let session_file = make_codex_session(
-        &codex_home,
-        "2025/11/24",
-        "watch-once-lazy.jsonl",
-        "lazywatchprobe",
-    );
+    let history_file = home.join(".aider.chat.history.md");
+    fs::write(
+        &history_file,
+        "\n> lazywatchprobe\n\nassistant says lazywatchprobe response\n",
+    )
+    .unwrap();
 
     let mut index = base_cmd(home);
+    index.current_dir(home);
     index
         .args(["index", "--watch-once"])
-        .arg(&session_file)
+        .arg(&history_file)
         .args(["--json", "--data-dir"])
         .arg(&data_dir);
     let output = index.output().expect("run watch-once index");
@@ -443,7 +441,10 @@ fn watch_once_indexes_real_session_with_deferred_tantivy_open() {
     );
     let payload: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("index --json should emit valid JSON");
-    assert_eq!(payload.get("success").and_then(|value| value.as_bool()), Some(true));
+    assert_eq!(
+        payload.get("success").and_then(|value| value.as_bool()),
+        Some(true)
+    );
     assert!(
         payload
             .get("messages")
@@ -452,16 +453,15 @@ fn watch_once_indexes_real_session_with_deferred_tantivy_open() {
             >= 2,
         "watch-once should ingest the real session messages; payload: {payload}"
     );
-    assert!(data_dir.join("index").exists(), "lazy Tantivy open should publish an index");
+    assert!(
+        data_dir.join("index").exists(),
+        "lazy Tantivy open should publish an index"
+    );
 
     let mut search = base_cmd(home);
+    search.current_dir(home);
     search
-        .args([
-            "search",
-            "lazywatchprobe",
-            "--json",
-            "--data-dir",
-        ])
+        .args(["search", "lazywatchprobe", "--json", "--data-dir"])
         .arg(&data_dir)
         .args(["--limit", "5", "--mode", "lexical", "--color=never"]);
     let output = search.output().expect("run search after watch-once index");
