@@ -66,11 +66,16 @@ const DEFAULT_GROWTH_CONSECUTIVE_HEALTHY_TICKS: u32 = 3;
 /// more wasted wakeups on an idle box.
 const DEFAULT_TICK_SECS: u64 = 2;
 
-/// Default process-wide in-flight byte ceiling for responsiveness-governed
-/// maintenance work. The lexical rebuild pipeline's existing default is below
-/// this on ordinary settings, so the cap is mostly a guardrail for explicit
-/// high-throughput tuning.
+/// Fallback process-wide in-flight byte ceiling for responsiveness-governed
+/// maintenance work when memory telemetry is unavailable.
 const DEFAULT_MAX_INFLIGHT_BYTES: usize = 512 * 1024 * 1024;
+
+/// High-memory hosts should be able to keep more batches in flight without
+/// needing manual env tuning. Use a small fraction of currently available RAM,
+/// bounded so laptops keep the old conservative behavior and large servers do
+/// not accidentally reserve unbounded heap.
+const DEFAULT_MAX_INFLIGHT_MEMORY_FRACTION_DENOMINATOR: u64 = 32;
+const DEFAULT_MAX_INFLIGHT_BYTES_CEILING: u64 = 16 * 1024 * 1024 * 1024;
 
 /// Lower bound applied only after scaling a non-zero in-flight byte budget.
 /// This prevents pressure shrinkage from producing tiny queue budgets that
@@ -184,7 +189,7 @@ impl GovernorConfig {
             .max(1);
         let max_inflight_bytes = env_usize("CASS_RESPONSIVENESS_MAX_INFLIGHT_BYTES")
             .filter(|v| *v > 0)
-            .unwrap_or(DEFAULT_MAX_INFLIGHT_BYTES);
+            .unwrap_or_else(default_max_inflight_bytes);
         let min_inflight_bytes = env_usize("CASS_RESPONSIVENESS_MIN_INFLIGHT_BYTES")
             .filter(|v| *v > 0)
             .map(|v| v.min(max_inflight_bytes))
@@ -1326,6 +1331,32 @@ fn env_bool_truthy(key: &str) -> bool {
     }
 }
 
+fn default_max_inflight_bytes() -> usize {
+    default_max_inflight_bytes_for_available(available_memory_bytes())
+}
+
+fn default_max_inflight_bytes_for_available(available_bytes: Option<u64>) -> usize {
+    let Some(available_bytes) = available_bytes else {
+        return DEFAULT_MAX_INFLIGHT_BYTES;
+    };
+    let ceiling = usize::try_from(DEFAULT_MAX_INFLIGHT_BYTES_CEILING).unwrap_or(usize::MAX);
+    let budget = available_bytes / DEFAULT_MAX_INFLIGHT_MEMORY_FRACTION_DENOMINATOR;
+    let budget = budget.min(DEFAULT_MAX_INFLIGHT_BYTES_CEILING);
+    let budget = usize::try_from(budget).unwrap_or(ceiling);
+    budget.clamp(DEFAULT_MAX_INFLIGHT_BYTES, ceiling)
+}
+
+fn available_memory_bytes() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in meminfo.lines() {
+        if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            let kb = rest.split_whitespace().next()?.parse::<u64>().ok()?;
+            return kb.checked_mul(1024);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1539,6 +1570,31 @@ mod tests {
             4 * 1024 * 1024
         );
         assert_eq!(scale_inflight_byte_limit(0, 25, &c), 0);
+    }
+
+    #[test]
+    fn default_inflight_byte_budget_scales_with_available_memory() {
+        let gib = 1024_u64 * 1024 * 1024;
+
+        assert_eq!(
+            default_max_inflight_bytes_for_available(None),
+            DEFAULT_MAX_INFLIGHT_BYTES
+        );
+        assert_eq!(
+            default_max_inflight_bytes_for_available(Some(2 * gib)),
+            DEFAULT_MAX_INFLIGHT_BYTES,
+            "small hosts keep the old conservative floor"
+        );
+        assert_eq!(
+            default_max_inflight_bytes_for_available(Some(256 * gib)),
+            8 * 1024 * 1024 * 1024,
+            "256 GiB hosts can keep materially more work in flight"
+        );
+        assert_eq!(
+            default_max_inflight_bytes_for_available(Some(1024 * gib)),
+            usize::try_from(DEFAULT_MAX_INFLIGHT_BYTES_CEILING).unwrap_or(usize::MAX),
+            "very large hosts are still bounded"
+        );
     }
 
     #[test]

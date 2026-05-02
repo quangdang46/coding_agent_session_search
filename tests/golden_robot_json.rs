@@ -39,7 +39,10 @@ fn cass_cmd(test_home: &std::path::Path) -> Command {
         // Pin data dir so the test never touches the user's real cache.
         .env("XDG_DATA_HOME", test_home)
         .env("HOME", test_home)
-        .env("CASS_IGNORE_SOURCES_CONFIG", "1");
+        .env("CASS_IGNORE_SOURCES_CONFIG", "1")
+        // Keep resource-policy goldens stable across hosts; dynamic default
+        // scaling is covered by responsiveness unit tests.
+        .env("CASS_RESPONSIVENESS_MAX_INFLIGHT_BYTES", "536870912");
     cmd
 }
 
