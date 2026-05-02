@@ -86,6 +86,7 @@ type SqliteFtsHydratedRow = (
 // empty fallback result sets.
 const SQLITE_FTS5_HYDRATE_PARAM_CHUNK: usize = 30_000;
 const SQLITE_MAX_VARIABLE_NUMBER: usize = 32_766;
+const SEARCH_SQLITE_HYDRATION_CACHE_KIB: i64 = 4_096;
 
 // Safety: Rc fields inside Connection are not cloned or shared externally.
 // The Mutex<Option<SendConnection>> in SearchClient ensures exclusive access.
@@ -96,6 +97,21 @@ impl std::ops::Deref for SendConnection {
     fn deref(&self) -> &Connection {
         &self.0
     }
+}
+
+fn open_search_hydration_sqlite(path: &Path, timeout: Duration) -> Result<Connection> {
+    let conn = crate::storage::sqlite::open_franken_raw_readonly_connection_with_timeout(
+        path, timeout,
+    )?;
+    conn.execute("PRAGMA query_only = 1;")
+        .with_context(|| "setting search hydration query_only")?;
+    conn.execute("PRAGMA busy_timeout = 5000;")
+        .with_context(|| "setting search hydration busy_timeout")?;
+    conn.execute(&format!(
+        "PRAGMA cache_size = -{SEARCH_SQLITE_HYDRATION_CACHE_KIB};"
+    ))
+    .with_context(|| "setting search hydration cache_size")?;
+    Ok(conn)
 }
 
 /// NFC-normalize a query string before sanitization so that decomposed
@@ -3126,12 +3142,12 @@ impl SearchClient {
         if guard.is_none()
             && let Some(path) = &self.sqlite_path
         {
-            match crate::storage::sqlite::open_franken_readonly_storage_with_timeout(
+            match open_search_hydration_sqlite(
                 path,
                 std::time::Duration::from_secs(1),
             ) {
-                Ok(storage) => {
-                    *guard = Some(SendConnection(storage.into_raw()));
+                Ok(conn) => {
+                    *guard = Some(SendConnection(conn));
                 }
                 Err(err) => {
                     tracing::debug!(
@@ -10057,6 +10073,15 @@ mod tests {
             .sqlite_guard()
             .context("open sqlite guard for stale generation fixture")?;
         assert!(guard.is_some(), "sqlite guard should open the db");
+        let conn = guard.as_ref().expect("sqlite guard should hold a connection");
+        let no_params: [ParamValue; 0] = [];
+        let cache_size: i64 = conn.query_row_map("PRAGMA cache_size;", &no_params, |row| {
+            row.get_typed(0)
+        })?;
+        assert_eq!(
+            cache_size, -SEARCH_SQLITE_HYDRATION_CACHE_KIB,
+            "search hydration should not inherit the general storage cache profile"
+        );
         drop(guard);
 
         // The read-only open must not rewrite the rebuild-generation marker.
