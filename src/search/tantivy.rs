@@ -433,14 +433,15 @@ pub fn searchable_index_summary(index_path: &Path) -> Result<Option<SearchableIn
         )
     })?;
     ensure_tokenizer(&mut index);
-    let (reader, _fields) =
-        fs_cass_open_search_reader(index_path, FsReloadPolicy::Manual).map_err(map_fs_err)?;
+    let segment_metas = index
+        .searchable_segment_metas()
+        .context("reading searchable segment metadata for Tantivy summary")?;
     Ok(Some(SearchableIndexSummary {
-        docs: reader.searcher().num_docs() as usize,
-        segments: index
-            .searchable_segment_metas()
-            .context("reading searchable segment metadata for Tantivy summary")?
-            .len(),
+        docs: segment_metas
+            .iter()
+            .map(|segment| segment.num_docs() as usize)
+            .sum(),
+        segments: segment_metas.len(),
     }))
 }
 

@@ -6427,6 +6427,81 @@ fn can_skip_absent_explicit_watch_once_index_run(opts: &IndexOptions) -> bool {
     )
 }
 
+fn current_searchable_index_summary_available(index_path: &Path) -> bool {
+    let schema_hash_path = index_path.join("schema_hash.json");
+    let schema_matches = schema_hash_path.exists()
+        && std::fs::read_to_string(&schema_hash_path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+            .and_then(|json| {
+                json.get("schema_hash")
+                    .and_then(|value| value.as_str())
+                    .map(schema_hash_matches)
+            })
+            .unwrap_or(false);
+    schema_matches
+        && matches!(
+            crate::search::tantivy::searchable_index_summary(index_path),
+            Ok(Some(_))
+        )
+}
+
+fn should_skip_unchanged_explicit_watch_once_paths(
+    opts: &IndexOptions,
+    storage: &FrankenStorage,
+    roots: &[(ConnectorKind, ScanRoot)],
+) -> Result<bool> {
+    if opts.watch || opts.full || opts.force_rebuild || opts.semantic || opts.build_hnsw {
+        return Ok(false);
+    }
+
+    let Some(paths) = opts
+        .watch_once_paths
+        .as_ref()
+        .filter(|paths| !paths.is_empty())
+    else {
+        return Ok(false);
+    };
+
+    let triggers = classify_paths(paths.clone(), roots, true);
+    if triggers.is_empty() {
+        return Ok(true);
+    }
+
+    for (_, root, _, _) in triggers {
+        if !explicit_watch_once_root_unchanged_after_last_index(storage, &root)? {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+fn can_skip_unchanged_explicit_watch_once_index_run(
+    opts: &IndexOptions,
+    storage: &FrankenStorage,
+    index_path: &Path,
+) -> Result<bool> {
+    if opts.watch || opts.full || opts.force_rebuild || opts.semantic || opts.build_hnsw {
+        return Ok(false);
+    }
+    if !opts
+        .watch_once_paths
+        .as_ref()
+        .is_some_and(|paths| !paths.is_empty())
+    {
+        return Ok(false);
+    }
+
+    let additional_scan_roots = additional_scan_roots_for_scan_or_watch(storage, &opts.data_dir);
+    let watch_roots = build_watch_roots(additional_scan_roots);
+    if !should_skip_unchanged_explicit_watch_once_paths(opts, storage, &watch_roots)? {
+        return Ok(false);
+    }
+
+    Ok(current_searchable_index_summary_available(index_path))
+}
+
 fn should_skip_broad_scan_after_watch_once_authoritative_repair(
     has_watch_once_paths: bool,
     watch_enabled: bool,
@@ -9438,6 +9513,28 @@ pub fn run_index(
     persist::apply_index_writer_busy_timeout(&storage);
     persist::apply_index_writer_checkpoint_policy(&storage, defer_checkpoints);
 
+    if can_skip_unchanged_explicit_watch_once_index_run(&opts, &storage, &index_path)? {
+        let now_ms = FrankenStorage::now_millis();
+        persist_final_index_run_metadata(&storage, &opts.db_path, false, now_ms, now_ms)?;
+        record_lexical_population_strategy_if_unset(
+            opts.progress.as_ref(),
+            LexicalPopulationStrategy::IncrementalInline,
+            "watch_once_targeted_reindex_applies_inline_lexical_updates_for_changed_paths",
+        );
+        reset_progress_to_idle(opts.progress.as_ref());
+        let path_count = opts
+            .watch_once_paths
+            .as_ref()
+            .map(std::vec::Vec::len)
+            .unwrap_or_default();
+        tracing::info!(
+            db_path = %opts.db_path.display(),
+            path_count,
+            "skipping unchanged explicit watch-once index run before startup maintenance"
+        );
+        return close_storage_after_index(storage, &opts.db_path, "watch-once no-op index run");
+    }
+
     // cass#202 self-heal: a Connection dropped mid-transaction (the
     // `drop_close` warning) can leave child rows persisted without a matching
     // parent — specifically `messages` referencing a `conversation_id` that
@@ -10422,6 +10519,34 @@ pub fn run_index(
     if opts.watch || opts.watch_once_paths.is_some() {
         let additional_scan_roots =
             additional_scan_roots_for_scan_or_watch(&storage, &opts.data_dir);
+        let watch_roots = build_watch_roots(additional_scan_roots.clone());
+        let watch_once_mode = opts
+            .watch_once_paths
+            .as_ref()
+            .is_some_and(|paths| !paths.is_empty());
+
+        if targeted_watch_once_only_run
+            && t_index.is_none()
+            && watch_once_mode
+            && should_skip_unchanged_explicit_watch_once_paths(&opts, &storage, &watch_roots)?
+        {
+            let path_count = opts
+                .watch_once_paths
+                .as_ref()
+                .map(std::vec::Vec::len)
+                .unwrap_or_default();
+            record_lexical_population_strategy_if_unset(
+                opts.progress.as_ref(),
+                LexicalPopulationStrategy::IncrementalInline,
+                "watch_once_targeted_reindex_applies_inline_lexical_updates_for_changed_paths",
+            );
+            tracing::info!(
+                db_path = %opts.db_path.display(),
+                path_count,
+                "skipping unchanged explicit watch-once paths before opening Tantivy"
+            );
+            return close_storage_after_index(storage, &opts.db_path, "watch-once no-op index run");
+        }
 
         // Startup watch ingest defers WAL auto-checkpoints for bulk import.
         // Before entering the long-lived watch loop, restore the steady-state
@@ -10482,17 +10607,8 @@ pub fn run_index(
             );
         }
 
-        // Detect roots once for the watcher setup
-        // Includes both local detected roots and all remote mirror roots
-        let watch_roots = build_watch_roots(additional_scan_roots.clone());
-
         // Clone detector for the callback
         let detector_clone = stale_detector.clone();
-
-        let watch_once_mode = opts
-            .watch_once_paths
-            .as_ref()
-            .is_some_and(|paths| !paths.is_empty());
 
         let watch_result = watch_sources(
             opts.watch_once_paths.clone(),
@@ -31145,11 +31261,55 @@ mod tests {
         .unwrap();
         assert_eq!(first, 1);
 
+        storage.lock().unwrap().set_last_indexed_at(0).unwrap();
+
+        let before_last_indexed_marker = {
+            let guard = storage.lock().unwrap();
+            should_skip_unchanged_explicit_watch_once_paths(
+                &opts,
+                &guard,
+                &[(ConnectorKind::Amp, ScanRoot::local(amp_dir.clone()))],
+            )
+            .unwrap()
+        };
+        assert!(
+            !before_last_indexed_marker,
+            "indexed files without a settled last_indexed_at marker must still flow through watch-once ingest"
+        );
+
         storage
             .lock()
             .unwrap()
             .set_last_indexed_at(FrankenStorage::now_millis().saturating_add(10_000))
             .unwrap();
+
+        let preopen_skip = {
+            let guard = storage.lock().unwrap();
+            should_skip_unchanged_explicit_watch_once_paths(
+                &opts,
+                &guard,
+                &[(ConnectorKind::Amp, ScanRoot::local(amp_dir.clone()))],
+            )
+            .unwrap()
+        };
+        assert!(
+            preopen_skip,
+            "unchanged explicit watch-once files can skip before Tantivy is opened"
+        );
+
+        let startup_skip = {
+            let guard = storage.lock().unwrap();
+            can_skip_unchanged_explicit_watch_once_index_run(
+                &opts,
+                &guard,
+                &index_dir(&opts.data_dir).unwrap(),
+            )
+            .unwrap()
+        };
+        assert!(
+            startup_skip,
+            "unchanged explicit watch-once files with current lexical assets can skip startup maintenance"
+        );
 
         let second = reindex_paths(
             &opts,
