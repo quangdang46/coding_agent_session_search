@@ -567,6 +567,124 @@
         }
       }
     },
+    "topology_budget": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "topology": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "type": "string"
+            },
+            "topology_class": {
+              "type": "string"
+            },
+            "logical_cpus": {
+              "type": "integer"
+            },
+            "physical_cores": {
+              "type": "integer"
+            },
+            "sockets": {
+              "type": "integer"
+            },
+            "numa_nodes": {
+              "type": "integer"
+            },
+            "llc_groups": {
+              "type": "integer"
+            },
+            "smt_threads_per_core": {
+              "type": "integer"
+            },
+            "memory_total_bytes": {
+              "type": "integer"
+            },
+            "memory_available_bytes": {
+              "type": "integer"
+            }
+          }
+        },
+        "reserved_core_policy": {
+          "type": "object",
+          "properties": {
+            "reserved_cores": {
+              "type": "integer"
+            },
+            "policy": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          }
+        },
+        "advisory_budgets": {
+          "type": "object",
+          "properties": {
+            "shard_builders": {
+              "type": "integer"
+            },
+            "merge_workers": {
+              "type": "integer"
+            },
+            "page_prep_workers": {
+              "type": "integer"
+            },
+            "semantic_batchers": {
+              "type": "integer"
+            },
+            "cache_cap_bytes": {
+              "type": "integer"
+            },
+            "max_inflight_bytes": {
+              "type": "integer"
+            }
+          }
+        },
+        "current_defaults": {
+          "type": "object",
+          "properties": {
+            "available_parallelism": {
+              "type": "integer"
+            },
+            "reserved_cores": {
+              "type": "integer"
+            },
+            "shard_builders": {
+              "type": "integer"
+            },
+            "merge_workers": {
+              "type": "integer"
+            },
+            "page_prep_workers": {
+              "type": "integer"
+            },
+            "cache_cap_bytes": {
+              "type": "integer"
+            },
+            "max_inflight_bytes": {
+              "type": "integer"
+            }
+          }
+        },
+        "fallback_active": {
+          "type": "boolean"
+        },
+        "decision_reason": {
+          "type": "string"
+        },
+        "proof_notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "quarantine": {
       "type": "object",
       "properties": {

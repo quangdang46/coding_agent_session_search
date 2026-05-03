@@ -18,6 +18,7 @@ pub mod policy_registry;
 pub mod search;
 pub mod sources;
 pub mod storage;
+pub mod topology_budget;
 pub mod tui_asciicast;
 pub mod ui;
 pub mod update_check;
@@ -12815,6 +12816,9 @@ fn run_status(
             .get("policy_registry")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
+        let topology_budget =
+            serde_json::to_value(crate::topology_budget::inspect_host_topology_budget())
+                .unwrap_or(serde_json::Value::Null);
         let payload = serde_json::json!({
             "status": status,
             "healthy": healthy,
@@ -12837,6 +12841,7 @@ fn run_status(
             "rebuild_progress": rebuild_progress_summary_json(&state),
             "semantic": state.get("semantic").cloned().unwrap_or(serde_json::Value::Null),
             "policy_registry": policy_registry,
+            "topology_budget": topology_budget,
             "quarantine": quarantine_report,
             "recommended_action": recommended_action,
             "_meta": state.get("_meta").cloned().unwrap_or(serde_json::Value::Null),
@@ -17759,6 +17764,75 @@ fn response_schema_policy_registry() -> serde_json::Value {
     })
 }
 
+fn response_schema_topology_budget() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Advisory CPU/RAM budget plan derived from Linux /sys topology; fallback mode preserves current defaults.",
+        "properties": {
+            "schema_version": { "type": "string" },
+            "topology": {
+                "type": "object",
+                "properties": {
+                    "source": { "type": "string", "description": "linux_sysfs | fallback" },
+                    "topology_class": { "type": "string", "description": "unknown | single_socket | single_socket_smt | many_core_single_socket | multi_socket_numa" },
+                    "logical_cpus": { "type": "integer" },
+                    "physical_cores": { "type": "integer" },
+                    "sockets": { "type": "integer" },
+                    "numa_nodes": { "type": "integer" },
+                    "llc_groups": { "type": "integer" },
+                    "smt_threads_per_core": { "type": "integer" },
+                    "memory_total_bytes": { "type": ["integer", "null"] },
+                    "memory_available_bytes": { "type": ["integer", "null"] }
+                }
+            },
+            "reserved_core_policy": {
+                "type": "object",
+                "properties": {
+                    "reserved_cores": { "type": "integer" },
+                    "policy": { "type": "string" },
+                    "reason": { "type": "string" }
+                }
+            },
+            "advisory_budgets": {
+                "type": "object",
+                "properties": {
+                    "shard_builders": { "type": "integer" },
+                    "merge_workers": { "type": "integer" },
+                    "page_prep_workers": { "type": "integer" },
+                    "semantic_batchers": { "type": "integer" },
+                    "cache_cap_bytes": { "type": "integer" },
+                    "max_inflight_bytes": { "type": "integer" }
+                }
+            },
+            "current_defaults": {
+                "type": "object",
+                "properties": {
+                    "available_parallelism": { "type": "integer" },
+                    "reserved_cores": { "type": "integer" },
+                    "shard_builders": { "type": "integer" },
+                    "merge_workers": { "type": "integer" },
+                    "page_prep_workers": { "type": "integer" },
+                    "cache_cap_bytes": { "type": "integer" },
+                    "max_inflight_bytes": { "type": "integer" }
+                }
+            },
+            "fallback_active": { "type": "boolean" },
+            "decision_reason": { "type": "string" },
+            "proof_notes": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": [
+            "schema_version",
+            "topology",
+            "reserved_core_policy",
+            "advisory_budgets",
+            "current_defaults",
+            "fallback_active",
+            "decision_reason",
+            "proof_notes"
+        ]
+    })
+}
+
 fn response_schema_state_meta() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -18066,6 +18140,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                 "rebuild_progress": response_schema_rebuild_progress(),
                 "semantic": response_schema_semantic_state(),
                 "policy_registry": response_schema_policy_registry(),
+                "topology_budget": response_schema_topology_budget(),
                 "quarantine": response_schema_opaque_object(),
                 "_meta": {
                     "type": "object",
@@ -18123,6 +18198,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                 "rebuild_progress": response_schema_rebuild_progress(),
                 "semantic": response_schema_semantic_state(),
                 "policy_registry": response_schema_policy_registry(),
+                "topology_budget": response_schema_topology_budget(),
                 "quarantine": response_schema_opaque_object(),
                 "_meta": {
                     "type": "object",
@@ -18511,13 +18587,16 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
             "type": "object",
             "description": "cass models status --json: semantic-model acquisition + cache state.",
             "properties": {
+                "policy_quality_tier_embedder": { "type": "string" },
+                "active_registry_name": { "type": ["string", "null"] },
+                "lexical_fail_open": { "type": "boolean" },
+                "models": response_schema_opaque_object_array(),
                 "model_id": { "type": "string" },
                 "model_dir": { "type": "string" },
                 "installed": { "type": "boolean" },
                 "state": { "type": "string", "description": "not_acquired | downloading | ready | needs_update" },
                 "state_detail": { "type": "string" },
                 "next_step": { "type": "string" },
-                "lexical_fail_open": { "type": "boolean" },
                 "revision": { "type": "string" },
                 "license": { "type": "string" },
                 "total_size_bytes": { "type": "integer" },
@@ -18531,7 +18610,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                 },
                 "files": response_schema_opaque_object_array()
             },
-            "required": ["model_id", "model_dir", "installed", "state", "lexical_fail_open"]
+            "required": ["policy_quality_tier_embedder", "lexical_fail_open", "models"]
         }),
     );
 

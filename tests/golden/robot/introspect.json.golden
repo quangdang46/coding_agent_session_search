@@ -3644,6 +3644,25 @@
       "type": "object",
       "description": "cass models status --json: semantic-model acquisition + cache state.",
       "properties": {
+        "policy_quality_tier_embedder": {
+          "type": "string"
+        },
+        "active_registry_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lexical_fail_open": {
+          "type": "boolean"
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
         "model_id": {
           "type": "string"
         },
@@ -3662,9 +3681,6 @@
         },
         "next_step": {
           "type": "string"
-        },
-        "lexical_fail_open": {
-          "type": "boolean"
         },
         "revision": {
           "type": "string"
@@ -3698,11 +3714,9 @@
         }
       },
       "required": [
-        "model_id",
-        "model_dir",
-        "installed",
-        "state",
-        "lexical_fail_open"
+        "policy_quality_tier_embedder",
+        "lexical_fail_open",
+        "models"
       ]
     },
     "models-verify": {
@@ -5467,6 +5481,143 @@
             "controllers"
           ]
         },
+        "topology_budget": {
+          "type": "object",
+          "description": "Advisory CPU/RAM budget plan derived from Linux /sys topology; fallback mode preserves current defaults.",
+          "properties": {
+            "schema_version": {
+              "type": "string"
+            },
+            "topology": {
+              "type": "object",
+              "properties": {
+                "source": {
+                  "type": "string",
+                  "description": "linux_sysfs | fallback"
+                },
+                "topology_class": {
+                  "type": "string",
+                  "description": "unknown | single_socket | single_socket_smt | many_core_single_socket | multi_socket_numa"
+                },
+                "logical_cpus": {
+                  "type": "integer"
+                },
+                "physical_cores": {
+                  "type": "integer"
+                },
+                "sockets": {
+                  "type": "integer"
+                },
+                "numa_nodes": {
+                  "type": "integer"
+                },
+                "llc_groups": {
+                  "type": "integer"
+                },
+                "smt_threads_per_core": {
+                  "type": "integer"
+                },
+                "memory_total_bytes": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "memory_available_bytes": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "reserved_core_policy": {
+              "type": "object",
+              "properties": {
+                "reserved_cores": {
+                  "type": "integer"
+                },
+                "policy": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              }
+            },
+            "advisory_budgets": {
+              "type": "object",
+              "properties": {
+                "shard_builders": {
+                  "type": "integer"
+                },
+                "merge_workers": {
+                  "type": "integer"
+                },
+                "page_prep_workers": {
+                  "type": "integer"
+                },
+                "semantic_batchers": {
+                  "type": "integer"
+                },
+                "cache_cap_bytes": {
+                  "type": "integer"
+                },
+                "max_inflight_bytes": {
+                  "type": "integer"
+                }
+              }
+            },
+            "current_defaults": {
+              "type": "object",
+              "properties": {
+                "available_parallelism": {
+                  "type": "integer"
+                },
+                "reserved_cores": {
+                  "type": "integer"
+                },
+                "shard_builders": {
+                  "type": "integer"
+                },
+                "merge_workers": {
+                  "type": "integer"
+                },
+                "page_prep_workers": {
+                  "type": "integer"
+                },
+                "cache_cap_bytes": {
+                  "type": "integer"
+                },
+                "max_inflight_bytes": {
+                  "type": "integer"
+                }
+              }
+            },
+            "fallback_active": {
+              "type": "boolean"
+            },
+            "decision_reason": {
+              "type": "string"
+            },
+            "proof_notes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "schema_version",
+            "topology",
+            "reserved_core_policy",
+            "advisory_budgets",
+            "current_defaults",
+            "fallback_active",
+            "decision_reason",
+            "proof_notes"
+          ]
+        },
         "quarantine": {
           "type": "object",
           "additionalProperties": true
@@ -6263,6 +6414,143 @@
           "required": [
             "schema_version",
             "controllers"
+          ]
+        },
+        "topology_budget": {
+          "type": "object",
+          "description": "Advisory CPU/RAM budget plan derived from Linux /sys topology; fallback mode preserves current defaults.",
+          "properties": {
+            "schema_version": {
+              "type": "string"
+            },
+            "topology": {
+              "type": "object",
+              "properties": {
+                "source": {
+                  "type": "string",
+                  "description": "linux_sysfs | fallback"
+                },
+                "topology_class": {
+                  "type": "string",
+                  "description": "unknown | single_socket | single_socket_smt | many_core_single_socket | multi_socket_numa"
+                },
+                "logical_cpus": {
+                  "type": "integer"
+                },
+                "physical_cores": {
+                  "type": "integer"
+                },
+                "sockets": {
+                  "type": "integer"
+                },
+                "numa_nodes": {
+                  "type": "integer"
+                },
+                "llc_groups": {
+                  "type": "integer"
+                },
+                "smt_threads_per_core": {
+                  "type": "integer"
+                },
+                "memory_total_bytes": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "memory_available_bytes": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "reserved_core_policy": {
+              "type": "object",
+              "properties": {
+                "reserved_cores": {
+                  "type": "integer"
+                },
+                "policy": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              }
+            },
+            "advisory_budgets": {
+              "type": "object",
+              "properties": {
+                "shard_builders": {
+                  "type": "integer"
+                },
+                "merge_workers": {
+                  "type": "integer"
+                },
+                "page_prep_workers": {
+                  "type": "integer"
+                },
+                "semantic_batchers": {
+                  "type": "integer"
+                },
+                "cache_cap_bytes": {
+                  "type": "integer"
+                },
+                "max_inflight_bytes": {
+                  "type": "integer"
+                }
+              }
+            },
+            "current_defaults": {
+              "type": "object",
+              "properties": {
+                "available_parallelism": {
+                  "type": "integer"
+                },
+                "reserved_cores": {
+                  "type": "integer"
+                },
+                "shard_builders": {
+                  "type": "integer"
+                },
+                "merge_workers": {
+                  "type": "integer"
+                },
+                "page_prep_workers": {
+                  "type": "integer"
+                },
+                "cache_cap_bytes": {
+                  "type": "integer"
+                },
+                "max_inflight_bytes": {
+                  "type": "integer"
+                }
+              }
+            },
+            "fallback_active": {
+              "type": "boolean"
+            },
+            "decision_reason": {
+              "type": "string"
+            },
+            "proof_notes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "schema_version",
+            "topology",
+            "reserved_core_policy",
+            "advisory_budgets",
+            "current_defaults",
+            "fallback_active",
+            "decision_reason",
+            "proof_notes"
           ]
         },
         "quarantine": {

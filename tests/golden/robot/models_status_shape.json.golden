@@ -1,6 +1,131 @@
 {
   "type": "object",
   "properties": {
+    "policy_quality_tier_embedder": {
+      "type": "string"
+    },
+    "active_registry_name": {
+      "type": "string"
+    },
+    "lexical_fail_open": {
+      "type": "boolean"
+    },
+    "models": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "registry_name": {
+            "type": "string"
+          },
+          "model_id": {
+            "type": "string"
+          },
+          "model_dir": {
+            "type": "string"
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "installed": {
+            "type": "boolean"
+          },
+          "state": {
+            "type": "string"
+          },
+          "state_detail": {
+            "type": "string"
+          },
+          "next_step": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "license": {
+            "type": "string"
+          },
+          "total_size_bytes": {
+            "type": "integer"
+          },
+          "installed_size_bytes": {
+            "type": "integer"
+          },
+          "observed_file_bytes": {
+            "type": "integer"
+          },
+          "policy_source": {
+            "type": "string"
+          },
+          "cache_lifecycle": {
+            "type": "object",
+            "properties": {
+              "model_id": {
+                "type": "string"
+              },
+              "model_dir": {
+                "type": "string"
+              },
+              "state": {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string"
+                  },
+                  "missing_files": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "needs_consent": {
+                    "type": "boolean"
+                  }
+                }
+              },
+              "required_size_bytes": {
+                "type": "integer"
+              },
+              "installed_size_bytes": {
+                "type": "integer"
+              },
+              "policy_source": {
+                "type": "string"
+              }
+            }
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "local_name": {
+                  "type": "string"
+                },
+                "actual_path": {
+                  "type": "null"
+                },
+                "expected_size": {
+                  "type": "integer"
+                },
+                "actual_size": {
+                  "type": "integer"
+                },
+                "exists": {
+                  "type": "boolean"
+                },
+                "size_match": {
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "model_id": {
       "type": "string"
     },
@@ -18,9 +143,6 @@
     },
     "next_step": {
       "type": "string"
-    },
-    "lexical_fail_open": {
-      "type": "boolean"
     },
     "revision": {
       "type": "string"
