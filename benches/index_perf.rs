@@ -462,6 +462,80 @@ fn bench_semantic_shard_generation(c: &mut Criterion) {
         });
     });
 
+    let stability_query = embeddings[42].embedding.clone();
+    let monolithic_search_index = FsVectorIndex::open(&monolithic_open_path).unwrap();
+    let sharded_search_indexes: Vec<_> = sharded_open_paths
+        .iter()
+        .map(|path| FsVectorIndex::open(path).unwrap())
+        .collect();
+    // Fetch every candidate for the stability proof. Per-shard top-k can drop
+    // equal-score records before the global merge sees them, which is exactly
+    // the sort of boundary artifact this benchmark should expose.
+    let monolithic_signature = {
+        let mut hits = monolithic_search_index
+            .search_top_k(
+                &stability_query,
+                monolithic_search_index.record_count(),
+                None,
+            )
+            .unwrap();
+        hits.sort_by(|left, right| {
+            left.cmp_by_score(right)
+                .then_with(|| left.doc_id.cmp(&right.doc_id))
+        });
+        hits.truncate(10);
+        hits.into_iter()
+            .map(|hit| (hit.doc_id, hit.score.to_bits()))
+            .collect::<Vec<_>>()
+    };
+    let sharded_signature = {
+        let mut hits = Vec::new();
+        for index in &sharded_search_indexes {
+            hits.extend(
+                index
+                    .search_top_k(&stability_query, index.record_count(), None)
+                    .unwrap(),
+            );
+        }
+        hits.sort_by(|left, right| {
+            left.cmp_by_score(right)
+                .then_with(|| left.doc_id.cmp(&right.doc_id))
+        });
+        hits.truncate(10);
+        hits.into_iter()
+            .map(|hit| (hit.doc_id, hit.score.to_bits()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(monolithic_signature, sharded_signature);
+
+    group.bench_function("monolithic_fsvi_search_top10_128", |b| {
+        b.iter(|| {
+            let hits = monolithic_search_index
+                .search_top_k(&stability_query, 10, None)
+                .unwrap();
+            std::hint::black_box(hits);
+        });
+    });
+
+    group.bench_function("sharded_exact_full_merge_search_top10_4x32", |b| {
+        b.iter(|| {
+            let mut hits = Vec::new();
+            for index in &sharded_search_indexes {
+                hits.extend(
+                    index
+                        .search_top_k(&stability_query, index.record_count(), None)
+                        .unwrap(),
+                );
+            }
+            hits.sort_by(|left, right| {
+                left.cmp_by_score(right)
+                    .then_with(|| left.doc_id.cmp(&right.doc_id))
+            });
+            hits.truncate(10);
+            std::hint::black_box(hits);
+        });
+    });
+
     group.finish();
 }
 
