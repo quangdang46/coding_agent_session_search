@@ -539,6 +539,50 @@ fn bench_semantic_shard_generation(c: &mut Criterion) {
     group.finish();
 }
 
+/// Larger semantic shard build probe intended for external peak-RSS wrappers
+/// such as `/usr/bin/time -v`. Criterion does not report memory itself, so keep
+/// these rows narrow and filterable: run one row at a time when collecting RSS.
+fn bench_semantic_shard_generation_large(c: &mut Criterion) {
+    let mut group = c.benchmark_group("semantic_shard_generation_large");
+    group.sample_size(10);
+    let indexer = SemanticIndexer::new("hash", None).unwrap();
+    let messages = build_semantic_corpus(4_096);
+    let embeddings = indexer.embed_messages(&messages).unwrap();
+
+    group.bench_function("monolithic_fsvi_build_4096", |b| {
+        b.iter(|| {
+            let tmp = TempDir::new().unwrap();
+            let index = indexer
+                .build_and_save_index(embeddings.clone(), tmp.path())
+                .unwrap();
+            std::hint::black_box(index.record_count());
+        });
+    });
+
+    group.bench_function("sharded_fsvi_build_4096x256", |b| {
+        b.iter(|| {
+            let tmp = TempDir::new().unwrap();
+            let outcome = indexer
+                .build_and_save_index_shards(
+                    embeddings.clone(),
+                    tmp.path(),
+                    SemanticShardBuildPlan {
+                        tier: TierKind::Fast,
+                        db_fingerprint: "bench-db-fp-large-rss".to_string(),
+                        model_revision: "hash".to_string(),
+                        total_conversations: 4_096,
+                        max_records_per_shard: 256,
+                        build_ann: false,
+                    },
+                )
+                .unwrap();
+            std::hint::black_box((outcome.shard_count, outcome.doc_count));
+        });
+    });
+
+    group.finish();
+}
+
 /// Benchmark the full ingest pipeline with and without the parallel
 /// pre-compute of `map_to_internal`. The `CASS_STREAMING_INDEX` toggle
 /// doesn't affect the hoist; both modes exercise it. We compare a
@@ -674,6 +718,7 @@ criterion_group!(
     bench_channel_overhead,
     bench_semantic_embedding,
     bench_semantic_shard_generation,
+    bench_semantic_shard_generation_large,
     bench_ingest_with_responsiveness,
     bench_card_defaults_ab,
 );
