@@ -308,6 +308,7 @@ pub type MergeStatus = FsCassMergeStatus;
 const FEDERATED_SEARCH_MANIFEST_FILE: &str = "federated-search-manifest.json";
 const FEDERATED_SEARCH_MANIFEST_VERSION: u32 = 1;
 const FEDERATED_SEARCH_MANIFEST_KIND: &str = "cass-federated-lexical-index";
+const EVIDENCE_BUNDLE_MANIFEST_TEMP_FILE: &str = "evidence-bundle-manifest.json.tmp";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchableIndexSummary {
@@ -559,7 +560,7 @@ fn relative_artifact_path_string(relative_path: &Path) -> Result<String> {
             std::path::Component::Normal(part) => {
                 let part = part.to_str().ok_or_else(|| {
                     anyhow::anyhow!(
-                        "federated lexical artifact path is not UTF-8: {}",
+                        "lexical artifact path is not UTF-8: {}",
                         relative_path.display()
                     )
                 })?;
@@ -567,18 +568,21 @@ fn relative_artifact_path_string(relative_path: &Path) -> Result<String> {
             }
             _ => {
                 return Err(anyhow::anyhow!(
-                    "federated lexical artifact path contains an unsafe component: {}",
+                    "lexical artifact path contains an unsafe component: {}",
                     relative_path.display()
                 ));
             }
         }
     }
     if parts.is_empty() {
-        return Err(anyhow::anyhow!(
-            "federated lexical artifact path must not be empty"
-        ));
+        return Err(anyhow::anyhow!("lexical artifact path must not be empty"));
     }
     Ok(parts.join("/"))
+}
+
+fn is_evidence_bundle_writer_file(relative_path: &str) -> bool {
+    relative_path == EVIDENCE_BUNDLE_MANIFEST_FILE
+        || relative_path == EVIDENCE_BUNDLE_MANIFEST_TEMP_FILE
 }
 
 fn collect_federated_evidence_artifact_paths(
@@ -606,12 +610,12 @@ fn collect_federated_evidence_artifact_paths(
                 )
             })?;
             let relative_path = relative_artifact_path_string(relative_path)?;
-            if relative_path != EVIDENCE_BUNDLE_MANIFEST_FILE {
+            if !is_evidence_bundle_writer_file(&relative_path) {
                 relative_paths.push(relative_path);
             }
         } else {
             return Err(anyhow::anyhow!(
-                "federated lexical artifact contains unsupported non-file entry: {}",
+                "lexical artifact contains unsupported non-file entry: {}",
                 path.display()
             ));
         }
@@ -619,18 +623,15 @@ fn collect_federated_evidence_artifact_paths(
     Ok(())
 }
 
-fn federated_evidence_bundle_id(chunks: &[EvidenceBundleChunk]) -> Result<String> {
+fn lexical_evidence_bundle_id(chunks: &[EvidenceBundleChunk]) -> Result<String> {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"cass-federated-lexical-evidence-v1\n");
+    hasher.update(b"cass-lexical-evidence-v1\n");
     for chunk in chunks {
         let bytes = serde_json::to_vec(chunk).context("serializing evidence bundle chunk")?;
         hasher.update(&bytes);
         hasher.update(b"\n");
     }
-    Ok(format!(
-        "cass-federated-lexical-{}",
-        hasher.finalize().to_hex()
-    ))
+    Ok(format!("cass-lexical-{}", hasher.finalize().to_hex()))
 }
 
 fn lexical_search_evidence_bundle_manifest_with_roles(
@@ -648,7 +649,7 @@ fn lexical_search_evidence_bundle_manifest_with_roles(
             EvidenceBundleChunk::from_file(index_path, relative_path, role, true, None)
         })
         .collect::<Result<Vec<_>>>()?;
-    let bundle_id = federated_evidence_bundle_id(&chunks)?;
+    let bundle_id = lexical_evidence_bundle_id(&chunks)?;
     let mut evidence =
         EvidenceBundleManifest::new(bundle_id, EvidenceBundleKind::LexicalGeneration, 0);
     evidence.chunks = chunks;
@@ -2353,6 +2354,34 @@ mod tests {
         assert!(manifest.chunks.iter().any(|chunk| {
             chunk.path == "segment.bin" && chunk.role == EvidenceBundleChunkRole::LexicalShard
         }));
+    }
+
+    #[test]
+    fn lexical_evidence_manifest_excludes_writer_temp_file_before_save() {
+        let root = TempDir::new().expect("temp dir");
+        write_minimal_standard_lexical_artifact(root.path(), b"standard segment bytes");
+        fs::write(
+            root.path().join(EVIDENCE_BUNDLE_MANIFEST_TEMP_FILE),
+            b"leftover temp manifest bytes",
+        )
+        .expect("write stale evidence manifest temp file");
+
+        let manifest =
+            lexical_search_evidence_bundle_manifest(root.path()).expect("standard manifest");
+        assert!(
+            manifest
+                .chunks
+                .iter()
+                .all(|chunk| chunk.path != EVIDENCE_BUNDLE_MANIFEST_TEMP_FILE),
+            "writer temp file must not become part of the saved proof: {manifest:?}"
+        );
+
+        manifest.save(root.path()).expect("save evidence manifest");
+        let report = crate::evidence_bundle::verify_evidence_bundle_manifest_file(
+            root.path(),
+            &crate::evidence_bundle::EvidenceBundleManifest::path(root.path()),
+        );
+        assert!(report.is_complete(), "{report:?}");
     }
 
     #[test]

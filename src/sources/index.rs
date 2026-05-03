@@ -841,7 +841,7 @@ mod tests {
             r#"{
               "status": "ok",
               "manifest_path": "/home/user/.local/share/cass/index/v1/evidence-bundle-manifest.json",
-              "bundle_id": "cass-federated-lexical-abc",
+              "bundle_id": "cass-lexical-abc",
               "chunk_count": 3,
               "expected_bytes": 42,
               "verification_status": "complete"
@@ -849,10 +849,7 @@ mod tests {
         );
 
         assert!(result.success);
-        assert_eq!(
-            result.bundle_id.as_deref(),
-            Some("cass-federated-lexical-abc")
-        );
+        assert_eq!(result.bundle_id.as_deref(), Some("cass-lexical-abc"));
         assert_eq!(result.chunk_count, Some(3));
         assert_eq!(result.expected_bytes, Some(42));
         assert_eq!(result.error, None);
