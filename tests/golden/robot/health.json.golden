@@ -37,7 +37,65 @@
     "conversations": 0,
     "messages": 0,
     "open_error": null,
-    "counts_skipped": false
+    "counts_skipped": false,
+    "open_skipped": false
+  },
+  "policy_registry": {
+    "schema_version": "1",
+    "controllers": [
+      {
+        "controller_id": "lexical_rebuild_pipeline",
+        "policy_id": "lexical_rebuild.pipeline.v1",
+        "policy_version": "pipeline_settings_v1",
+        "status": "active",
+        "fallback_state": "not_needed",
+        "conservative_fallback": false,
+        "decision_reason": "pipeline settings active",
+        "inputs": {
+          "controller_loadavg_high_watermark_1m": "121.0",
+          "controller_loadavg_low_watermark_1m": "120.0",
+          "controller_mode": "auto",
+          "controller_restore_clear_samples": "3",
+          "controller_restore_hold_ms": "5000",
+          "page_prep_workers": "6",
+          "pipeline_channel_size": "4",
+          "pipeline_max_message_bytes_in_flight": "536870912",
+          "staged_merge_workers": "8",
+          "staged_shard_builders": "8"
+        }
+      },
+      {
+        "controller_id": "semantic_search",
+        "policy_id": "semantic.hybrid_preferred.v1",
+        "policy_version": "semantic_schema_1+chunking_1",
+        "status": "fallback",
+        "fallback_state": "conservative",
+        "conservative_fallback": true,
+        "decision_reason": "semantic unavailable; lexical fallback remains active",
+        "inputs": {
+          "chunk_timeout_seconds": "120",
+          "chunking_strategy_version": "1",
+          "download_policy": "opt_in",
+          "fast_dimension": "256",
+          "fast_tier_embedder": "hash",
+          "idle_delay_seconds": "30",
+          "max_backfill_rss_mb": "256",
+          "max_backfill_threads": "1",
+          "max_model_size_mb": "300",
+          "max_refinement_docs": "100",
+          "min_free_disk_mb": "200",
+          "mode": "hybrid_preferred",
+          "quality_dimension": "384",
+          "quality_tier_embedder": "minilm",
+          "quality_weight": "0.7",
+          "reranker": "ms-marco-minilm",
+          "semantic_available": "false",
+          "semantic_budget_mb": "500",
+          "semantic_fallback_mode": "lexical",
+          "semantic_schema_version": "1"
+        }
+      }
+    ]
   },
   "responsiveness": {
     "current_capacity_pct": 100,
@@ -116,7 +174,8 @@
       "messages": 0,
       "open_error": null,
       "open_retryable": false,
-      "counts_skipped": false
+      "counts_skipped": false,
+      "open_skipped": false
     },
     "pending": {
       "sessions": 0,
@@ -142,12 +201,12 @@
         "reserved_cores": 8,
         "tantivy_writer_threads": 26,
         "staged_shard_builders": 8,
-        "staged_merge_workers": 4,
+        "staged_merge_workers": 8,
         "controller_mode": "auto",
         "controller_restore_clear_samples": 3,
         "controller_restore_hold_ms": 5000,
-        "pipeline_max_message_bytes_in_flight": 402653184,
-        "page_prep_workers": 16,
+        "pipeline_max_message_bytes_in_flight": 536870912,
+        "page_prep_workers": 6,
         "page_size": 1024,
         "steady_batch_fetch_conversations": 1024,
         "startup_batch_fetch_conversations": 32,
@@ -157,7 +216,7 @@
         "startup_commit_every_messages": 800000,
         "steady_commit_every_message_bytes": 536870912,
         "startup_commit_every_message_bytes": 134217728,
-        "pipeline_channel_size": 2,
+        "pipeline_channel_size": 4,
         "controller_loadavg_high_watermark_1m": 121.0,
         "controller_loadavg_low_watermark_1m": 120.0,
         "runtime": null
@@ -222,6 +281,63 @@
         "last_offset": null,
         "saved_at": null
       }
+    },
+    "policy_registry": {
+      "schema_version": "1",
+      "controllers": [
+        {
+          "controller_id": "lexical_rebuild_pipeline",
+          "policy_id": "lexical_rebuild.pipeline.v1",
+          "policy_version": "pipeline_settings_v1",
+          "status": "active",
+          "fallback_state": "not_needed",
+          "conservative_fallback": false,
+          "decision_reason": "pipeline settings active",
+          "inputs": {
+            "controller_loadavg_high_watermark_1m": "121.0",
+            "controller_loadavg_low_watermark_1m": "120.0",
+            "controller_mode": "auto",
+            "controller_restore_clear_samples": "3",
+            "controller_restore_hold_ms": "5000",
+            "page_prep_workers": "6",
+            "pipeline_channel_size": "4",
+            "pipeline_max_message_bytes_in_flight": "536870912",
+            "staged_merge_workers": "8",
+            "staged_shard_builders": "8"
+          }
+        },
+        {
+          "controller_id": "semantic_search",
+          "policy_id": "semantic.hybrid_preferred.v1",
+          "policy_version": "semantic_schema_1+chunking_1",
+          "status": "fallback",
+          "fallback_state": "conservative",
+          "conservative_fallback": true,
+          "decision_reason": "semantic unavailable; lexical fallback remains active",
+          "inputs": {
+            "chunk_timeout_seconds": "120",
+            "chunking_strategy_version": "1",
+            "download_policy": "opt_in",
+            "fast_dimension": "256",
+            "fast_tier_embedder": "hash",
+            "idle_delay_seconds": "30",
+            "max_backfill_rss_mb": "256",
+            "max_backfill_threads": "1",
+            "max_model_size_mb": "300",
+            "max_refinement_docs": "100",
+            "min_free_disk_mb": "200",
+            "mode": "hybrid_preferred",
+            "quality_dimension": "384",
+            "quality_tier_embedder": "minilm",
+            "quality_weight": "0.7",
+            "reranker": "ms-marco-minilm",
+            "semantic_available": "false",
+            "semantic_budget_mb": "500",
+            "semantic_fallback_mode": "lexical",
+            "semantic_schema_version": "1"
+          }
+        }
+      ]
     },
     "_meta": {
       "timestamp": "[TIMESTAMP]",

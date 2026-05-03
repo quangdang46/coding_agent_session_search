@@ -495,6 +495,78 @@
         }
       }
     },
+    "policy_registry": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "controllers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "controller_id": {
+                "type": "string"
+              },
+              "policy_id": {
+                "type": "string"
+              },
+              "policy_version": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "fallback_state": {
+                "type": "string"
+              },
+              "conservative_fallback": {
+                "type": "boolean"
+              },
+              "decision_reason": {
+                "type": "string"
+              },
+              "inputs": {
+                "type": "object",
+                "properties": {
+                  "controller_loadavg_high_watermark_1m": {
+                    "type": "string"
+                  },
+                  "controller_loadavg_low_watermark_1m": {
+                    "type": "string"
+                  },
+                  "controller_mode": {
+                    "type": "string"
+                  },
+                  "controller_restore_clear_samples": {
+                    "type": "string"
+                  },
+                  "controller_restore_hold_ms": {
+                    "type": "string"
+                  },
+                  "page_prep_workers": {
+                    "type": "string"
+                  },
+                  "pipeline_channel_size": {
+                    "type": "string"
+                  },
+                  "pipeline_max_message_bytes_in_flight": {
+                    "type": "string"
+                  },
+                  "staged_merge_workers": {
+                    "type": "string"
+                  },
+                  "staged_shard_builders": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "quarantine": {
       "type": "object",
       "properties": {

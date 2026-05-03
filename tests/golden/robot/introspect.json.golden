@@ -1431,6 +1431,71 @@
       "has_json_output": true
     },
     {
+      "name": "upgrade",
+      "description": "Check for a newer cass release and (optionally) install it",
+      "arguments": [
+        {
+          "name": "check",
+          "description": "Print current vs latest version and exit. No install. Exits 0 when up to date, 1 when an update is available",
+          "arg_type": "flag",
+          "required": false,
+          "default": "false",
+          "enum_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "name": "force",
+          "description": "Bypass the 1-hour update-check cadence and re-fetch the GitHub release API immediately. Combine with `--check` to refresh status without installing",
+          "arg_type": "flag",
+          "required": false,
+          "default": "false",
+          "enum_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "name": "yes",
+          "short": "y",
+          "description": "Skip the interactive prompt and run the installer immediately. Suitable for scripts; mutually exclusive with `--check`",
+          "arg_type": "flag",
+          "required": false,
+          "default": "false",
+          "enum_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "name": "json",
+          "description": "Output as JSON (for automation). Combines naturally with `--check`; ignored when an install actually runs because the installer execs over the current process",
+          "arg_type": "flag",
+          "required": false,
+          "enum_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "name": "robot-format",
+          "description": "Output format for robot mode (overrides --json when specified)",
+          "arg_type": "option",
+          "value_type": "enum",
+          "required": false,
+          "enum_values": [
+            "json",
+            "jsonl",
+            "compact",
+            "sessions",
+            "toon"
+          ]
+        }
+      ],
+      "has_json_output": true
+    },
+    {
       "name": "export",
       "description": "Export a conversation to markdown or other formats",
       "arguments": [
@@ -1469,6 +1534,18 @@
           "arg_type": "option",
           "value_type": "path",
           "required": false
+        },
+        {
+          "name": "clipboard",
+          "short": "c",
+          "description": "Copy the formatted export to the system clipboard instead of printing to stdout. Falls back to stdout with a stderr warning when no clipboard tool is available (e.g. headless / SSH)",
+          "arg_type": "flag",
+          "required": false,
+          "default": "false",
+          "enum_values": [
+            "true",
+            "false"
+          ]
         },
         {
           "name": "include-tools",
@@ -2307,6 +2384,14 @@
             "type": "string"
           }
         },
+        "quarantine": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "_meta": {
+          "type": "object",
+          "additionalProperties": true
+        },
         "checks": {
           "type": "array",
           "items": {
@@ -2527,8 +2612,71 @@
             },
             "counts_skipped": {
               "type": "boolean"
+            },
+            "open_skipped": {
+              "type": "boolean"
             }
           }
+        },
+        "policy_registry": {
+          "type": "object",
+          "description": "Data-only registry of active runtime controller policies, their deterministic inputs, and fallback state.",
+          "properties": {
+            "schema_version": {
+              "type": "string"
+            },
+            "controllers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "controller_id": {
+                    "type": "string"
+                  },
+                  "policy_id": {
+                    "type": "string"
+                  },
+                  "policy_version": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string",
+                    "description": "active | disabled | fallback"
+                  },
+                  "fallback_state": {
+                    "type": "string",
+                    "description": "not_needed | conservative | disabled"
+                  },
+                  "conservative_fallback": {
+                    "type": "boolean"
+                  },
+                  "decision_reason": {
+                    "type": "string"
+                  },
+                  "inputs": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "controller_id",
+                  "policy_id",
+                  "policy_version",
+                  "status",
+                  "fallback_state",
+                  "conservative_fallback",
+                  "decision_reason",
+                  "inputs"
+                ]
+              }
+            }
+          },
+          "required": [
+            "schema_version",
+            "controllers"
+          ]
         },
         "responsiveness": {
           "type": "object",
@@ -2537,6 +2685,10 @@
             "current_capacity_pct": {
               "type": "integer",
               "description": "Published capacity scalar in [min_capacity_pct, 100]. Fan-out knobs multiply their caller-requested values by this percentage."
+            },
+            "resource_policy": {
+              "type": "object",
+              "additionalProperties": true
             },
             "healthy_streak": {
               "type": "integer",
@@ -2573,6 +2725,10 @@
                 "null"
               ],
               "description": "One of: disabled, severe, pressured, pressured_floor_hold, healthy_hold, healthy_grow, healthy_ceiling_hold."
+            },
+            "calibration": {
+              "type": "object",
+              "additionalProperties": true
             },
             "recent_decisions": {
               "type": "array",
@@ -2765,6 +2921,9 @@
                   "type": "boolean"
                 },
                 "counts_skipped": {
+                  "type": "boolean"
+                },
+                "open_skipped": {
                   "type": "boolean"
                 }
               }
@@ -3127,6 +3286,66 @@
                 }
               }
             },
+            "policy_registry": {
+              "type": "object",
+              "description": "Data-only registry of active runtime controller policies, their deterministic inputs, and fallback state.",
+              "properties": {
+                "schema_version": {
+                  "type": "string"
+                },
+                "controllers": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "controller_id": {
+                        "type": "string"
+                      },
+                      "policy_id": {
+                        "type": "string"
+                      },
+                      "policy_version": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "string",
+                        "description": "active | disabled | fallback"
+                      },
+                      "fallback_state": {
+                        "type": "string",
+                        "description": "not_needed | conservative | disabled"
+                      },
+                      "conservative_fallback": {
+                        "type": "boolean"
+                      },
+                      "decision_reason": {
+                        "type": "string"
+                      },
+                      "inputs": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "required": [
+                      "controller_id",
+                      "policy_id",
+                      "policy_version",
+                      "status",
+                      "fallback_state",
+                      "conservative_fallback",
+                      "decision_reason",
+                      "inputs"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "schema_version",
+                "controllers"
+              ]
+            },
             "_meta": {
               "type": "object",
               "properties": {
@@ -3212,6 +3431,10 @@
             "null"
           ]
         },
+        "entrypoint": {
+          "type": "object",
+          "additionalProperties": true
+        },
         "data_dir": {
           "type": [
             "string",
@@ -3235,6 +3458,10 @@
             "integer",
             "null"
           ]
+        },
+        "indexing_stats": {
+          "type": "object",
+          "additionalProperties": true
         },
         "error": {
           "type": [
@@ -3292,7 +3519,10 @@
                 "type": [
                   "array",
                   "null"
-                ]
+                ],
+                "items": {
+                  "type": "string"
+                }
               },
               "repeatable": {
                 "type": [
@@ -3356,7 +3586,10 @@
                       "type": [
                         "array",
                         "null"
-                      ]
+                      ],
+                      "items": {
+                        "type": "string"
+                      }
                     },
                     "repeatable": {
                       "type": [
@@ -3453,7 +3686,15 @@
         },
         "cache_lifecycle": {
           "type": "object",
+          "additionalProperties": true,
           "description": "Opaque lifecycle block describing cache state, missing files, and consent status."
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
         }
       },
       "required": [
@@ -3487,7 +3728,8 @@
           "type": "boolean"
         },
         "cache_lifecycle": {
-          "type": "object"
+          "type": "object",
+          "additionalProperties": true
         },
         "error": {
           "type": [
@@ -3904,6 +4146,9 @@
                     },
                     "counts_skipped": {
                       "type": "boolean"
+                    },
+                    "open_skipped": {
+                      "type": "boolean"
                     }
                   }
                 },
@@ -4265,6 +4510,66 @@
                     }
                   }
                 },
+                "policy_registry": {
+                  "type": "object",
+                  "description": "Data-only registry of active runtime controller policies, their deterministic inputs, and fallback state.",
+                  "properties": {
+                    "schema_version": {
+                      "type": "string"
+                    },
+                    "controllers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "controller_id": {
+                            "type": "string"
+                          },
+                          "policy_id": {
+                            "type": "string"
+                          },
+                          "policy_version": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string",
+                            "description": "active | disabled | fallback"
+                          },
+                          "fallback_state": {
+                            "type": "string",
+                            "description": "not_needed | conservative | disabled"
+                          },
+                          "conservative_fallback": {
+                            "type": "boolean"
+                          },
+                          "decision_reason": {
+                            "type": "string"
+                          },
+                          "inputs": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "required": [
+                          "controller_id",
+                          "policy_id",
+                          "policy_version",
+                          "status",
+                          "fallback_state",
+                          "conservative_fallback",
+                          "decision_reason",
+                          "inputs"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "schema_version",
+                    "controllers"
+                  ]
+                },
                 "_meta": {
                   "type": "object",
                   "properties": {
@@ -4355,7 +4660,8 @@
         "suggestions": {
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "object",
+            "additionalProperties": true
           }
         },
         "explanation": {
@@ -4616,6 +4922,9 @@
             "counts_skipped": {
               "type": "boolean"
             },
+            "open_skipped": {
+              "type": "boolean"
+            },
             "path": {
               "type": "string"
             }
@@ -5097,6 +5406,70 @@
               }
             }
           }
+        },
+        "policy_registry": {
+          "type": "object",
+          "description": "Data-only registry of active runtime controller policies, their deterministic inputs, and fallback state.",
+          "properties": {
+            "schema_version": {
+              "type": "string"
+            },
+            "controllers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "controller_id": {
+                    "type": "string"
+                  },
+                  "policy_id": {
+                    "type": "string"
+                  },
+                  "policy_version": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string",
+                    "description": "active | disabled | fallback"
+                  },
+                  "fallback_state": {
+                    "type": "string",
+                    "description": "not_needed | conservative | disabled"
+                  },
+                  "conservative_fallback": {
+                    "type": "boolean"
+                  },
+                  "decision_reason": {
+                    "type": "string"
+                  },
+                  "inputs": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "controller_id",
+                  "policy_id",
+                  "policy_version",
+                  "status",
+                  "fallback_state",
+                  "conservative_fallback",
+                  "decision_reason",
+                  "inputs"
+                ]
+              }
+            }
+          },
+          "required": [
+            "schema_version",
+            "controllers"
+          ]
+        },
+        "quarantine": {
+          "type": "object",
+          "additionalProperties": true
         },
         "_meta": {
           "type": "object",
@@ -5347,6 +5720,9 @@
             "counts_skipped": {
               "type": "boolean"
             },
+            "open_skipped": {
+              "type": "boolean"
+            },
             "path": {
               "type": "string"
             }
@@ -5829,6 +6205,70 @@
             }
           }
         },
+        "policy_registry": {
+          "type": "object",
+          "description": "Data-only registry of active runtime controller policies, their deterministic inputs, and fallback state.",
+          "properties": {
+            "schema_version": {
+              "type": "string"
+            },
+            "controllers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "controller_id": {
+                    "type": "string"
+                  },
+                  "policy_id": {
+                    "type": "string"
+                  },
+                  "policy_version": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string",
+                    "description": "active | disabled | fallback"
+                  },
+                  "fallback_state": {
+                    "type": "string",
+                    "description": "not_needed | conservative | disabled"
+                  },
+                  "conservative_fallback": {
+                    "type": "boolean"
+                  },
+                  "decision_reason": {
+                    "type": "string"
+                  },
+                  "inputs": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "controller_id",
+                  "policy_id",
+                  "policy_version",
+                  "status",
+                  "fallback_state",
+                  "conservative_fallback",
+                  "decision_reason",
+                  "inputs"
+                ]
+              }
+            }
+          },
+          "required": [
+            "schema_version",
+            "controllers"
+          ]
+        },
+        "quarantine": {
+          "type": "object",
+          "additionalProperties": true
+        },
         "_meta": {
           "type": "object",
           "properties": {
@@ -5863,11 +6303,26 @@
             "null"
           ]
         },
+        "target_line": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "context": {
+          "type": "integer"
+        },
+        "total_lines": {
+          "type": "integer"
+        },
         "lines": {
           "type": "array",
           "items": {
             "type": "object",
             "properties": {
+              "line": {
+                "type": "integer"
+              },
               "number": {
                 "type": "integer"
               },

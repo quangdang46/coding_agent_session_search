@@ -14,6 +14,7 @@ pub mod indexer;
 pub mod model;
 pub mod pages;
 pub mod perf_evidence;
+pub mod policy_registry;
 pub mod search;
 pub mod sources;
 pub mod storage;
@@ -5973,6 +5974,16 @@ fn state_meta_json_inner(
             .unwrap_or(serde_json::Value::Null);
         pipeline.insert("runtime".to_string(), runtime_value);
     }
+    let semantic_policy = crate::search::policy::SemanticPolicy::resolve(
+        &crate::search::policy::CliSemanticOverrides::default(),
+    );
+    let policy_registry = serde_json::to_value(crate::policy_registry::policy_registry_snapshot(
+        &semantic_policy,
+        semantic.available,
+        semantic.fallback_mode,
+        &lexical_rebuild_pipeline_json,
+    ))
+    .unwrap_or(serde_json::Value::Null);
 
     // Probe the live lexical document count when the DB has messages. Prefer
     // the published generation manifest: status only needs the durable count
@@ -6144,6 +6155,7 @@ fn state_meta_json_inner(
                     .and_then(format_timestamp_millis_rfc3339),
             },
         },
+        "policy_registry": policy_registry,
         "_meta": {
             "timestamp": ts_str,
             "data_dir": data_dir.display().to_string(),
@@ -12799,6 +12811,10 @@ fn run_status(
             &data_dir,
             &crate::search::tantivy::expected_index_dir(&data_dir),
         );
+        let policy_registry = state
+            .get("policy_registry")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         let payload = serde_json::json!({
             "status": status,
             "healthy": healthy,
@@ -12820,6 +12836,7 @@ fn run_status(
             "rebuild": state.get("rebuild").cloned().unwrap_or(serde_json::Value::Null),
             "rebuild_progress": rebuild_progress_summary_json(&state),
             "semantic": state.get("semantic").cloned().unwrap_or(serde_json::Value::Null),
+            "policy_registry": policy_registry,
             "quarantine": quarantine_report,
             "recommended_action": recommended_action,
             "_meta": state.get("_meta").cloned().unwrap_or(serde_json::Value::Null),
@@ -13123,6 +13140,10 @@ fn run_health(
         let parallel_wal_shadow =
             serde_json::to_value(crate::indexer::parallel_wal_shadow::telemetry_snapshot())
                 .unwrap_or(serde_json::Value::Null);
+        let policy_registry = state
+            .get("policy_registry")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         let payload = serde_json::json!({
             "status": status,
             "healthy": healthy,
@@ -13149,6 +13170,7 @@ fn run_health(
                     .cloned()
                     .unwrap_or(serde_json::Value::Bool(false))
             },
+            "policy_registry": policy_registry,
             "responsiveness": responsiveness,
             "parallel_wal_shadow": parallel_wal_shadow,
             "state": state
@@ -17697,6 +17719,46 @@ fn response_schema_semantic_state() -> serde_json::Value {
     })
 }
 
+fn response_schema_policy_registry() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Data-only registry of active runtime controller policies, their deterministic inputs, and fallback state.",
+        "properties": {
+            "schema_version": { "type": "string" },
+            "controllers": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "controller_id": { "type": "string" },
+                        "policy_id": { "type": "string" },
+                        "policy_version": { "type": "string" },
+                        "status": { "type": "string", "description": "active | disabled | fallback" },
+                        "fallback_state": { "type": "string", "description": "not_needed | conservative | disabled" },
+                        "conservative_fallback": { "type": "boolean" },
+                        "decision_reason": { "type": "string" },
+                        "inputs": {
+                            "type": "object",
+                            "additionalProperties": { "type": "string" }
+                        }
+                    },
+                    "required": [
+                        "controller_id",
+                        "policy_id",
+                        "policy_version",
+                        "status",
+                        "fallback_state",
+                        "conservative_fallback",
+                        "decision_reason",
+                        "inputs"
+                    ]
+                }
+            }
+        },
+        "required": ["schema_version", "controllers"]
+    })
+}
+
 fn response_schema_state_meta() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -17706,6 +17768,7 @@ fn response_schema_state_meta() -> serde_json::Value {
             "pending": response_schema_pending_state(),
             "rebuild": response_schema_rebuild_state(),
             "semantic": response_schema_semantic_state(),
+            "policy_registry": response_schema_policy_registry(),
             "_meta": {
                 "type": "object",
                 "properties": {
@@ -18002,6 +18065,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                 "rebuild": response_schema_rebuild_state(),
                 "rebuild_progress": response_schema_rebuild_progress(),
                 "semantic": response_schema_semantic_state(),
+                "policy_registry": response_schema_policy_registry(),
                 "quarantine": response_schema_opaque_object(),
                 "_meta": {
                     "type": "object",
@@ -18058,6 +18122,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                 "rebuild": response_schema_rebuild_state(),
                 "rebuild_progress": response_schema_rebuild_progress(),
                 "semantic": response_schema_semantic_state(),
+                "policy_registry": response_schema_policy_registry(),
                 "quarantine": response_schema_opaque_object(),
                 "_meta": {
                     "type": "object",
@@ -18322,6 +18387,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                 "latency_ms": { "type": "integer" },
                 "rebuild_progress": response_schema_rebuild_progress(),
                 "db": response_schema_health_db(),
+                "policy_registry": response_schema_policy_registry(),
                 "responsiveness": {
                     "type": "object",
                     "description": "Machine-responsiveness governor telemetry. Explains why the indexer is running at reduced fan-out and what pressure triggered any recent shrinkage.",
