@@ -85,6 +85,7 @@ type BatchClassificationMap =
     HashMap<(ConnectorKind, PathBuf), (ScanRoot, Option<i64>, Option<i64>)>;
 
 const LEXICAL_REBUILD_PACKET_VERSION: u32 = CONVERSATION_PACKET_VERSION;
+const CODEX_INDEXER_EXTRA_COMPACT_THRESHOLD_BYTES: u64 = 16 * 1024 * 1024;
 
 #[cfg(target_os = "linux")]
 mod linux_publish_swap {
@@ -6365,11 +6366,11 @@ fn should_run_targeted_watch_once_only(
     needs_rebuild: bool,
     canonical_sessions_before_salvage: usize,
 ) -> bool {
-    has_watch_once_paths
-        && !watch_enabled
-        && !full_rebuild
-        && !needs_rebuild
-        && canonical_sessions_before_salvage > 0
+    if !has_watch_once_paths || watch_enabled || full_rebuild {
+        return false;
+    }
+
+    !needs_rebuild || canonical_sessions_before_salvage == 0
 }
 
 fn should_skip_absent_explicit_watch_once_paths(opts: &IndexOptions) -> bool {
@@ -8394,6 +8395,7 @@ fn spawn_connector_producer(
                 StreamingBatchSender::new(&tx, config.flow_limiter.clone(), name, is_discovered);
             match conn.scan_with_callback(&ctx, &mut |mut conversation| {
                 inject_provenance(&mut conversation, &local_origin);
+                compact_large_connector_extras(name, &mut conversation);
                 batch_sender.push(conversation)
             }) {
                 Ok(()) => {
@@ -8447,6 +8449,7 @@ fn spawn_connector_producer(
             match conn.scan_with_callback(&ctx, &mut |mut conversation| {
                 inject_provenance(&mut conversation, &root.origin);
                 apply_workspace_rewrite(&mut conversation, root);
+                compact_large_connector_extras(name, &mut conversation);
 
                 if !was_detected && !is_discovered {
                     if let Some(p) = &config.progress {
@@ -10417,7 +10420,7 @@ pub fn run_index(
             inserted_messages = scan_canonical_mutations.inserted_messages,
             "skipping final lexical checkpoint refresh because the full scan preserved an already-matching completed checkpoint"
         );
-    } else if targeted_watch_once_only_run && !initial_needs_rebuild {
+    } else if targeted_watch_once_only_run {
         tracing::info!(
             db_path = %opts.db_path.display(),
             "skipping final lexical checkpoint refresh because targeted watch-once startup does not need broad checkpoint maintenance"
@@ -15471,6 +15474,7 @@ fn reindex_paths_with_semantic_delta(
         );
 
         // SCAN PHASE: IO-heavy, no locks held
+        let scan_start = Instant::now();
         let mut convs = match conn.scan(&ctx) {
             Ok(c) => c,
             Err(e) => {
@@ -15483,11 +15487,13 @@ fn reindex_paths_with_semantic_delta(
                 Vec::new()
             }
         };
+        let scan_ms = scan_start.elapsed().as_millis() as u64;
 
         // Provenance injection and path rewriting
         for conv in &mut convs {
             inject_provenance(conv, &root.origin);
             apply_workspace_rewrite(conv, &root);
+            compact_large_connector_extras("", conv);
         }
 
         // Update total and phase to indexing
@@ -15518,7 +15524,8 @@ fn reindex_paths_with_semantic_delta(
         }
 
         // INGEST PHASE: Acquire locks briefly
-        {
+        let index_start = Instant::now();
+        let inserted_messages = {
             let storage = storage
                 .lock()
                 .map_err(|_| anyhow::anyhow!("storage lock poisoned"))?;
@@ -15545,6 +15552,7 @@ fn reindex_paths_with_semantic_delta(
                 !opts.watch,
                 semantic_delta.as_deref_mut(),
             )?;
+            let inserted_messages = batch_outcome.inserted_messages;
             if let Some(delta) = semantic_delta.as_deref_mut() {
                 delta.extend_from_batch(
                     batch_outcome.semantic_delta_inputs,
@@ -15562,6 +15570,35 @@ fn reindex_paths_with_semantic_delta(
                 "updating watch last_indexed_at",
                 |writer| writer.set_last_indexed_at(FrankenStorage::now_millis()),
             )?;
+            inserted_messages
+        };
+        let index_ms = index_start.elapsed().as_millis() as u64;
+
+        if let Some(p) = &opts.progress
+            && let Ok(mut stats) = p.stats.lock()
+        {
+            let connector_name = convs
+                .first()
+                .map(|conv| conv.agent_slug.clone())
+                .unwrap_or_else(|| format!("{kind:?}").to_ascii_lowercase());
+            stats.scan_ms = stats.scan_ms.saturating_add(scan_ms);
+            stats.index_ms = stats.index_ms.saturating_add(index_ms);
+            stats.total_conversations = stats.total_conversations.saturating_add(conv_count);
+            stats.total_messages = stats.total_messages.saturating_add(inserted_messages);
+            stats.connectors.push(ConnectorStats {
+                name: connector_name.clone(),
+                conversations: conv_count,
+                messages: inserted_messages,
+                scan_ms,
+                error: None,
+            });
+            if !stats
+                .agents_discovered
+                .iter()
+                .any(|name| name == &connector_name)
+            {
+                stats.agents_discovered.push(connector_name);
+            }
         }
 
         // Track total indexed for stale detection
@@ -16319,6 +16356,80 @@ fn inject_provenance(conv: &mut NormalizedConversation, origin: &Origin) {
                 }),
             );
         }
+    }
+}
+
+fn compact_large_connector_extras(connector_name: &str, conv: &mut NormalizedConversation) {
+    let source_size = fs::metadata(&conv.source_path)
+        .ok()
+        .map(|metadata| metadata.len());
+    compact_large_connector_extras_for_size(connector_name, conv, source_size);
+}
+
+fn compact_large_connector_extras_for_size(
+    connector_name: &str,
+    conv: &mut NormalizedConversation,
+    source_size: Option<u64>,
+) {
+    if !should_compact_connector_extra(connector_name, conv, source_size) {
+        return;
+    }
+
+    for message in &mut conv.messages {
+        message.extra = compact_indexer_message_extra(&message.extra);
+    }
+}
+
+fn should_compact_connector_extra(
+    connector_name: &str,
+    conv: &NormalizedConversation,
+    source_size: Option<u64>,
+) -> bool {
+    let Some(source_size) = source_size else {
+        return false;
+    };
+    if source_size < CODEX_INDEXER_EXTRA_COMPACT_THRESHOLD_BYTES {
+        return false;
+    }
+
+    connector_name.eq_ignore_ascii_case("codex") || conv.agent_slug.eq_ignore_ascii_case("codex")
+}
+
+fn compact_indexer_message_extra(raw: &serde_json::Value) -> serde_json::Value {
+    let mut cass = raw
+        .get("cass")
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    if !cass.contains_key("model")
+        && let Some(model) = raw
+            .get("model")
+            .or_else(|| raw.pointer("/response/model"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+    {
+        cass.insert(
+            "model".to_string(),
+            serde_json::Value::String(model.to_string()),
+        );
+    }
+
+    if !cass.contains_key("attachments")
+        && let Some(attachments) = raw
+            .get("attachment_refs")
+            .or_else(|| raw.get("attachments"))
+            .cloned()
+    {
+        cass.insert("attachments".to_string(), attachments);
+    }
+
+    if cass.is_empty() {
+        serde_json::json!({})
+    } else {
+        let mut out = serde_json::Map::new();
+        out.insert("cass".to_string(), serde_json::Value::Object(cass));
+        serde_json::Value::Object(out)
     }
 }
 
@@ -26529,13 +26640,21 @@ mod tests {
     }
 
     #[test]
-    fn targeted_watch_once_only_requires_populated_incremental_run() {
+    fn targeted_watch_once_only_allows_empty_or_populated_incremental_run() {
         assert!(should_run_targeted_watch_once_only(
             true, false, false, false, 43_678
         ));
-        assert!(!should_run_targeted_watch_once_only(
+        assert!(should_run_targeted_watch_once_only(
             true, false, false, false, 0
         ));
+        assert!(
+            should_run_targeted_watch_once_only(true, false, false, true, 0),
+            "fresh explicit watch-once imports should not broaden into every detected connector"
+        );
+        assert!(
+            !should_run_targeted_watch_once_only(true, false, false, true, 43_678),
+            "populated archives with a missing or invalid index still need authoritative repair"
+        );
         assert!(!should_run_targeted_watch_once_only(
             true, true, false, false, 43_678
         ));
@@ -31205,6 +31324,7 @@ mod tests {
         )
         .unwrap();
 
+        let progress = Arc::new(IndexingProgress::default());
         let opts = super::IndexOptions {
             full: false,
             watch: false,
@@ -31215,7 +31335,7 @@ mod tests {
             semantic: false,
             build_hnsw: false,
             embedder: "fastembed".to_string(),
-            progress: None,
+            progress: Some(progress.clone()),
             watch_interval_secs: 30,
         };
 
@@ -31244,6 +31364,15 @@ mod tests {
             indexed, 1,
             "explicit watch_once imports should ignore file mtime watermarks"
         );
+        {
+            let stats = progress.stats.lock().unwrap();
+            assert_eq!(stats.total_conversations, 1);
+            assert_eq!(stats.total_messages, 1);
+            assert_eq!(stats.connectors.len(), 1);
+            assert_eq!(stats.connectors[0].name, "amp");
+            assert_eq!(stats.connectors[0].conversations, 1);
+            assert_eq!(stats.connectors[0].messages, 1);
+        }
 
         if let Some(prev) = prev {
             unsafe { std::env::set_var("XDG_DATA_HOME", prev) };
@@ -31484,6 +31613,100 @@ mod tests {
             origin_obj.get("host").unwrap().as_str(),
             Some("user@laptop.local")
         );
+    }
+
+    #[test]
+    fn large_codex_extra_compaction_preserves_cass_metadata() {
+        let mut conv = norm_conv(Some("codex-large"), vec![norm_msg(0, 100)]);
+        conv.agent_slug = "codex".to_string();
+        conv.messages[0].extra = serde_json::json!({
+            "payload": {
+                "delta": "duplicated raw codex event payload"
+            },
+            "response": {
+                "model": "gpt-5.4"
+            },
+            "attachment_refs": [
+                "file:src/lib.rs"
+            ],
+            "cass": {
+                "token_usage": {
+                    "input_tokens": 11,
+                    "output_tokens": 7
+                },
+                "event_line": 42
+            }
+        });
+
+        compact_large_connector_extras_for_size(
+            "codex",
+            &mut conv,
+            Some(CODEX_INDEXER_EXTRA_COMPACT_THRESHOLD_BYTES),
+        );
+
+        let extra = &conv.messages[0].extra;
+        assert_eq!(
+            extra.pointer("/cass/token_usage/input_tokens"),
+            Some(&serde_json::json!(11))
+        );
+        assert_eq!(
+            extra.pointer("/cass/token_usage/output_tokens"),
+            Some(&serde_json::json!(7))
+        );
+        assert_eq!(
+            extra.pointer("/cass/event_line"),
+            Some(&serde_json::json!(42))
+        );
+        assert_eq!(
+            extra
+                .pointer("/cass/model")
+                .and_then(serde_json::Value::as_str),
+            Some("gpt-5.4")
+        );
+        assert_eq!(
+            extra.pointer("/cass/attachments"),
+            Some(&serde_json::json!(["file:src/lib.rs"]))
+        );
+        assert!(extra.get("payload").is_none());
+        assert!(extra.get("response").is_none());
+        assert!(extra.get("attachment_refs").is_none());
+    }
+
+    #[test]
+    fn large_extra_compaction_skips_small_or_non_codex_sources() {
+        let raw_extra = serde_json::json!({
+            "payload": {
+                "delta": "keep me"
+            },
+            "response": {
+                "model": "gpt-5.4"
+            },
+            "cass": {
+                "token_usage": {
+                    "input_tokens": 3
+                }
+            }
+        });
+
+        let mut small_codex = norm_conv(Some("codex-small"), vec![norm_msg(0, 100)]);
+        small_codex.agent_slug = "codex".to_string();
+        small_codex.messages[0].extra = raw_extra.clone();
+        compact_large_connector_extras_for_size(
+            "codex",
+            &mut small_codex,
+            Some(CODEX_INDEXER_EXTRA_COMPACT_THRESHOLD_BYTES - 1),
+        );
+        assert_eq!(small_codex.messages[0].extra, raw_extra);
+
+        let mut large_claude = norm_conv(Some("claude-large"), vec![norm_msg(0, 100)]);
+        large_claude.agent_slug = "claude-code".to_string();
+        large_claude.messages[0].extra = raw_extra.clone();
+        compact_large_connector_extras_for_size(
+            "claude_code",
+            &mut large_claude,
+            Some(CODEX_INDEXER_EXTRA_COMPACT_THRESHOLD_BYTES),
+        );
+        assert_eq!(large_claude.messages[0].extra, raw_extra);
     }
 
     #[test]
