@@ -199,7 +199,9 @@ pub struct EncryptionConfig {
     #[serde(default)]
     pub generate_qr: bool,
 
-    /// Compression algorithm: deflate (default), gzip, none.
+    /// Compression algorithm for encrypted payload chunks.
+    ///
+    /// The current encryption format supports deflate only.
     #[serde(default)]
     pub compression: Option<String>,
 
@@ -334,10 +336,17 @@ impl PagesConfig {
     }
 
     fn resolved_compression(&self) -> String {
+        self.normalized_compression()
+            .unwrap_or_else(|| DEFAULT_COMPRESSION.to_string())
+    }
+
+    fn normalized_compression(&self) -> Option<String> {
         self.encryption
             .compression
-            .clone()
-            .unwrap_or_else(|| DEFAULT_COMPRESSION.to_string())
+            .as_deref()
+            .map(str::trim)
+            .filter(|compression| !compression.is_empty())
+            .map(str::to_ascii_lowercase)
     }
 
     fn resolved_chunk_size(&self) -> u64 {
@@ -507,6 +516,14 @@ impl PagesConfig {
                     crate::pages::encrypt::MAX_CHUNK_SIZE
                 )),
             _ => {}
+        }
+        if let Some(compression) = self.normalized_compression()
+            && compression != DEFAULT_COMPRESSION
+        {
+            errors.push(format!(
+                "Invalid encryption.compression: '{}'. The current encrypted pages format supports only deflate.",
+                self.encryption.compression.as_deref().unwrap_or_default()
+            ));
         }
 
         // Warnings
@@ -785,6 +802,32 @@ mod tests {
         let result = config.validate();
         assert!(!result.valid);
         assert!(result.errors.iter().any(|e| e.contains("chunk_size")));
+    }
+
+    #[test]
+    fn test_validate_rejects_unsupported_compression() {
+        let mut config = config_with_password();
+        config.encryption.compression = Some("gzip".to_string());
+
+        let result = config.validate();
+        assert!(!result.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("compression") && e.contains("deflate"))
+        );
+    }
+
+    #[test]
+    fn test_validate_compression_trims_and_normalizes() {
+        let mut config = config_with_password();
+        config.encryption.compression = Some(" Deflate ".to_string());
+
+        let result = config.validate();
+        assert!(result.valid, "{:?}", result.errors);
+        let resolved = result.resolved.expect("resolved config should exist");
+        assert_eq!(resolved.encryption.compression, DEFAULT_COMPRESSION);
     }
 
     #[test]
