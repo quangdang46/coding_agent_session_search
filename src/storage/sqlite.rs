@@ -445,7 +445,6 @@ pub(crate) fn open_franken_raw_readonly_connection_with_timeout(
 }
 
 pub(crate) fn retryable_franken_error(err: &frankensqlite::FrankenError) -> bool {
-    let lower = err.to_string().to_ascii_lowercase();
     matches!(
         err,
         frankensqlite::FrankenError::Busy
@@ -455,7 +454,12 @@ pub(crate) fn retryable_franken_error(err: &frankensqlite::FrankenError) -> bool
             | frankensqlite::FrankenError::LockFailed { .. }
             | frankensqlite::FrankenError::WriteConflict { .. }
             | frankensqlite::FrankenError::SerializationFailure { .. }
-    ) || lower.contains("busy")
+    ) || retryable_storage_error_message(&err.to_string())
+}
+
+pub(crate) fn retryable_storage_error_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("busy")
         || lower.contains("locked")
         || lower.contains("locking")
         || lower.contains("contention")
@@ -468,14 +472,7 @@ pub(crate) fn retryable_franken_anyhow(err: &anyhow::Error) -> bool {
         cause
             .downcast_ref::<frankensqlite::FrankenError>()
             .is_some_and(retryable_franken_error)
-            || {
-                let lower = cause.to_string().to_ascii_lowercase();
-                lower.contains("busy")
-                    || lower.contains("locked")
-                    || lower.contains("contention")
-                    || lower.contains("temporarily unavailable")
-                    || lower.contains("would block")
-            }
+            || retryable_storage_error_message(&cause.to_string())
     })
 }
 
@@ -4742,7 +4739,7 @@ fn current_schema_repair_batches_for_missing_tables(
 }
 
 /// Migration name lookup for backfilling `_schema_migrations` during transition.
-const MIGRATION_NAMES: [(i64, &str); 14] = [
+const MIGRATION_NAMES: [(i64, &str); 20] = [
     (1, "core_tables"),
     (2, "fts_messages"),
     (3, "fts_messages_rebuild"),
@@ -4757,6 +4754,12 @@ const MIGRATION_NAMES: [(i64, &str); 14] = [
     (12, "model_dimensions"),
     (13, "plan_token_rollups"),
     (14, "fts_contentless"),
+    (15, "conversation_tail_state_cache"),
+    (16, "drop_redundant_message_conv_idx"),
+    (17, "drop_message_created_idx"),
+    (18, "conversation_tail_state_hot_table"),
+    (19, "conversation_external_lookup"),
+    (20, "conversation_external_tail_lookup"),
 ];
 
 /// Transitions an existing database from `meta` table schema versioning to the
@@ -22374,6 +22377,37 @@ mod tests {
             versions,
             (1..=10).collect::<Vec<i64>>(),
             "transition should backfill versions 1..=10"
+        );
+    }
+
+    #[test]
+    fn franken_transition_from_current_meta_backfills_current_schema_marker() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test_current_transition.db");
+
+        let conn = FrankenConnection::open(db_path.to_string_lossy().to_string()).unwrap();
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .unwrap();
+        conn.execute_compat(
+            "INSERT INTO meta(key, value) VALUES('schema_version', ?1);",
+            &[ParamValue::from(CURRENT_SCHEMA_VERSION.to_string())],
+        )
+        .unwrap();
+        conn.execute("CREATE TABLE conversations (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        drop(conn);
+
+        let conn = FrankenConnection::open(db_path.to_string_lossy().to_string()).unwrap();
+        transition_from_meta_version(&conn).unwrap();
+
+        let rows = conn
+            .query("SELECT version FROM _schema_migrations ORDER BY version;")
+            .unwrap();
+        let versions: Vec<i64> = rows.iter().filter_map(|r| r.get_typed(0).ok()).collect();
+        assert_eq!(
+            versions,
+            (1..=CURRENT_SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "current meta schema marker should backfill every known migration"
         );
     }
 

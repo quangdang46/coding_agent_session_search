@@ -11047,6 +11047,11 @@ fn open_storage_for_index(
             })?;
             Ok((storage, true, true))
         }
+        Err(err) if allow_full_recovery && migration_error_is_retryable_open_contention(&err) => {
+            Err(anyhow::anyhow!(
+                "canonical db is busy/locked during full rebuild open; refusing to replace it: {err}"
+            ))
+        }
         Err(err) if allow_full_recovery => {
             tracing::warn!(
                 db_path = %db_path.display(),
@@ -11087,6 +11092,16 @@ fn open_storage_for_index(
         Err(err) => Err(anyhow::anyhow!(
             "failed to open frankensqlite storage: {err:#}"
         )),
+    }
+}
+
+fn migration_error_is_retryable_open_contention(err: &MigrationError) -> bool {
+    match err {
+        MigrationError::Database(err) => crate::storage::sqlite::retryable_franken_error(err),
+        MigrationError::Other(message) => {
+            crate::storage::sqlite::retryable_storage_error_message(message)
+        }
+        MigrationError::RebuildRequired { .. } | MigrationError::Io(_) => false,
     }
 }
 
@@ -26192,6 +26207,55 @@ mod tests {
             backup_count >= 1,
             "expected backup artifact for rebuilt schema"
         );
+    }
+
+    #[test]
+    fn full_rebuild_open_failure_gate_refuses_retryable_contention() {
+        let retryable_errors = [
+            MigrationError::Database(frankensqlite::FrankenError::Busy),
+            MigrationError::Database(frankensqlite::FrankenError::BusyRecovery),
+            MigrationError::Database(frankensqlite::FrankenError::BusySnapshot {
+                conflicting_pages: "1,2".to_string(),
+            }),
+            MigrationError::Database(frankensqlite::FrankenError::DatabaseLocked {
+                path: PathBuf::from("/tmp/cass-busy.db"),
+            }),
+            MigrationError::Database(frankensqlite::FrankenError::WriteConflict {
+                page: 4,
+                holder: 7,
+            }),
+            MigrationError::Other("database is locked by another indexer".to_string()),
+            MigrationError::Other("temporarily unavailable while writer holds lock".to_string()),
+        ];
+
+        for err in retryable_errors {
+            assert!(
+                migration_error_is_retryable_open_contention(&err),
+                "retryable open failure must not allow canonical DB replacement: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_rebuild_open_failure_gate_allows_non_retryable_recovery_errors() {
+        let non_retryable_errors = [
+            MigrationError::Database(frankensqlite::FrankenError::DatabaseCorrupt {
+                detail: "bad page checksum".to_string(),
+            }),
+            MigrationError::Other("schema migration failed permanently".to_string()),
+            MigrationError::RebuildRequired {
+                reason: "future schema".to_string(),
+                backup_path: None,
+            },
+            MigrationError::Io(std::io::Error::other("permission denied")),
+        ];
+
+        for err in non_retryable_errors {
+            assert!(
+                !migration_error_is_retryable_open_contention(&err),
+                "non-retryable recovery failure should keep existing recovery semantics: {err}"
+            );
+        }
     }
 
     #[test]

@@ -5536,6 +5536,23 @@ fn error_chain_indicates_active_cass_index(chain: &str) -> bool {
     chain.contains("another cass index process already holds")
 }
 
+fn error_chain_indicates_retryable_storage_contention(chain: &str) -> bool {
+    crate::storage::sqlite::retryable_storage_error_message(chain)
+}
+
+fn index_storage_contention_cli_error(chain: &str) -> CliError {
+    CliError {
+        code: 7,
+        kind: CliErrorKind::IndexBusy.kind_str(),
+        message: format!("index failed because the canonical database is busy/locked: {chain}"),
+        hint: Some(
+            "Retry after the current database writer or indexer finishes; cass refused to replace the canonical database for this transient condition."
+                .to_string(),
+        ),
+        retryable: true,
+    }
+}
+
 fn cli_error_json_payload(err: &CliError, elapsed_ms: u128) -> serde_json::Value {
     let mut payload = serde_json::json!({
         "success": false,
@@ -14960,6 +14977,40 @@ mode=index",
         assert_eq!(payload["retryable"].as_bool(), Some(true));
     }
 
+    #[test]
+    fn retryable_storage_contention_cli_error_is_lock_busy_shaped() {
+        let chain = "canonical db is busy/locked during full rebuild open; refusing to replace it: database is locked";
+
+        assert!(error_chain_indicates_retryable_storage_contention(chain));
+        let err = index_storage_contention_cli_error(chain);
+
+        assert_eq!(err.code, 7);
+        assert_eq!(err.kind, "index-busy");
+        assert!(err.retryable);
+        assert!(
+            err.message.contains("busy/locked"),
+            "message should name the contention class: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("refusing to replace"),
+            "message should preserve the no-replacement decision: {}",
+            err.message
+        );
+        assert!(
+            err.hint
+                .as_deref()
+                .is_some_and(|hint| hint.contains("Retry")),
+            "retry hint should be actionable: {:?}",
+            err.hint
+        );
+
+        let payload = cli_error_json_payload(&err, 99);
+        assert_eq!(payload["code"].as_i64(), Some(7));
+        assert_eq!(payload["kind"].as_str(), Some("index-busy"));
+        assert_eq!(payload["retryable"].as_bool(), Some(true));
+    }
+
     // =====================================================
     // `cass resume` — issue #175
     // =====================================================
@@ -20547,6 +20598,9 @@ fn run_index_with_data(
                 let err = details.to_cli_error();
                 active_index_error = Some(details);
                 return err;
+            }
+            if error_chain_indicates_retryable_storage_contention(&chain) {
+                return index_storage_contention_cli_error(&chain);
             }
             CliError {
                 code: 9,
