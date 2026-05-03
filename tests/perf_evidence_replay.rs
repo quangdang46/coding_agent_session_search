@@ -4,20 +4,34 @@ use coding_agent_search::perf_evidence::{
     PerfReplayMetric, PerfReplayThresholds, PerfReplayVerdict, PerfSearchSnapshot, PerfWorkload,
     PerfWorkloadKind, read_perf_evidence_ledger, write_perf_evidence_ledger,
 };
+use std::fs;
 
 fn ledger(run_id: &str, p99_ms: u64, elapsed_ms: u64) -> PerfEvidenceLedger {
+    workload_ledger(
+        run_id,
+        PerfWorkloadKind::Search,
+        "saved-artifact-search",
+        ["cass", "search", "memory pressure", "--json"],
+        p99_ms,
+        elapsed_ms,
+    )
+}
+
+fn workload_ledger<const N: usize>(
+    run_id: &str,
+    kind: PerfWorkloadKind,
+    name: &str,
+    command_args: [&str; N],
+    p99_ms: u64,
+    elapsed_ms: u64,
+) -> PerfEvidenceLedger {
     let mut ledger = PerfEvidenceLedger::new(
         run_id,
         PerfWorkload {
-            kind: PerfWorkloadKind::Search,
-            name: "saved-artifact-search".to_string(),
+            kind,
+            name: name.to_string(),
             description: Some("integration fixture for saved perf evidence replay".to_string()),
-            command_args: vec![
-                "cass".to_string(),
-                "search".to_string(),
-                "memory pressure".to_string(),
-                "--json".to_string(),
-            ],
+            command_args: command_args.iter().map(|arg| (*arg).to_string()).collect(),
             input_count: Some(PerfCount {
                 value: 10_000,
                 precision: PerfCountPrecision::LowerBound,
@@ -145,4 +159,87 @@ fn replay_harness_writes_reads_and_gates_saved_ledger_artifacts() {
         }),
         "{report:#?}"
     );
+}
+
+#[test]
+fn representative_query_index_ledgers_are_generated_and_replay_cleanly() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let fixtures = [
+        workload_ledger(
+            "fixture-search",
+            PerfWorkloadKind::Search,
+            "fixture-search",
+            ["cass", "search", "lock contention", "--json"],
+            32,
+            64,
+        ),
+        workload_ledger(
+            "fixture-watch-once",
+            PerfWorkloadKind::WatchOnce,
+            "fixture-watch-once",
+            [
+                "cass",
+                "index",
+                "--watch-once",
+                "/sessions/codex.jsonl",
+                "--json",
+            ],
+            48,
+            96,
+        ),
+        workload_ledger(
+            "fixture-full-rebuild",
+            PerfWorkloadKind::FullRebuild,
+            "fixture-full-rebuild",
+            ["cass", "index", "--full", "--json"],
+            96,
+            192,
+        ),
+    ];
+    let gate = PerfReplayGate::new(PerfReplayThresholds::default());
+
+    for fixture in fixtures {
+        let path = tmp.path().join(format!("{}.json", fixture.run_id));
+        let artifact = write_perf_evidence_ledger(&fixture, &path).expect("write fixture ledger");
+        assert_eq!(artifact.kind, "json");
+        assert!(artifact.sha256.is_some());
+
+        let decoded = read_perf_evidence_ledger(&path).expect("read fixture ledger");
+        assert_eq!(decoded.run_id, fixture.run_id);
+        assert_eq!(decoded.workload.kind, fixture.workload.kind);
+
+        let report = gate
+            .replay_files(&path, None)
+            .expect("replay fixture ledger without baseline");
+        assert_eq!(report.verdict, PerfReplayVerdict::Clean, "{report:#?}");
+        assert!(report.logs.iter().any(|event| {
+            event.artifact_path.as_deref() == Some(path.to_str().unwrap())
+                && event.run_id == fixture.run_id
+                && event.command_args == fixture.workload.command_args
+        }));
+    }
+}
+
+#[test]
+fn replay_harness_rejects_missing_field_artifact() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let missing_path = tmp.path().join("missing-run-id.json");
+    fs::write(
+        &missing_path,
+        r#"{
+  "schema_version": "1",
+  "recorded_at_ms": 1,
+  "workload": {
+    "kind": "search",
+    "name": "missing-run-id"
+  }
+}"#,
+    )
+    .expect("write malformed fixture");
+
+    let err = read_perf_evidence_ledger(&missing_path)
+        .expect_err("missing run_id should reject artifact")
+        .to_string();
+
+    assert!(err.contains("missing field `run_id`"), "{err}");
 }
