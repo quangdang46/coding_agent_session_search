@@ -45,6 +45,9 @@ pub const MANIFEST_FORMAT_VERSION: u32 = 1;
 /// Filename for the durable manifest.
 pub const MANIFEST_FILENAME: &str = "semantic_manifest.json";
 
+/// Filename for the prototype per-shard semantic artifact manifest.
+pub const SHARD_MANIFEST_FILENAME: &str = "semantic_shards.json";
+
 // ─── Tier kind ─────────────────────────────────────────────────────────────
 
 /// Which semantic tier an artifact or checkpoint belongs to.
@@ -205,6 +208,309 @@ pub struct HnswRecord {
     pub built_at_ms: i64,
     /// Whether this index is ready for use.
     pub ready: bool,
+}
+
+// ─── Sharded vector artifact sidecar ─────────────────────────────────────
+
+/// Durable metadata for one mmap-friendly semantic vector shard.
+///
+/// Shards deliberately live in a sidecar manifest instead of
+/// [`SemanticManifest`]. Runtime readiness continues to flow through the
+/// existing tier artifact records, so partial shard generations cannot make a
+/// semantic tier look ready before a promotion step has merged or selected a
+/// complete generation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SemanticShardRecord {
+    /// Which semantic tier this shard belongs to.
+    pub tier: TierKind,
+    /// Embedder ID that produced the vectors.
+    pub embedder_id: String,
+    /// Model revision hash or "hash" for the hash embedder.
+    pub model_revision: String,
+    /// Semantic schema version at build time.
+    pub schema_version: u32,
+    /// Chunking strategy version at build time.
+    pub chunking_version: u32,
+    /// Output dimension of the embedder.
+    pub dimension: usize,
+    /// Zero-based shard number within the generation.
+    pub shard_index: u32,
+    /// Total shards expected for this generation.
+    pub shard_count: u32,
+    /// Number of documents embedded in this shard.
+    pub doc_count: u64,
+    /// Total conversations represented by the full shard generation.
+    pub total_conversations: u64,
+    /// Storage fingerprint of the canonical DB when this shard was built.
+    pub db_fingerprint: String,
+    /// Relative path to the shard index file from data_dir.
+    pub index_path: String,
+    /// Vector quantization used by the shard file.
+    pub quantization: String,
+    /// Whether readers may mmap this artifact directly.
+    pub mmap_ready: bool,
+    /// Relative path to the shard-local ANN accelerator, when built.
+    pub ann_index_path: Option<String>,
+    /// File size of the ANN accelerator in bytes.
+    pub ann_size_bytes: u64,
+    /// Whether the shard-local ANN accelerator is ready for use.
+    pub ann_ready: bool,
+    /// File size in bytes.
+    pub size_bytes: u64,
+    /// Unix timestamp (ms) when the shard build started.
+    pub started_at_ms: i64,
+    /// Unix timestamp (ms) when the shard build completed.
+    pub completed_at_ms: i64,
+    /// Whether this shard has been verified and published to the sidecar.
+    pub ready: bool,
+}
+
+impl SemanticShardRecord {
+    pub fn to_policy_manifest(&self) -> PolicyManifest {
+        PolicyManifest {
+            embedder_id: self.embedder_id.clone(),
+            model_revision: self.model_revision.clone(),
+            schema_version: self.schema_version,
+            chunking_version: self.chunking_version,
+            doc_count: self.doc_count,
+            built_at_ms: self.completed_at_ms,
+        }
+    }
+
+    pub fn matches_generation(
+        &self,
+        tier: TierKind,
+        embedder_id: &str,
+        db_fingerprint: &str,
+    ) -> bool {
+        self.tier == tier
+            && self.embedder_id == embedder_id
+            && self.db_fingerprint == db_fingerprint
+    }
+}
+
+/// Aggregated readiness for a shard generation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticShardSummary {
+    pub shard_count: u32,
+    pub ready_shards: u32,
+    pub ann_ready_shards: u32,
+    pub doc_count: u64,
+    pub total_conversations: u64,
+    pub size_bytes: u64,
+    pub ann_size_bytes: u64,
+    pub complete: bool,
+}
+
+/// Sidecar manifest for prototype semantic shard generations.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SemanticShardManifest {
+    pub manifest_version: u32,
+    pub shards: Vec<SemanticShardRecord>,
+    pub updated_at_ms: i64,
+}
+
+impl Default for SemanticShardManifest {
+    fn default() -> Self {
+        Self {
+            manifest_version: MANIFEST_FORMAT_VERSION,
+            shards: Vec::new(),
+            updated_at_ms: 0,
+        }
+    }
+}
+
+impl SemanticShardManifest {
+    pub fn path(data_dir: &Path) -> PathBuf {
+        data_dir.join("vector_index").join(SHARD_MANIFEST_FILENAME)
+    }
+
+    pub fn load(data_dir: &Path) -> Result<Option<Self>, ManifestError> {
+        let path = Self::path(data_dir);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(ManifestError::Io {
+                    path,
+                    source: e.to_string(),
+                });
+            }
+        };
+
+        let manifest: Self = serde_json::from_slice(&bytes).map_err(|e| ManifestError::Parse {
+            path: path.clone(),
+            source: e.to_string(),
+        })?;
+
+        if manifest.manifest_version > MANIFEST_FORMAT_VERSION {
+            return Err(ManifestError::UnsupportedVersion {
+                found: manifest.manifest_version,
+                max_supported: MANIFEST_FORMAT_VERSION,
+            });
+        }
+
+        Ok(Some(manifest))
+    }
+
+    pub fn load_or_default(data_dir: &Path) -> Result<Self, ManifestError> {
+        match Self::load(data_dir) {
+            Ok(Some(manifest)) => Ok(manifest),
+            Ok(None) => Ok(Self::default()),
+            Err(e @ ManifestError::Io { .. }) => Err(e),
+            Err(ManifestError::Parse { .. } | ManifestError::UnsupportedVersion { .. }) => {
+                Ok(Self::default())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn save(&mut self, data_dir: &Path) -> Result<(), ManifestError> {
+        let path = Self::path(data_dir);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| ManifestError::Io {
+                path: parent.to_path_buf(),
+                source: e.to_string(),
+            })?;
+        }
+
+        self.updated_at_ms = now_ms();
+        let json = serde_json::to_string_pretty(self).map_err(|e| ManifestError::Serialize {
+            source: e.to_string(),
+        })?;
+        let tmp_path = unique_manifest_temp_path(&path);
+        let mut file = fs::File::create(&tmp_path).map_err(|e| ManifestError::Io {
+            path: tmp_path.clone(),
+            source: e.to_string(),
+        })?;
+        file.write_all(json.as_bytes())
+            .map_err(|e| ManifestError::Io {
+                path: tmp_path.clone(),
+                source: e.to_string(),
+            })?;
+        file.sync_all().map_err(|e| ManifestError::Io {
+            path: tmp_path.clone(),
+            source: e.to_string(),
+        })?;
+        replace_file_from_temp(&tmp_path, &path).map_err(|e| ManifestError::Io {
+            path: path.clone(),
+            source: e.to_string(),
+        })?;
+        sync_parent_directory(&path).map_err(|e| ManifestError::Io {
+            path: path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| path.clone()),
+            source: e.to_string(),
+        })?;
+
+        Ok(())
+    }
+
+    pub fn replace_shards_for_generation(
+        &mut self,
+        tier: TierKind,
+        embedder_id: &str,
+        db_fingerprint: &str,
+        mut shards: Vec<SemanticShardRecord>,
+    ) {
+        self.shards
+            .retain(|shard| !shard.matches_generation(tier, embedder_id, db_fingerprint));
+        self.shards.append(&mut shards);
+        self.shards.sort_by(|a, b| {
+            (
+                a.tier.as_str(),
+                &a.embedder_id,
+                &a.db_fingerprint,
+                a.shard_index,
+            )
+                .cmp(&(
+                    b.tier.as_str(),
+                    &b.embedder_id,
+                    &b.db_fingerprint,
+                    b.shard_index,
+                ))
+        });
+    }
+
+    pub fn summary(
+        &self,
+        tier: TierKind,
+        embedder_id: &str,
+        db_fingerprint: &str,
+    ) -> SemanticShardSummary {
+        let mut summary = SemanticShardSummary::default();
+        let mut ready_indices = std::collections::BTreeSet::new();
+        let mut ann_ready_indices = std::collections::BTreeSet::new();
+        let mut expected_shard_count = None;
+        let mut generation_consistent = true;
+        for shard in self
+            .shards
+            .iter()
+            .filter(|shard| shard.matches_generation(tier, embedder_id, db_fingerprint))
+        {
+            if shard.shard_count == 0 {
+                generation_consistent = false;
+            }
+            match expected_shard_count {
+                Some(expected) if expected != shard.shard_count => {
+                    generation_consistent = false;
+                }
+                None => expected_shard_count = Some(shard.shard_count),
+                _ => {}
+            }
+            summary.shard_count = summary.shard_count.max(shard.shard_count);
+            summary.doc_count = summary.doc_count.saturating_add(shard.doc_count);
+            summary.total_conversations =
+                summary.total_conversations.max(shard.total_conversations);
+            summary.size_bytes = summary.size_bytes.saturating_add(shard.size_bytes);
+            summary.ann_size_bytes = summary.ann_size_bytes.saturating_add(shard.ann_size_bytes);
+            if shard.ready && shard.mmap_ready {
+                ready_indices.insert(shard.shard_index);
+            }
+            if shard.ready
+                && shard.mmap_ready
+                && shard.ann_ready
+                && shard.ann_index_path.is_some()
+                && shard.ann_size_bytes > 0
+            {
+                ann_ready_indices.insert(shard.shard_index);
+            }
+        }
+        summary.ready_shards = u32::try_from(ready_indices.len()).unwrap_or(u32::MAX);
+        summary.ann_ready_shards = u32::try_from(ann_ready_indices.len()).unwrap_or(u32::MAX);
+        summary.complete = generation_consistent
+            && summary.shard_count > 0
+            && summary.ready_shards == summary.shard_count
+            && (0..summary.shard_count).all(|index| ready_indices.contains(&index));
+        summary
+    }
+
+    pub fn invalidate_incompatible(
+        &mut self,
+        policy: &SemanticPolicy,
+        current_model_revision: &str,
+    ) -> usize {
+        let before = self.shards.len();
+        self.shards.retain(|shard| {
+            !matches!(
+                shard.to_policy_manifest().invalidation_action(
+                    policy,
+                    current_model_revision,
+                    &shard.embedder_id,
+                ),
+                InvalidationAction::DiscardAndRebuild { .. } | InvalidationAction::Evict
+            )
+        });
+        before.saturating_sub(self.shards.len())
+    }
+
+    pub fn total_size_bytes(&self) -> u64 {
+        self.shards
+            .iter()
+            .map(|shard| shard.size_bytes)
+            .fold(0, u64::saturating_add)
+    }
 }
 
 // ─── Build checkpoint ──────────────────────────────────────────────────────
@@ -889,6 +1195,32 @@ mod tests {
         }
     }
 
+    fn test_shard(shard_index: u32, shard_count: u32, ready: bool) -> SemanticShardRecord {
+        SemanticShardRecord {
+            tier: TierKind::Fast,
+            embedder_id: "fnv1a-384".to_owned(),
+            model_revision: "hash".to_owned(),
+            schema_version: SEMANTIC_SCHEMA_VERSION,
+            chunking_version: CHUNKING_STRATEGY_VERSION,
+            dimension: 384,
+            shard_index,
+            shard_count,
+            doc_count: 25,
+            total_conversations: 10,
+            db_fingerprint: "fp-sharded".to_owned(),
+            index_path: format!("vector_index/shards/fast-fnv1a-384/shard-{shard_index:05}.fsvi"),
+            quantization: "f16".to_owned(),
+            mmap_ready: true,
+            ann_index_path: None,
+            ann_size_bytes: 0,
+            ann_ready: false,
+            size_bytes: 4096,
+            started_at_ms: 1_700_000_080_000,
+            completed_at_ms: 1_700_000_081_000,
+            ready,
+        }
+    }
+
     fn test_checkpoint(tier: TierKind) -> BuildCheckpoint {
         BuildCheckpoint {
             tier,
@@ -1413,5 +1745,135 @@ mod tests {
         assert_eq!(deser.quality_tier, manifest.quality_tier);
         assert_eq!(deser.hnsw, manifest.hnsw);
         assert_eq!(deser.checkpoint, manifest.checkpoint);
+    }
+
+    // ── Shard sidecar manifest ─────────────────────────────────────────
+
+    #[test]
+    fn shard_manifest_round_trip_via_sidecar() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut shards = SemanticShardManifest::default();
+        shards.replace_shards_for_generation(
+            TierKind::Fast,
+            "fnv1a-384",
+            "fp-sharded",
+            vec![test_shard(1, 2, true), test_shard(0, 2, true)],
+        );
+
+        shards.save(temp.path()).unwrap();
+        let loaded = SemanticShardManifest::load(temp.path()).unwrap().unwrap();
+
+        assert_eq!(loaded.manifest_version, MANIFEST_FORMAT_VERSION);
+        assert_eq!(loaded.shards.len(), 2);
+        assert_eq!(loaded.shards[0].shard_index, 0);
+        assert_eq!(loaded.shards[1].shard_index, 1);
+        assert!(loaded.updated_at_ms > 0);
+    }
+
+    #[test]
+    fn shard_summary_requires_every_ready_shard() {
+        let mut shards = SemanticShardManifest::default();
+        shards.replace_shards_for_generation(
+            TierKind::Fast,
+            "fnv1a-384",
+            "fp-sharded",
+            vec![test_shard(0, 3, true), test_shard(2, 3, true)],
+        );
+
+        let partial = shards.summary(TierKind::Fast, "fnv1a-384", "fp-sharded");
+        assert_eq!(partial.shard_count, 3);
+        assert_eq!(partial.ready_shards, 2);
+        assert!(!partial.complete);
+
+        shards.replace_shards_for_generation(
+            TierKind::Fast,
+            "fnv1a-384",
+            "fp-sharded",
+            vec![
+                test_shard(0, 3, true),
+                test_shard(1, 3, true),
+                test_shard(2, 3, true),
+            ],
+        );
+
+        let complete = shards.summary(TierKind::Fast, "fnv1a-384", "fp-sharded");
+        assert_eq!(complete.ready_shards, 3);
+        assert!(complete.complete);
+        assert_eq!(complete.doc_count, 75);
+        assert_eq!(complete.total_conversations, 10);
+    }
+
+    #[test]
+    fn shard_summary_rejects_non_mmap_ready_or_inconsistent_shards() {
+        let mut non_mmap = test_shard(0, 1, true);
+        non_mmap.mmap_ready = false;
+        let mut shards = SemanticShardManifest::default();
+        shards.replace_shards_for_generation(
+            TierKind::Fast,
+            "fnv1a-384",
+            "fp-sharded",
+            vec![non_mmap],
+        );
+
+        let non_mmap_summary = shards.summary(TierKind::Fast, "fnv1a-384", "fp-sharded");
+        assert_eq!(non_mmap_summary.ready_shards, 0);
+        assert!(!non_mmap_summary.complete);
+
+        let mut inconsistent = test_shard(1, 3, true);
+        inconsistent.ann_ready = true;
+        inconsistent.ann_index_path = None;
+        inconsistent.ann_size_bytes = 4096;
+        shards.replace_shards_for_generation(
+            TierKind::Fast,
+            "fnv1a-384",
+            "fp-sharded",
+            vec![test_shard(0, 2, true), inconsistent],
+        );
+
+        let inconsistent_summary = shards.summary(TierKind::Fast, "fnv1a-384", "fp-sharded");
+        assert_eq!(inconsistent_summary.shard_count, 3);
+        assert_eq!(inconsistent_summary.ready_shards, 2);
+        assert_eq!(inconsistent_summary.ann_ready_shards, 0);
+        assert!(!inconsistent_summary.complete);
+    }
+
+    #[test]
+    fn shard_sidecar_does_not_make_main_manifest_ready() {
+        let mut shards = SemanticShardManifest::default();
+        shards.replace_shards_for_generation(
+            TierKind::Fast,
+            "fnv1a-384",
+            "fp-sharded",
+            vec![test_shard(0, 1, true)],
+        );
+        assert!(
+            shards
+                .summary(TierKind::Fast, "fnv1a-384", "fp-sharded")
+                .complete
+        );
+
+        let manifest = SemanticManifest::default();
+        let policy = test_policy();
+        assert_eq!(
+            manifest.fast_tier_readiness(&policy, "fp-sharded", "hash"),
+            TierReadiness::Missing,
+            "sidecar shards must not publish runtime semantic readiness"
+        );
+    }
+
+    #[test]
+    fn shard_manifest_invalidates_incompatible_shards() {
+        let mut bad = test_shard(0, 1, true);
+        bad.schema_version = 0;
+        let mut shards = SemanticShardManifest {
+            shards: vec![bad, test_shard(0, 1, true)],
+            ..Default::default()
+        };
+
+        let invalidated = shards.invalidate_incompatible(&test_policy(), "hash");
+
+        assert_eq!(invalidated, 1);
+        assert_eq!(shards.shards.len(), 1);
+        assert_eq!(shards.total_size_bytes(), 4096);
     }
 }

@@ -41,8 +41,11 @@
 //! - Memory timeline: Streaming should show flat profile vs batch's spike
 
 use coding_agent_search::indexer::redact_secrets::redact_text;
-use coding_agent_search::indexer::semantic::{EmbeddingInput, SemanticIndexer};
+use coding_agent_search::indexer::semantic::{
+    EmbeddingInput, SemanticIndexer, SemanticShardBuildPlan,
+};
 use coding_agent_search::indexer::{IndexOptions, run_index};
+use coding_agent_search::search::semantic_manifest::{SemanticShardManifest, TierKind};
 use coding_agent_search::search::tantivy::index_dir;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::fs;
@@ -325,6 +328,98 @@ fn bench_semantic_embedding(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark the prototype sharded semantic writer against the existing
+/// monolithic FSVI writer. The corpus uses the hash embedder so this isolates
+/// file publishing, per-shard manifest cost, and optional shard-local ANN build
+/// without depending on model downloads.
+fn bench_semantic_shard_generation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("semantic_shard_generation");
+    group.sample_size(10);
+    let indexer = SemanticIndexer::new("hash", None).unwrap();
+    let messages = build_semantic_corpus(128);
+    let embeddings = indexer.embed_messages(&messages).unwrap();
+
+    group.bench_function("monolithic_fsvi_build", |b| {
+        b.iter(|| {
+            let tmp = TempDir::new().unwrap();
+            let index = indexer
+                .build_and_save_index(embeddings.clone(), tmp.path())
+                .unwrap();
+            std::hint::black_box(index.record_count());
+        });
+    });
+
+    group.bench_function("sharded_fsvi_build_32", |b| {
+        b.iter(|| {
+            let tmp = TempDir::new().unwrap();
+            let outcome = indexer
+                .build_and_save_index_shards(
+                    embeddings.clone(),
+                    tmp.path(),
+                    SemanticShardBuildPlan {
+                        tier: TierKind::Fast,
+                        db_fingerprint: "bench-db-fp".to_string(),
+                        model_revision: "hash".to_string(),
+                        total_conversations: 128,
+                        max_records_per_shard: 32,
+                        build_ann: false,
+                    },
+                )
+                .unwrap();
+            std::hint::black_box(outcome.shard_count);
+        });
+    });
+
+    group.bench_function("sharded_fsvi_hnsw_build_32", |b| {
+        b.iter(|| {
+            let tmp = TempDir::new().unwrap();
+            let outcome = indexer
+                .build_and_save_index_shards(
+                    embeddings.clone(),
+                    tmp.path(),
+                    SemanticShardBuildPlan {
+                        tier: TierKind::Fast,
+                        db_fingerprint: "bench-db-fp-ann".to_string(),
+                        model_revision: "hash".to_string(),
+                        total_conversations: 128,
+                        max_records_per_shard: 32,
+                        build_ann: true,
+                    },
+                )
+                .unwrap();
+            std::hint::black_box(outcome.ann_index_paths.len());
+        });
+    });
+
+    let manifest_tmp = TempDir::new().unwrap();
+    indexer
+        .build_and_save_index_shards(
+            embeddings.clone(),
+            manifest_tmp.path(),
+            SemanticShardBuildPlan {
+                tier: TierKind::Fast,
+                db_fingerprint: "bench-db-fp-open".to_string(),
+                model_revision: "hash".to_string(),
+                total_conversations: 128,
+                max_records_per_shard: 32,
+                build_ann: true,
+            },
+        )
+        .unwrap();
+    group.bench_function("shard_manifest_load_summary", |b| {
+        b.iter(|| {
+            let manifest = SemanticShardManifest::load(manifest_tmp.path())
+                .unwrap()
+                .unwrap();
+            let summary =
+                manifest.summary(TierKind::Fast, indexer.embedder_id(), "bench-db-fp-open");
+            std::hint::black_box((summary.ready_shards, summary.ann_ready_shards));
+        });
+    });
+
+    group.finish();
+}
+
 /// Benchmark the full ingest pipeline with and without the parallel
 /// pre-compute of `map_to_internal`. The `CASS_STREAMING_INDEX` toggle
 /// doesn't affect the hoist; both modes exercise it. We compare a
@@ -459,6 +554,7 @@ criterion_group!(
     bench_streaming_vs_batch,
     bench_channel_overhead,
     bench_semantic_embedding,
+    bench_semantic_shard_generation,
     bench_ingest_with_responsiveness,
     bench_card_defaults_ab,
 );

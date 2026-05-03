@@ -27,7 +27,8 @@ use crate::search::fastembed_embedder::FastEmbedder;
 use crate::search::hash_embedder::HashEmbedder;
 use crate::search::policy::{CHUNKING_STRATEGY_VERSION, SEMANTIC_SCHEMA_VERSION, SemanticPolicy};
 use crate::search::semantic_manifest::{
-    ArtifactRecord, BuildCheckpoint, SemanticManifest, TierKind,
+    ArtifactRecord, BuildCheckpoint, SemanticManifest, SemanticShardManifest, SemanticShardRecord,
+    TierKind,
 };
 use crate::search::tantivy::{
     normalized_index_origin_host, normalized_index_origin_kind, normalized_index_source_id,
@@ -154,6 +155,29 @@ pub struct SemanticBackfillBatchOutcome {
     pub published: bool,
     pub index_path: PathBuf,
     pub manifest_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct SemanticShardBuildPlan {
+    pub tier: TierKind,
+    pub db_fingerprint: String,
+    pub model_revision: String,
+    pub total_conversations: u64,
+    pub max_records_per_shard: usize,
+    pub build_ann: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SemanticShardBuildOutcome {
+    pub tier: TierKind,
+    pub embedder_id: String,
+    pub shard_count: u32,
+    pub doc_count: u64,
+    pub total_conversations: u64,
+    pub index_paths: Vec<PathBuf>,
+    pub ann_index_paths: Vec<PathBuf>,
+    pub shard_manifest_path: PathBuf,
+    pub complete: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -420,6 +444,50 @@ fn semantic_staging_index_path(
         tier.as_str(),
         safe_path_component(embedder_id)
     ))
+}
+
+fn semantic_generation_fingerprint_component(db_fingerprint: &str) -> String {
+    blake3::hash(db_fingerprint.as_bytes())
+        .to_hex()
+        .chars()
+        .take(16)
+        .collect()
+}
+
+fn semantic_shard_generation_dir(
+    data_dir: &Path,
+    tier: TierKind,
+    embedder_id: &str,
+    db_fingerprint: &str,
+) -> PathBuf {
+    let fingerprint_hash = semantic_generation_fingerprint_component(db_fingerprint);
+    data_dir.join(VECTOR_INDEX_DIR).join("shards").join(format!(
+        "{}-{}-{fingerprint_hash}",
+        tier.as_str(),
+        safe_path_component(embedder_id),
+    ))
+}
+
+fn semantic_shard_index_path(
+    data_dir: &Path,
+    tier: TierKind,
+    embedder_id: &str,
+    db_fingerprint: &str,
+    shard_index: u32,
+) -> PathBuf {
+    semantic_shard_generation_dir(data_dir, tier, embedder_id, db_fingerprint)
+        .join(format!("shard-{shard_index:05}.fsvi"))
+}
+
+fn semantic_shard_ann_index_path(
+    data_dir: &Path,
+    tier: TierKind,
+    embedder_id: &str,
+    db_fingerprint: &str,
+    shard_index: u32,
+) -> PathBuf {
+    semantic_shard_generation_dir(data_dir, tier, embedder_id, db_fingerprint)
+        .join(format!("shard-{shard_index:05}.chsw"))
 }
 
 fn sync_parent_directory(path: &Path) -> Result<()> {
@@ -1282,6 +1350,184 @@ impl SemanticIndexer {
         self.build_and_save_index_at_path(embedded_messages, &index_path)
     }
 
+    pub fn build_and_save_index_shards<I>(
+        &self,
+        embedded_messages: I,
+        data_dir: &Path,
+        plan: SemanticShardBuildPlan,
+    ) -> Result<SemanticShardBuildOutcome>
+    where
+        I: IntoIterator<Item = EmbeddedMessage>,
+    {
+        if plan.db_fingerprint.trim().is_empty() {
+            bail!("semantic shard build requires a non-empty DB fingerprint");
+        }
+        if plan.max_records_per_shard == 0 {
+            bail!("semantic shard build requires max_records_per_shard > 0");
+        }
+
+        let mut shard_records = Vec::new();
+        let mut index_paths = Vec::new();
+        let mut ann_index_paths = Vec::new();
+        let mut current_records = Vec::with_capacity(plan.max_records_per_shard);
+        let mut shard_index = 0u32;
+        let mut total_docs = 0u64;
+
+        for embedded in embedded_messages {
+            current_records.push(embedded);
+            if current_records.len() >= plan.max_records_per_shard {
+                let records = std::mem::take(&mut current_records);
+                let (record, path, ann_path) =
+                    self.write_semantic_shard(records, data_dir, &plan, shard_index)?;
+                total_docs = total_docs.saturating_add(record.doc_count);
+                shard_records.push(record);
+                index_paths.push(path);
+                if let Some(path) = ann_path {
+                    ann_index_paths.push(path);
+                }
+                shard_index = shard_index
+                    .checked_add(1)
+                    .context("semantic shard index overflow")?;
+            }
+        }
+
+        if !current_records.is_empty() {
+            let records = std::mem::take(&mut current_records);
+            let (record, path, ann_path) =
+                self.write_semantic_shard(records, data_dir, &plan, shard_index)?;
+            total_docs = total_docs.saturating_add(record.doc_count);
+            shard_records.push(record);
+            index_paths.push(path);
+            if let Some(path) = ann_path {
+                ann_index_paths.push(path);
+            }
+        }
+
+        let shard_count = u32::try_from(shard_records.len())
+            .context("semantic shard generation exceeded u32 shard count")?;
+        for record in &mut shard_records {
+            record.shard_count = shard_count;
+        }
+
+        let mut shard_manifest = SemanticShardManifest::load_or_default(data_dir)
+            .map_err(|err| anyhow::anyhow!("loading semantic shard manifest for publish: {err}"))?;
+        shard_manifest.replace_shards_for_generation(
+            plan.tier,
+            self.embedder_id(),
+            &plan.db_fingerprint,
+            shard_records,
+        );
+        shard_manifest
+            .save(data_dir)
+            .map_err(|err| anyhow::anyhow!("saving semantic shard manifest: {err}"))?;
+        let summary = shard_manifest.summary(plan.tier, self.embedder_id(), &plan.db_fingerprint);
+
+        tracing::info!(
+            tier = plan.tier.as_str(),
+            embedder = self.embedder_id(),
+            shard_count,
+            doc_count = total_docs,
+            total_conversations = plan.total_conversations,
+            "published semantic shard generation sidecar"
+        );
+
+        Ok(SemanticShardBuildOutcome {
+            tier: plan.tier,
+            embedder_id: self.embedder_id().to_string(),
+            shard_count,
+            doc_count: total_docs,
+            total_conversations: plan.total_conversations,
+            index_paths,
+            ann_index_paths,
+            shard_manifest_path: SemanticShardManifest::path(data_dir),
+            complete: summary.complete,
+        })
+    }
+
+    fn write_semantic_shard(
+        &self,
+        embedded_messages: Vec<EmbeddedMessage>,
+        data_dir: &Path,
+        plan: &SemanticShardBuildPlan,
+        shard_index: u32,
+    ) -> Result<(SemanticShardRecord, PathBuf, Option<PathBuf>)> {
+        let started_at_ms = now_ms();
+        let shard_path = semantic_shard_index_path(
+            data_dir,
+            plan.tier,
+            self.embedder_id(),
+            &plan.db_fingerprint,
+            shard_index,
+        );
+        let shard_index_file = self.build_and_save_index_at_path(embedded_messages, &shard_path)?;
+        let size_bytes = fs::metadata(&shard_path)
+            .with_context(|| format!("stat semantic shard {}", shard_path.display()))?
+            .len();
+        let (ann_index_path, ann_size_bytes, ann_ready, ann_absolute_path) = if plan.build_ann {
+            let ann_path = semantic_shard_ann_index_path(
+                data_dir,
+                plan.tier,
+                self.embedder_id(),
+                &plan.db_fingerprint,
+                shard_index,
+            );
+            let config = FsHnswConfig {
+                m: FS_HNSW_DEFAULT_M,
+                ef_construction: FS_HNSW_DEFAULT_EF_CONSTRUCTION,
+                ..FsHnswConfig::default()
+            };
+            let hnsw = FsHnswIndex::build_from_vector_index(&shard_index_file, config)
+                .map_err(|err| anyhow::anyhow!("build shard HNSW index failed: {err}"))?;
+            hnsw.save(&ann_path)
+                .map_err(|err| anyhow::anyhow!("save shard HNSW index failed: {err}"))?;
+            let ann_size_bytes = fs::metadata(&ann_path)
+                .with_context(|| format!("stat semantic shard ANN {}", ann_path.display()))?
+                .len();
+            let relative_ann_path = ann_path
+                .strip_prefix(data_dir)
+                .unwrap_or(ann_path.as_path())
+                .to_string_lossy()
+                .to_string();
+            (
+                Some(relative_ann_path),
+                ann_size_bytes,
+                true,
+                Some(ann_path),
+            )
+        } else {
+            (None, 0, false, None)
+        };
+        let relative_index_path = shard_path
+            .strip_prefix(data_dir)
+            .unwrap_or(shard_path.as_path())
+            .to_string_lossy()
+            .to_string();
+        let record = SemanticShardRecord {
+            tier: plan.tier,
+            embedder_id: self.embedder_id().to_string(),
+            model_revision: plan.model_revision.clone(),
+            schema_version: SEMANTIC_SCHEMA_VERSION,
+            chunking_version: CHUNKING_STRATEGY_VERSION,
+            dimension: self.embedder_dimension(),
+            shard_index,
+            shard_count: 0,
+            doc_count: u64::try_from(shard_index_file.record_count()).unwrap_or(u64::MAX),
+            total_conversations: plan.total_conversations,
+            db_fingerprint: plan.db_fingerprint.clone(),
+            index_path: relative_index_path,
+            quantization: "f16".to_string(),
+            mmap_ready: true,
+            ann_index_path,
+            ann_size_bytes,
+            ann_ready,
+            size_bytes,
+            started_at_ms,
+            completed_at_ms: now_ms(),
+            ready: true,
+        };
+        Ok((record, shard_path, ann_absolute_path))
+    }
+
     fn build_and_save_index_at_path<I>(
         &self,
         embedded_messages: I,
@@ -1928,6 +2174,124 @@ mod tests {
         assert_eq!(index.embedder_id(), indexer.embedder_id());
         assert_eq!(index.dimension(), indexer.embedder_dimension());
         assert_eq!(index.record_count(), 2);
+    }
+
+    #[test]
+    fn sharded_index_build_writes_sidecar_without_runtime_publish() {
+        let indexer = SemanticIndexer::new("hash", None).unwrap();
+        let messages: Vec<_> = (0..5)
+            .map(|idx| EmbeddingInput::new(idx, format!("semantic shard message {idx}")))
+            .collect();
+        let embeddings = indexer.embed_messages(&messages).unwrap();
+        let tmp = tempdir().unwrap();
+
+        let outcome = indexer
+            .build_and_save_index_shards(
+                embeddings,
+                tmp.path(),
+                SemanticShardBuildPlan {
+                    tier: TierKind::Fast,
+                    db_fingerprint: "db-fp-sharded-build".to_string(),
+                    model_revision: "hash".to_string(),
+                    total_conversations: 5,
+                    max_records_per_shard: 2,
+                    build_ann: false,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(outcome.shard_count, 3);
+        assert_eq!(outcome.doc_count, 5);
+        assert_eq!(outcome.total_conversations, 5);
+        assert!(outcome.complete);
+        assert_eq!(outcome.index_paths.len(), 3);
+        for path in &outcome.index_paths {
+            let shard = FsVectorIndex::open(path).unwrap();
+            assert_eq!(shard.embedder_id(), indexer.embedder_id());
+            assert!(shard.record_count() > 0);
+        }
+
+        let shards = SemanticShardManifest::load(tmp.path()).unwrap().unwrap();
+        let summary = shards.summary(TierKind::Fast, indexer.embedder_id(), "db-fp-sharded-build");
+        assert!(summary.complete);
+        assert_eq!(summary.ready_shards, 3);
+        assert_eq!(summary.ann_ready_shards, 0);
+        assert_eq!(summary.doc_count, 5);
+        assert_eq!(summary.total_conversations, 5);
+
+        assert!(
+            SemanticManifest::load(tmp.path()).unwrap().is_none(),
+            "sidecar shards must not publish the main runtime manifest"
+        );
+        assert!(!vector_index_path(tmp.path(), indexer.embedder_id()).exists());
+    }
+
+    #[test]
+    fn sharded_index_build_rejects_zero_sized_shards() {
+        let indexer = SemanticIndexer::new("hash", None).unwrap();
+        let err = indexer
+            .build_and_save_index_shards(
+                std::iter::empty(),
+                tempdir().unwrap().path(),
+                SemanticShardBuildPlan {
+                    tier: TierKind::Fast,
+                    db_fingerprint: "db-fp-sharded-build".to_string(),
+                    model_revision: "hash".to_string(),
+                    total_conversations: 0,
+                    max_records_per_shard: 0,
+                    build_ann: false,
+                },
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("max_records_per_shard > 0"));
+    }
+
+    #[test]
+    fn sharded_ann_build_records_per_shard_accelerators() {
+        let indexer = SemanticIndexer::new("hash", None).unwrap();
+        let messages: Vec<_> = (0..8)
+            .map(|idx| EmbeddingInput::new(idx, format!("semantic ann shard message {idx}")))
+            .collect();
+        let embeddings = indexer.embed_messages(&messages).unwrap();
+        let tmp = tempdir().unwrap();
+
+        let outcome = indexer
+            .build_and_save_index_shards(
+                embeddings,
+                tmp.path(),
+                SemanticShardBuildPlan {
+                    tier: TierKind::Fast,
+                    db_fingerprint: "db-fp-sharded-ann-build".to_string(),
+                    model_revision: "hash".to_string(),
+                    total_conversations: 8,
+                    max_records_per_shard: 4,
+                    build_ann: true,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(outcome.shard_count, 2);
+        assert_eq!(outcome.ann_index_paths.len(), 2);
+        for path in &outcome.ann_index_paths {
+            assert!(path.exists(), "ANN shard missing at {}", path.display());
+        }
+
+        let shards = SemanticShardManifest::load(tmp.path()).unwrap().unwrap();
+        let summary = shards.summary(
+            TierKind::Fast,
+            indexer.embedder_id(),
+            "db-fp-sharded-ann-build",
+        );
+        assert!(summary.complete);
+        assert_eq!(summary.ann_ready_shards, 2);
+        assert!(summary.ann_size_bytes > 0);
+        assert!(
+            shards
+                .shards
+                .iter()
+                .all(|record| record.ann_index_path.is_some() && record.ann_ready)
+        );
     }
 
     /// Golden-output regression: any change to the embedding prep pipeline,
