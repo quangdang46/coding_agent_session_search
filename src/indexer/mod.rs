@@ -3332,6 +3332,18 @@ impl LexicalRebuildStagedMergeController {
                     "producer_idle_allowing_max_staged_merge_parallelism".to_string(),
                 )
             }
+        } else if ready_artifacts.saturating_add(active_jobs)
+            <= LEXICAL_REBUILD_FINAL_FRONTIER_FEDERATED_SHARD_LIMIT
+        {
+            (
+                active_jobs.min(self.max_workers),
+                format!(
+                    "producer_finished_final_frontier_within_federated_cap_{}_active_jobs_{}_ready_artifacts_{}",
+                    LEXICAL_REBUILD_FINAL_FRONTIER_FEDERATED_SHARD_LIMIT,
+                    active_jobs,
+                    ready_artifacts
+                ),
+            )
         } else if let (Some(loadavg_1m_milli), Some(high_watermark_1m_milli)) = (
             runtime.host_loadavg_1m_milli,
             self.loadavg_high_watermark_1m_milli,
@@ -22943,6 +22955,46 @@ mod tests {
         assert!(should_reduce_staged_lexical_final_frontier(
             LEXICAL_REBUILD_FINAL_FRONTIER_FEDERATED_SHARD_LIMIT + 1
         ));
+    }
+
+    #[test]
+    fn staged_merge_controller_skips_finished_tail_merges_within_federated_publish_cap() {
+        let tmp = TempDir::new().unwrap();
+        let (merge_work_tx, _merge_work_rx) = bounded::<LexicalRebuildShardMergeJob>(1);
+        let mut merge_coordinator =
+            LexicalRebuildShardMergeCoordinator::new(tmp.path().join("eager-merge-stage"));
+        for shard_index in 0..LexicalRebuildShardMergeCoordinator::EAGER_MERGE_FAN_IN {
+            merge_coordinator
+                .queue_base_artifact(
+                    LexicalRebuildShardMergeArtifact {
+                        first_shard_index: shard_index,
+                        last_shard_index: shard_index,
+                        index_path: tmp.path().join(format!("shard-{shard_index:05}")),
+                        docs: 1,
+                        segments: 1,
+                    },
+                    &merge_work_tx,
+                )
+                .unwrap();
+        }
+
+        let controller = LexicalRebuildStagedMergeController::new(8, None);
+        let decision =
+            controller.decide(true, &LexicalRebuildPipelineRuntimeSnapshot::default(), &merge_coordinator);
+
+        assert_eq!(decision.ready_artifacts, 8);
+        assert_eq!(decision.ready_groups, 1);
+        assert_eq!(
+            decision.allowed_jobs, 0,
+            "a bounded final frontier should publish federated instead of paying another eager merge"
+        );
+        assert!(
+            decision
+                .controller_reason
+                .contains("final_frontier_within_federated_cap"),
+            "unexpected controller reason: {}",
+            decision.controller_reason
+        );
     }
 
     #[test]
