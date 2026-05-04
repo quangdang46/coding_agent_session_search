@@ -154,6 +154,7 @@ const Search = {
     countEl: null,
     matches: [],
     currentIndex: -1,
+    _initialized: false,
 
     init() {
         this.input = $('#search-input');
@@ -170,29 +171,32 @@ const Search = {
         }
         if (!this.countEl) return;
 
-        this.input.addEventListener('input', () => this.search());
-        this.input.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                if (e.shiftKey) {
-                    this.prev();
-                } else {
-                    this.next();
+        if (!this._initialized) {
+            this.input.addEventListener('input', () => this.search());
+            this.input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    if (e.shiftKey) {
+                        this.prev();
+                    } else {
+                        this.next();
+                    }
+                } else if (e.key === 'Escape') {
+                    this.clear();
+                    this.input.blur();
                 }
-            } else if (e.key === 'Escape') {
-                this.clear();
-                this.input.blur();
-            }
-        });
+            });
 
-        // Keyboard shortcut: Ctrl/Cmd + F for search
-        document.addEventListener('keydown', (e) => {
-            if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
-                e.preventDefault();
-                this.input.focus();
-                this.input.select();
-            }
-        });
+            // Keyboard shortcut: Ctrl/Cmd + F for search
+            document.addEventListener('keydown', (e) => {
+                if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+                    e.preventDefault();
+                    this.input.focus();
+                    this.input.select();
+                }
+            });
+            this._initialized = true;
+        }
     },
 
     search() {
@@ -352,6 +356,8 @@ fn generate_tool_toggle_js() -> String {
 const ToolCalls = {
     init() {
         $$('.tool-call-header').forEach((header) => {
+            if (header.dataset.toolToggleBound === 'true') return;
+            header.dataset.toolToggleBound = 'true';
             header.addEventListener('click', () => {
                 const toolCall = header.closest('.tool-call');
                 toolCall.classList.toggle('expanded');
@@ -364,6 +370,7 @@ const ToolCalls = {
 const ToolPopovers = {
     activePopover: null,
     activeBadge: null,
+    _outsideClickBound: false,
 
     init() {
         this.initBadges();
@@ -414,6 +421,8 @@ const ToolPopovers = {
 
     initOverflowBadges() {
         $$('.tool-overflow').forEach(btn => {
+            if (btn.dataset.overflowBound === 'true') return;
+            btn.dataset.overflowBound = 'true';
             // Store original text
             btn.dataset.originalText = btn.textContent.trim();
 
@@ -431,6 +440,8 @@ const ToolPopovers = {
     },
 
     initOutsideClick() {
+        if (this._outsideClickBound) return;
+        this._outsideClickBound = true;
         document.addEventListener('click', (e) => {
             if (!e.target.closest('.tool-badge')) {
                 this.hideAll();
@@ -771,6 +782,7 @@ const WorldClass = {
 
     initMessageLinks() {
         this.messages.forEach((msg, i) => {
+            if (msg.querySelector('.message-link')) return;
             const btn = document.createElement('button');
             btn.className = 'message-link';
             btn.title = 'Copy link to message';
@@ -862,8 +874,8 @@ const Crypto = {
     },
 
     async decrypt() {
-        const password = $('#password-input').value;
-        if (!password) return;
+        const passphrase = $('#password-input').value;
+        if (!passphrase) return;
 
         try {
             this.errorEl.hidden = true;
@@ -882,7 +894,7 @@ const Crypto = {
             const enc = new TextEncoder();
             const keyMaterial = await crypto.subtle.importKey(
                 'raw',
-                enc.encode(password),
+                enc.encode(passphrase),
                 'PBKDF2',
                 false,
                 ['deriveBits', 'deriveKey']
@@ -1062,6 +1074,24 @@ mod tests {
     }
 
     #[test]
+    fn test_search_init_is_idempotent_for_decryption_reinit() {
+        let opts = ExportOptions {
+            encrypt: true,
+            include_search: true,
+            ..Default::default()
+        };
+        let bundle = generate_scripts(&opts);
+
+        assert_inline_js_contains!(bundle, "currentIndex: -1,\n    _initialized: false");
+        assert_inline_js_contains!(
+            bundle,
+            "if (!this._initialized) {\n            this.input.addEventListener('input'"
+        );
+        assert_inline_js_contains!(bundle, "this._initialized = true;");
+        assert_inline_js_contains!(bundle, "Search.init()");
+    }
+
+    #[test]
     fn test_generate_scripts_excludes_search_when_disabled() {
         let opts = ExportOptions {
             include_search: false,
@@ -1171,6 +1201,7 @@ mod tests {
         // Message link copying
         assert_inline_js_contains!(bundle, "initMessageLinks");
         assert_inline_js_contains!(bundle, "message-link");
+        assert_inline_js_contains!(bundle, "msg.querySelector('.message-link')");
 
         // Intersection observer for animations
         assert_inline_js_contains!(bundle, "IntersectionObserver");
@@ -1244,10 +1275,15 @@ mod tests {
         // Overflow badge expansion
         assert_inline_js_contains!(bundle, "initOverflowBadges");
         assert_inline_js_contains!(bundle, "tool-overflow");
+        assert_inline_js_contains!(bundle, "btn.dataset.overflowBound");
 
         // Outside click to close
         assert_inline_js_contains!(bundle, "initOutsideClick");
         assert_inline_js_contains!(bundle, "hideAll");
+        assert_inline_js_contains!(bundle, "_outsideClickBound");
+
+        // Re-init guards
+        assert_inline_js_contains!(bundle, "header.dataset.toolToggleBound");
     }
 
     #[test]
