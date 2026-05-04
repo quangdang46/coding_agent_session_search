@@ -94,7 +94,7 @@ impl Toast {
     /// Create a new toast with default duration
     pub fn new(message: impl Into<String>, toast_type: ToastType) -> Self {
         let message = message.into();
-        let id = format!("{:?}:{}", toast_type, &message);
+        let id = format!("{:?}:{}", toast_type, message);
         Self {
             id,
             message,

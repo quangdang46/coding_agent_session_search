@@ -1140,8 +1140,8 @@ pub fn render_explorer(
     let date_range = if metric_data.len() >= 2 {
         format!(
             " ({} .. {})",
-            &metric_data[0].0,
-            &metric_data[metric_data.len() - 1].0
+            metric_data[0].0,
+            metric_data[metric_data.len() - 1].0
         )
     } else {
         String::new()
