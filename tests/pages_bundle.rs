@@ -1732,4 +1732,15 @@ mod tests {
             "crypto worker should report malformed or unknown payloads and fall back to a generic worker failure type"
         );
     }
+
+    #[test]
+    fn test_crypto_worker_rejects_unsupported_archive_compression() {
+        let crypto_worker_js = include_str!("../src/pages_assets/crypto_worker.js");
+        assert!(
+            crypto_worker_js.contains("config.compression !== 'deflate'")
+                && crypto_worker_js.contains("Unsupported archive compression")
+                && !crypto_worker_js.contains("// No compression"),
+            "crypto worker should fail closed when encrypted config.json declares unsupported compression"
+        );
+    }
 }
