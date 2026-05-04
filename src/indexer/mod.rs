@@ -22979,8 +22979,11 @@ mod tests {
         }
 
         let controller = LexicalRebuildStagedMergeController::new(8, None);
-        let decision =
-            controller.decide(true, &LexicalRebuildPipelineRuntimeSnapshot::default(), &merge_coordinator);
+        let decision = controller.decide(
+            true,
+            &LexicalRebuildPipelineRuntimeSnapshot::default(),
+            &merge_coordinator,
+        );
 
         assert_eq!(decision.ready_artifacts, 8);
         assert_eq!(decision.ready_groups, 1);
