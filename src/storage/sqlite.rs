@@ -6204,9 +6204,9 @@ impl FrankenStorage {
 
     /// List per-conversation message footprints in primary-key order.
     ///
-    /// This deliberately avoids a payload-heavy conversations/messages JOIN.
-    /// Instead we read the conversation tail high-water mark maintained in the
-    /// narrow `conversation_tail_state` cache and use `last_message_idx + 1`
+    /// This deliberately avoids rebuild-path JOINs. Instead we merge ordered
+    /// single-table reads over `conversations` and the narrow
+    /// `conversation_tail_state` cache in Rust, then use `last_message_idx + 1`
     /// as a planning estimate.
     ///
     /// The planner only needs a sizing heuristic; exact message and byte
@@ -6217,13 +6217,25 @@ impl FrankenStorage {
     pub fn list_conversation_footprints_for_lexical_rebuild(
         &self,
     ) -> Result<Vec<LexicalRebuildConversationFootprintRow>> {
+        let tail_state_by_conversation: HashMap<i64, Option<i64>> = self
+            .conn
+            .query_map_collect(
+                "SELECT conversation_id, last_message_idx
+                 FROM conversation_tail_state
+                 ORDER BY conversation_id ASC",
+                fparams![],
+                |row| Ok((row.get_typed::<i64>(0)?, row.get_typed::<Option<i64>>(1)?)),
+            )
+            .with_context(|| "listing lexical rebuild tail-state estimates")?
+            .into_iter()
+            .collect();
+
         let rows = self
             .conn
             .query_map_collect(
-                "SELECT c.id, COALESCE(ts.last_message_idx, c.last_message_idx)
-                 FROM conversations c
-                 LEFT JOIN conversation_tail_state ts ON ts.conversation_id = c.id
-                 ORDER BY c.id ASC",
+                "SELECT id, last_message_idx
+                 FROM conversations
+                 ORDER BY id ASC",
                 fparams![],
                 |row| Ok((row.get_typed::<i64>(0)?, row.get_typed::<Option<i64>>(1)?)),
             )
@@ -6231,7 +6243,12 @@ impl FrankenStorage {
 
         let mut footprints = Vec::with_capacity(rows.len());
         let mut missing_tail_positions = HashMap::new();
-        for (conversation_id, last_message_idx) in rows {
+        for (conversation_id, conversation_last_message_idx) in rows {
+            let last_message_idx = tail_state_by_conversation
+                .get(&conversation_id)
+                .copied()
+                .flatten()
+                .or(conversation_last_message_idx);
             let Some(message_count) = lexical_rebuild_message_count_from_tail_idx(last_message_idx)
             else {
                 missing_tail_positions.insert(conversation_id, footprints.len());
@@ -6289,40 +6306,59 @@ impl FrankenStorage {
             return Ok(());
         }
 
-        let mut missing_counts: HashMap<i64, usize> = missing_tail_positions
-            .keys()
-            .map(|conversation_id| (*conversation_id, 0usize))
-            .collect();
+        let mut current_conversation_id = None;
+        let mut current_message_count = 0usize;
+        let apply_current_tail =
+            |conversation_id: Option<i64>,
+             message_count: usize,
+             footprints: &mut [LexicalRebuildConversationFootprintRow]| {
+                let Some(conversation_id) = conversation_id else {
+                    return;
+                };
+                let Some(position) = missing_tail_positions.get(&conversation_id) else {
+                    return;
+                };
+                footprints[*position] = lexical_rebuild_conversation_footprint_from_count(
+                    conversation_id,
+                    message_count,
+                );
+            };
         self.conn
             .query_with_params_for_each(
-                "SELECT conversation_id, MAX(idx)
+                "SELECT conversation_id, idx
                  FROM messages
-                 GROUP BY conversation_id
-                 ORDER BY conversation_id ASC",
+                 ORDER BY conversation_id ASC, idx ASC",
                 &[] as &[SqliteValue],
                 |row| {
                     let conversation_id: i64 = row.get_typed(0)?;
-                    if let Some(count) = missing_counts.get_mut(&conversation_id) {
-                        let last_message_idx: Option<i64> = row.get_typed(1)?;
-                        if let Some(message_count) =
-                            lexical_rebuild_message_count_from_tail_idx(last_message_idx)
-                        {
-                            *count = message_count;
+                    let idx: Option<i64> = row.get_typed(1)?;
+                    let row_message_count = lexical_rebuild_message_count_from_tail_idx(idx);
+                    match current_conversation_id {
+                        Some(current_id) if current_id == conversation_id => {
+                            if let Some(row_message_count) = row_message_count {
+                                current_message_count =
+                                    current_message_count.max(row_message_count);
+                            }
+                        }
+                        Some(_) => {
+                            apply_current_tail(
+                                current_conversation_id,
+                                current_message_count,
+                                footprints,
+                            );
+                            current_conversation_id = Some(conversation_id);
+                            current_message_count = row_message_count.unwrap_or(0);
+                        }
+                        None => {
+                            current_conversation_id = Some(conversation_id);
+                            current_message_count = row_message_count.unwrap_or(0);
                         }
                     }
                     Ok(())
                 },
             )
             .with_context(|| "streaming missing lexical rebuild tail estimates from messages")?;
-
-        for (conversation_id, message_count) in missing_counts {
-            if let Some(position) = missing_tail_positions.get(&conversation_id) {
-                footprints[*position] = lexical_rebuild_conversation_footprint_from_count(
-                    conversation_id,
-                    message_count,
-                );
-            }
-        }
+        apply_current_tail(current_conversation_id, current_message_count, footprints);
 
         Ok(())
     }
@@ -6337,7 +6373,6 @@ impl FrankenStorage {
             )
             .with_context(|| "listing conversation ids for lexical rebuild")
     }
-
     /// Legacy OFFSET-based traversal for one-time checkpoint migration only.
     ///
     /// New code must use `list_conversations_for_lexical_rebuild_after_id`
@@ -18731,6 +18766,13 @@ mod tests {
                 snippets: Vec::new(),
             }],
         );
+        storage
+            .conn
+            .execute_compat(
+                "DELETE FROM conversation_tail_state WHERE conversation_id = ?1",
+                fparams![utf8_id],
+            )
+            .unwrap();
 
         let footprints = storage
             .list_conversation_footprints_for_lexical_rebuild()
