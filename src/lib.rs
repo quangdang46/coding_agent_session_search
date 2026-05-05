@@ -14264,11 +14264,29 @@ fn doctor_repair_mode_allows_asset_mutation(
     mode: DoctorRepairMode,
     asset_class: DoctorAssetClass,
 ) -> bool {
+    doctor_repair_mode_allows_asset_operation_mutation(
+        mode,
+        asset_class,
+        DoctorAssetOperation::PruneReclaim,
+    )
+}
+
+fn doctor_repair_mode_allows_asset_operation_mutation(
+    mode: DoctorRepairMode,
+    asset_class: DoctorAssetClass,
+    operation: DoctorAssetOperation,
+) -> bool {
     let policy = doctor_repair_mode_policy(mode);
-    policy.mutates
-        && policy.allowed_mutation_asset_classes.contains(&asset_class)
-        && doctor_asset_allows_operation(asset_class, DoctorAssetOperation::PruneReclaim)
-        && doctor_asset_safe_to_gc(asset_class, true)
+    if !policy.mutates
+        || !policy.allowed_mutation_asset_classes.contains(&asset_class)
+        || !doctor_asset_allows_operation(asset_class, operation)
+    {
+        return false;
+    }
+    if operation == DoctorAssetOperation::PruneReclaim {
+        return doctor_asset_safe_to_gc(asset_class, true);
+    }
+    true
 }
 
 fn doctor_repair_mode_policy_report() -> Vec<DoctorRepairModePolicyReport> {
@@ -18401,6 +18419,17 @@ enum DoctorFsMutationKind {
     RemoveStaleLegacyIndexLock,
 }
 
+impl DoctorFsMutationKind {
+    fn asset_operation(self) -> DoctorAssetOperation {
+        match self {
+            DoctorFsMutationKind::PruneCleanupTarget
+            | DoctorFsMutationKind::RemoveStaleLegacyIndexLock => {
+                DoctorAssetOperation::PruneReclaim
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct DoctorFsMutationRequest<'a> {
     operation_id: &'a str,
@@ -19228,7 +19257,11 @@ fn execute_doctor_prune_cleanup_target(
         .precondition_checks
         .push("mutation_kind_prune_cleanup_target".to_string());
 
-    if !doctor_repair_mode_allows_asset_mutation(request.mode, request.asset_class) {
+    if !doctor_repair_mode_allows_asset_operation_mutation(
+        request.mode,
+        request.asset_class,
+        request.mutation_kind.asset_operation(),
+    ) {
         receipt.blocked_reasons.push(format!(
             "refusing to prune asset class {:?}: cleanup_apply mode does not allow this mutation",
             request.asset_class
@@ -19299,7 +19332,11 @@ fn execute_doctor_remove_stale_legacy_index_lock(
         .precondition_checks
         .push("mutation_kind_remove_stale_legacy_index_lock".to_string());
 
-    if !doctor_repair_mode_allows_asset_mutation(request.mode, request.asset_class) {
+    if !doctor_repair_mode_allows_asset_operation_mutation(
+        request.mode,
+        request.asset_class,
+        request.mutation_kind.asset_operation(),
+    ) {
         receipt.blocked_reasons.push(format!(
             "refusing to remove legacy index lock asset class {:?}: mode {:?} does not allow this mutation",
             request.asset_class, request.mode
@@ -20351,6 +20388,68 @@ mod doctor_asset_taxonomy_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn doctor_repair_mode_policy_is_operation_aware_for_non_prune_mutations() {
+        assert!(
+            doctor_repair_mode_allows_asset_operation_mutation(
+                DoctorRepairMode::RepairApply,
+                DoctorAssetClass::DerivedLexicalIndex,
+                DoctorAssetOperation::Rebuild,
+            ),
+            "repair_apply should be able to rebuild derived lexical indexes even though they are not safe_to_gc prune targets"
+        );
+        assert!(
+            !doctor_repair_mode_allows_asset_operation_mutation(
+                DoctorRepairMode::RepairApply,
+                DoctorAssetClass::DerivedLexicalIndex,
+                DoctorAssetOperation::PruneReclaim,
+            ),
+            "repair_apply must not become a hidden prune path for live derived lexical indexes"
+        );
+
+        assert!(
+            doctor_repair_mode_allows_asset_operation_mutation(
+                DoctorRepairMode::ReconstructPromote,
+                DoctorAssetClass::RawMirrorBlob,
+                DoctorAssetOperation::Copy,
+            ),
+            "reconstruct_promote should be able to copy verified raw mirror evidence into isolated candidates"
+        );
+        assert!(
+            !doctor_repair_mode_allows_asset_operation_mutation(
+                DoctorRepairMode::ReconstructPromote,
+                DoctorAssetClass::RawMirrorBlob,
+                DoctorAssetOperation::PruneReclaim,
+            ),
+            "copy-authorized precious evidence must still be unpruneable"
+        );
+
+        assert!(
+            doctor_repair_mode_allows_asset_operation_mutation(
+                DoctorRepairMode::RestoreApply,
+                DoctorAssetClass::BackupBundle,
+                DoctorAssetOperation::Restore,
+            ),
+            "restore_apply should authorize restore operations from verified backup bundles"
+        );
+        assert!(
+            !doctor_repair_mode_allows_asset_operation_mutation(
+                DoctorRepairMode::RestoreApply,
+                DoctorAssetClass::BackupBundle,
+                DoctorAssetOperation::PruneReclaim,
+            ),
+            "backup bundles are restore authorities, not cleanup targets"
+        );
+
+        assert!(
+            doctor_repair_mode_allows_asset_mutation(
+                DoctorRepairMode::CleanupApply,
+                DoctorAssetClass::RetainedPublishBackup,
+            ),
+            "legacy prune helper should still mean cleanup_apply + prune_reclaim"
+        );
     }
 
     #[test]
