@@ -7,6 +7,129 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
+fn test_canonical_json_value(value: Value) -> Value {
+    match value {
+        Value::Array(items) => {
+            Value::Array(items.into_iter().map(test_canonical_json_value).collect())
+        }
+        Value::Object(map) => {
+            let mut entries: Vec<_> = map.into_iter().collect();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            let mut canonical = serde_json::Map::new();
+            for (key, value) in entries {
+                canonical.insert(key, test_canonical_json_value(value));
+            }
+            Value::Object(canonical)
+        }
+        other => other,
+    }
+}
+
+fn test_doctor_canonical_blake3(prefix: &str, value: Value) -> String {
+    let canonical = test_canonical_json_value(value);
+    let encoded = serde_json::to_vec(&canonical).expect("canonical json");
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(prefix.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(&encoded);
+    format!("{prefix}-{}", hasher.finalize().to_hex())
+}
+
+fn test_original_path_blake3(path: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"doctor-raw-mirror-original-path-v1");
+    hasher.update(&[0]);
+    hasher.update(path.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+fn write_raw_mirror_fixture(
+    data_dir: &Path,
+    provider: &str,
+    source_id: &str,
+    origin_kind: &str,
+    original_path: &Path,
+    bytes: &[u8],
+) -> Value {
+    let blob_blake3 = blake3::hash(bytes).to_hex().to_string();
+    let blob_relative_path = format!("blobs/blake3/{}/{}.raw", &blob_blake3[..2], blob_blake3);
+    let original_path_str = original_path.to_string_lossy().into_owned();
+    let original_path_blake3 = test_original_path_blake3(&original_path_str);
+    let manifest_id = test_doctor_canonical_blake3(
+        "doctor-raw-mirror-manifest-id-v1",
+        json!({
+            "provider": provider,
+            "source_id": source_id,
+            "origin_kind": origin_kind,
+            "origin_host": Value::Null,
+            "original_path_blake3": original_path_blake3,
+            "blob_blake3": blob_blake3,
+        }),
+    );
+    let mut manifest = json!({
+        "schema_version": 1,
+        "manifest_kind": "cass_raw_session_mirror_v1",
+        "manifest_id": manifest_id,
+        "blob_hash_algorithm": "blake3",
+        "blob_blake3": blob_blake3,
+        "blob_relative_path": blob_relative_path,
+        "blob_size_bytes": bytes.len() as u64,
+        "provider": provider,
+        "source_id": source_id,
+        "origin_kind": origin_kind,
+        "origin_host": Value::Null,
+        "original_path": original_path_str,
+        "redacted_original_path": "[external]/pruned-session.jsonl",
+        "original_path_blake3": original_path_blake3,
+        "captured_at_ms": 1_733_000_000_000_i64,
+        "source_mtime_ms": 1_733_000_000_000_i64,
+        "source_size_bytes": bytes.len() as u64,
+        "compression": {
+            "state": "none",
+            "algorithm": Value::Null,
+            "uncompressed_size_bytes": bytes.len() as u64
+        },
+        "encryption": {
+            "state": "none",
+            "algorithm": Value::Null,
+            "key_id": Value::Null,
+            "envelope_version": Value::Null
+        },
+        "db_links": [{
+            "conversation_id": 1,
+            "message_count": 1,
+            "source_path": original_path.to_string_lossy(),
+            "started_at_ms": 1_700_000_000_000_i64
+        }],
+        "verification": {
+            "status": "captured",
+            "verifier": "cli_doctor_fixture",
+            "content_blake3": Value::Null,
+            "verified_at_ms": Value::Null
+        }
+    });
+    let manifest_blake3 =
+        test_doctor_canonical_blake3("doctor-raw-mirror-manifest-v1", manifest.clone());
+    manifest["manifest_blake3"] = json!(manifest_blake3);
+
+    let root = data_dir.join("raw-mirror").join("v1");
+    let blob_path = root.join(manifest["blob_relative_path"].as_str().expect("blob rel"));
+    fs::create_dir_all(blob_path.parent().expect("blob parent")).expect("create blob parent");
+    fs::write(&blob_path, bytes).expect("write raw mirror blob");
+    let manifest_path = root.join("manifests").join(format!(
+        "{}.json",
+        manifest["manifest_id"].as_str().expect("manifest id")
+    ));
+    fs::create_dir_all(manifest_path.parent().expect("manifest parent"))
+        .expect("create manifest parent");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("manifest json"),
+    )
+    .expect("write manifest");
+    manifest
+}
+
 fn cass_cmd(test_home: &Path) -> Command {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cass"));
     cmd.env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1")
@@ -669,6 +792,119 @@ fn doctor_json_reports_missing_upstream_source_as_coverage_risk_not_data_loss() 
             .as_str()
             .is_some_and(|message| message.contains("Source coverage risk")),
         "source_inventory check should name this as coverage risk: {source_inventory_check:#}"
+    );
+}
+
+#[test]
+fn doctor_json_verifies_raw_mirror_after_upstream_source_is_pruned() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let test_home = temp.path();
+    let data_dir = test_home.join("cass-data");
+    seed_healthy_empty_index(test_home, &data_dir);
+
+    let missing_source = test_home.join(".codex/sessions/pruned-session.jsonl");
+    let mirrored_bytes = b"{\"type\":\"message\",\"role\":\"user\",\"content\":\"preserved\"}\n";
+    let manifest = write_raw_mirror_fixture(
+        &data_dir,
+        "codex",
+        "local",
+        "local",
+        &missing_source,
+        mirrored_bytes,
+    );
+
+    let db_path = data_dir.join("agent_search.db");
+    let conn = FrankenConnection::open(db_path.to_string_lossy().into_owned()).expect("open db");
+    let agent_id: i64 = conn
+        .query_row_map(
+            "SELECT id FROM agents WHERE slug = 'codex' LIMIT 1",
+            &[],
+            |row: &frankensqlite::Row| row.get_typed(0),
+        )
+        .or_else(|_| {
+            let next_id: i64 =
+                conn.query_row_map("SELECT COALESCE(MAX(id), 0) + 1 FROM agents", &[], |row| {
+                    row.get_typed(0)
+                })?;
+            conn.execute_compat(
+                "INSERT INTO agents (id, slug, name, version, kind, created_at, updated_at)
+                 VALUES (?1, 'codex', 'Codex', 'test', 'agent', 0, 0)",
+                frankensqlite::params![next_id],
+            )?;
+            Ok::<i64, frankensqlite::FrankenError>(next_id)
+        })
+        .expect("codex agent id");
+    let missing_source_str = missing_source.to_string_lossy().into_owned();
+    conn.execute_compat(
+        "INSERT INTO conversations (agent_id, source_id, external_id, title, source_path, started_at)
+         VALUES (?1, 'local', 'raw-mirrored-missing-source', 'raw mirrored fixture', ?2, 1700000000000)",
+        frankensqlite::params![agent_id, missing_source_str.as_str()],
+    )
+    .expect("insert conversation");
+    drop(conn);
+
+    assert!(
+        !missing_source.exists(),
+        "fixture precondition: upstream source must be absent before doctor runs"
+    );
+    let out = cass_cmd(test_home)
+        .args([
+            "doctor",
+            "--json",
+            "--data-dir",
+            data_dir.to_str().expect("utf8"),
+        ])
+        .output()
+        .expect("run cass doctor --json");
+
+    assert!(
+        out.status.success(),
+        "cass doctor --json failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !missing_source.exists(),
+        "doctor must verify mirror evidence without recreating the pruned upstream path"
+    );
+
+    let payload: Value = serde_json::from_slice(&out.stdout).expect("doctor json");
+    let raw_mirror = &payload["raw_mirror"];
+    assert_eq!(raw_mirror["status"].as_str(), Some("verified"));
+    assert_eq!(raw_mirror["summary"]["manifest_count"].as_u64(), Some(1));
+    assert_eq!(
+        raw_mirror["summary"]["verified_blob_count"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        raw_mirror["summary"]["total_blob_bytes"].as_u64(),
+        Some(mirrored_bytes.len() as u64)
+    );
+    assert_eq!(
+        raw_mirror["manifests"][0]["manifest_id"].as_str(),
+        manifest["manifest_id"].as_str()
+    );
+    assert_eq!(
+        raw_mirror["manifests"][0]["blob_checksum_status"].as_str(),
+        Some("matched")
+    );
+    assert_eq!(
+        raw_mirror["manifests"][0]["upstream_path_exists"].as_bool(),
+        Some(false)
+    );
+
+    let raw_mirror_check = payload["checks"]
+        .as_array()
+        .expect("checks array")
+        .iter()
+        .find(|check| check["name"].as_str() == Some("raw_mirror"))
+        .expect("raw_mirror check");
+    assert_eq!(raw_mirror_check["status"].as_str(), Some("pass"));
+    assert!(
+        raw_mirror_check["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("Raw mirror verified")),
+        "raw_mirror check should report verified evidence: {raw_mirror_check:#}"
     );
 }
 

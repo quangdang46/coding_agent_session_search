@@ -34,7 +34,7 @@ use clap::{Arg, ArgAction, Command, CommandFactory, Parser, Subcommand, ValueEnu
 use frankensqlite::compat::{ConnectionExt, RowExt};
 use indexer::IndexOptions;
 use model::cli_error_kind::ErrorKind as CliErrorKind;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{self, IsTerminal, Write};
@@ -7247,6 +7247,7 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "  cass doctor [--json] [--fix]     Diagnostic checks + optional safe auto-fix (derivatives only).".to_string(),
             "                    doctor JSON includes source_inventory; missing upstream provider files are".to_string(),
             "                    source coverage/prune-risk warnings, not proof that archived cass rows are lost.".to_string(),
+            "                    raw_mirror defines/verifies the content-addressed raw session evidence layout.".to_string(),
             "  cass introspect [--json]         Full API schema: commands, arguments, response_schemas (alphabetical).".to_string(),
             "  cass api-version [--json]        Show crate_version + api_version + contract_version.".to_string(),
             "  cass state [--json]              Alias of `cass status` (index/db/rebuild/semantic readiness).".to_string(),
@@ -14108,6 +14109,795 @@ fn collect_doctor_source_inventory(data_dir: &Path, db_path: &Path) -> DoctorSou
     }
 }
 
+const DOCTOR_RAW_MIRROR_ROOT_DIR: &str = "raw-mirror";
+const DOCTOR_RAW_MIRROR_SCHEMA_VERSION: u32 = 1;
+const DOCTOR_RAW_MIRROR_VERSION_DIR: &str = "v1";
+const DOCTOR_RAW_MIRROR_MANIFEST_KIND: &str = "cass_raw_session_mirror_v1";
+const DOCTOR_RAW_MIRROR_HASH_ALGORITHM: &str = "blake3";
+const DOCTOR_RAW_MIRROR_BLOB_EXTENSION: &str = "raw";
+const DOCTOR_RAW_MIRROR_DIR_MODE: &str = "0700";
+const DOCTOR_RAW_MIRROR_FILE_MODE: &str = "0600";
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorRawMirrorReport {
+    schema_version: u32,
+    status: String,
+    root_path: String,
+    redacted_root_path: String,
+    exists: bool,
+    layout: DoctorRawMirrorLayoutReport,
+    policy: DoctorRawMirrorPolicyReport,
+    summary: DoctorRawMirrorSummary,
+    manifests: Vec<DoctorRawMirrorManifestReport>,
+    warnings: Vec<String>,
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorRawMirrorLayoutReport {
+    root_relative_path: String,
+    manifest_kind: &'static str,
+    hash_algorithm: &'static str,
+    blob_path_template: String,
+    manifest_path_template: String,
+    verification_path_template: String,
+    temp_path_template: String,
+    content_address_scope: String,
+    source_identity_scope: String,
+    db_link_contract: String,
+    case_insensitive_collision_behavior: String,
+    migration_contract: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorRawMirrorPolicyReport {
+    append_only: bool,
+    global_dedup_by_content_hash: bool,
+    never_overwrite_different_bytes: bool,
+    directory_mode_octal: &'static str,
+    file_mode_octal: &'static str,
+    enforce_private_files: bool,
+    atomic_publish: String,
+    fsync_required: bool,
+    path_traversal_defense: String,
+    symlink_defense: String,
+    compression_contract: String,
+    encryption_contract: String,
+    support_bundle_redaction_contract: String,
+    missing_upstream_semantics: String,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+struct DoctorRawMirrorSummary {
+    manifest_count: usize,
+    verified_blob_count: usize,
+    missing_blob_count: usize,
+    checksum_mismatch_count: usize,
+    manifest_checksum_mismatch_count: usize,
+    manifest_checksum_not_recorded_count: usize,
+    invalid_manifest_count: usize,
+    interrupted_capture_count: usize,
+    duplicate_blob_reference_count: usize,
+    total_blob_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorRawMirrorManifestReport {
+    manifest_id: String,
+    manifest_path: String,
+    redacted_manifest_path: String,
+    blob_relative_path: String,
+    blob_path: String,
+    redacted_blob_path: String,
+    blob_blake3: String,
+    blob_size_bytes: u64,
+    provider: String,
+    source_id: String,
+    origin_kind: String,
+    origin_host: Option<String>,
+    original_path: String,
+    redacted_original_path: String,
+    original_path_blake3: String,
+    captured_at_ms: i64,
+    source_mtime_ms: Option<i64>,
+    source_size_bytes: Option<u64>,
+    compression_state: String,
+    encryption_state: String,
+    db_link_count: usize,
+    upstream_path_exists: Option<bool>,
+    status: String,
+    blob_checksum_status: DoctorArtifactChecksumStatus,
+    manifest_checksum_status: DoctorArtifactChecksumStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    invalid_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, Hash)]
+struct DoctorRawMirrorDbLink {
+    #[serde(default)]
+    conversation_id: Option<i64>,
+    #[serde(default)]
+    message_count: Option<u64>,
+    #[serde(default)]
+    source_path: Option<String>,
+    #[serde(default)]
+    started_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct DoctorRawMirrorCompressionEnvelope {
+    #[serde(default = "doctor_raw_mirror_none_state")]
+    state: String,
+    #[serde(default)]
+    algorithm: Option<String>,
+    #[serde(default)]
+    uncompressed_size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct DoctorRawMirrorEncryptionEnvelope {
+    #[serde(default = "doctor_raw_mirror_none_state")]
+    state: String,
+    #[serde(default)]
+    algorithm: Option<String>,
+    #[serde(default)]
+    key_id: Option<String>,
+    #[serde(default)]
+    envelope_version: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct DoctorRawMirrorVerificationRecord {
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    verifier: String,
+    #[serde(default)]
+    content_blake3: Option<String>,
+    #[serde(default)]
+    verified_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct DoctorRawMirrorManifestFile {
+    #[serde(default)]
+    schema_version: u32,
+    #[serde(default)]
+    manifest_kind: String,
+    #[serde(default)]
+    manifest_id: String,
+    #[serde(default)]
+    blob_hash_algorithm: String,
+    #[serde(default)]
+    blob_blake3: String,
+    #[serde(default)]
+    blob_relative_path: String,
+    #[serde(default)]
+    blob_size_bytes: u64,
+    #[serde(default)]
+    provider: String,
+    #[serde(default)]
+    source_id: String,
+    #[serde(default)]
+    origin_kind: String,
+    #[serde(default)]
+    origin_host: Option<String>,
+    #[serde(default)]
+    original_path: String,
+    #[serde(default)]
+    redacted_original_path: String,
+    #[serde(default)]
+    original_path_blake3: String,
+    #[serde(default)]
+    captured_at_ms: i64,
+    #[serde(default)]
+    source_mtime_ms: Option<i64>,
+    #[serde(default)]
+    source_size_bytes: Option<u64>,
+    #[serde(default)]
+    compression: DoctorRawMirrorCompressionEnvelope,
+    #[serde(default)]
+    encryption: DoctorRawMirrorEncryptionEnvelope,
+    #[serde(default)]
+    db_links: Vec<DoctorRawMirrorDbLink>,
+    #[serde(default)]
+    verification: DoctorRawMirrorVerificationRecord,
+    #[serde(default)]
+    manifest_blake3: Option<String>,
+}
+
+fn doctor_raw_mirror_none_state() -> String {
+    "none".to_string()
+}
+
+fn doctor_raw_mirror_root(data_dir: &Path) -> PathBuf {
+    data_dir
+        .join(DOCTOR_RAW_MIRROR_ROOT_DIR)
+        .join(DOCTOR_RAW_MIRROR_VERSION_DIR)
+}
+
+fn doctor_raw_mirror_root_relative_path() -> String {
+    format!("{DOCTOR_RAW_MIRROR_ROOT_DIR}/{DOCTOR_RAW_MIRROR_VERSION_DIR}")
+}
+
+fn doctor_raw_mirror_layout_report() -> DoctorRawMirrorLayoutReport {
+    DoctorRawMirrorLayoutReport {
+        root_relative_path: doctor_raw_mirror_root_relative_path(),
+        manifest_kind: DOCTOR_RAW_MIRROR_MANIFEST_KIND,
+        hash_algorithm: DOCTOR_RAW_MIRROR_HASH_ALGORITHM,
+        blob_path_template: "blobs/blake3/<first-two-hex>/<64-hex>.raw".to_string(),
+        manifest_path_template: "manifests/<manifest-id>.json".to_string(),
+        verification_path_template: "verification/<manifest-id>.json".to_string(),
+        temp_path_template: "tmp/<operation-id>/<file>.tmp".to_string(),
+        content_address_scope: "global within the cass data dir; identical bytes share one blob across providers and sources".to_string(),
+        source_identity_scope: "manifest metadata records provider, source_id, origin_kind, origin_host, original path hash, and db_links back to archive conversations/messages".to_string(),
+        db_link_contract: "db_links entries identify archived conversations without embedding raw session content in manifests".to_string(),
+        case_insensitive_collision_behavior: "no original path segment is used as a storage directory; path identity is hashed from exact bytes, so case-folding filesystems cannot collide user paths".to_string(),
+        migration_contract: "schema_version and raw-mirror/vN keep future layouts side-by-side; v1 readers ignore unknown manifest fields".to_string(),
+    }
+}
+
+fn doctor_raw_mirror_policy_report() -> DoctorRawMirrorPolicyReport {
+    DoctorRawMirrorPolicyReport {
+        append_only: true,
+        global_dedup_by_content_hash: true,
+        never_overwrite_different_bytes: true,
+        directory_mode_octal: DOCTOR_RAW_MIRROR_DIR_MODE,
+        file_mode_octal: DOCTOR_RAW_MIRROR_FILE_MODE,
+        enforce_private_files: true,
+        atomic_publish: "write temp file under tmp, fsync file, rename into content-addressed destination, fsync parent directory, then publish manifest".to_string(),
+        fsync_required: true,
+        path_traversal_defense: "manifest blob paths must be relative normal components under raw-mirror/v1 and may not contain absolute paths, prefixes, dot-dot, or empty components".to_string(),
+        symlink_defense: "doctor verification refuses symlinked blob or manifest paths and never follows symlinks while validating mirror evidence".to_string(),
+        compression_contract: "v1 stores plain bytes by default; future compression must be declared in the compression envelope and preserve uncompressed size/hash metadata".to_string(),
+        encryption_contract: "v1 stores unencrypted local evidence by default; future encryption must be explicit in the encryption envelope and must not weaken manifest integrity checks".to_string(),
+        support_bundle_redaction_contract: "support bundles use redacted_original_path and original_path_blake3; raw bytes are not exported unless an operator explicitly asks for evidence export".to_string(),
+        missing_upstream_semantics: "missing upstream provider files are distinct from missing cass mirror evidence; a verified mirror blob is preserved archive evidence even if the original source path was pruned".to_string(),
+    }
+}
+
+fn doctor_raw_mirror_blob_relative_path(blob_blake3: &str) -> Option<String> {
+    if blob_blake3.len() != 64 || !blob_blake3.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let lower = blob_blake3.to_ascii_lowercase();
+    Some(format!(
+        "blobs/{}/{}/{}.{}",
+        DOCTOR_RAW_MIRROR_HASH_ALGORITHM,
+        &lower[..2],
+        lower,
+        DOCTOR_RAW_MIRROR_BLOB_EXTENSION
+    ))
+}
+
+fn doctor_raw_mirror_manifest_relative_path(manifest_id: &str) -> String {
+    format!("manifests/{manifest_id}.json")
+}
+
+fn doctor_raw_mirror_original_path_blake3(original_path: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"doctor-raw-mirror-original-path-v1");
+    hasher.update(&[0]);
+    hasher.update(original_path.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+fn doctor_raw_mirror_manifest_id(
+    provider: &str,
+    source_id: &str,
+    origin_kind: &str,
+    origin_host: Option<&str>,
+    original_path_blake3: &str,
+    blob_blake3: &str,
+) -> String {
+    doctor_canonical_blake3(
+        "doctor-raw-mirror-manifest-id-v1",
+        serde_json::json!({
+            "provider": provider,
+            "source_id": source_id,
+            "origin_kind": origin_kind,
+            "origin_host": origin_host,
+            "original_path_blake3": original_path_blake3,
+            "blob_blake3": blob_blake3,
+        }),
+    )
+}
+
+fn doctor_raw_mirror_manifest_blake3(manifest: &DoctorRawMirrorManifestFile) -> String {
+    let mut value = serde_json::to_value(manifest).unwrap_or_default();
+    if let serde_json::Value::Object(map) = &mut value {
+        map.remove("manifest_blake3");
+    }
+    doctor_canonical_blake3("doctor-raw-mirror-manifest-v1", value)
+}
+
+fn doctor_raw_mirror_validate_relative_path(
+    relative: &str,
+) -> std::result::Result<PathBuf, String> {
+    let path = Path::new(relative);
+    if relative.trim().is_empty() {
+        return Err("relative path is empty".to_string());
+    }
+    if path.is_absolute() {
+        return Err("relative path must not be absolute".to_string());
+    }
+    let mut cleaned = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => cleaned.push(part),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                return Err("relative path must not contain parent traversal".to_string());
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err("relative path must stay under the mirror root".to_string());
+            }
+        }
+    }
+    if cleaned.as_os_str().is_empty() {
+        return Err("relative path has no normal components".to_string());
+    }
+    Ok(cleaned)
+}
+
+fn doctor_raw_mirror_unique_db_links(
+    links: &[DoctorRawMirrorDbLink],
+) -> Vec<DoctorRawMirrorDbLink> {
+    let mut dedup = links.to_vec();
+    dedup.sort_by(|left, right| {
+        (
+            left.conversation_id,
+            left.message_count,
+            left.started_at_ms,
+            left.source_path.as_deref().unwrap_or(""),
+        )
+            .cmp(&(
+                right.conversation_id,
+                right.message_count,
+                right.started_at_ms,
+                right.source_path.as_deref().unwrap_or(""),
+            ))
+    });
+    dedup.dedup();
+    dedup
+}
+
+fn doctor_file_blake3(path: &Path) -> io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+fn doctor_raw_mirror_invalid_manifest_report(
+    data_dir: &Path,
+    manifest_path: &Path,
+    reason: String,
+) -> DoctorRawMirrorManifestReport {
+    DoctorRawMirrorManifestReport {
+        manifest_id: "invalid".to_string(),
+        manifest_path: manifest_path.display().to_string(),
+        redacted_manifest_path: doctor_redacted_path(
+            &manifest_path.display().to_string(),
+            data_dir,
+        ),
+        blob_relative_path: String::new(),
+        blob_path: String::new(),
+        redacted_blob_path: String::new(),
+        blob_blake3: String::new(),
+        blob_size_bytes: 0,
+        provider: "unknown".to_string(),
+        source_id: crate::sources::provenance::LOCAL_SOURCE_ID.to_string(),
+        origin_kind: "unknown".to_string(),
+        origin_host: None,
+        original_path: String::new(),
+        redacted_original_path: String::new(),
+        original_path_blake3: String::new(),
+        captured_at_ms: 0,
+        source_mtime_ms: None,
+        source_size_bytes: None,
+        compression_state: "unknown".to_string(),
+        encryption_state: "unknown".to_string(),
+        db_link_count: 0,
+        upstream_path_exists: None,
+        status: "invalid_manifest".to_string(),
+        blob_checksum_status: DoctorArtifactChecksumStatus::NotRecorded,
+        manifest_checksum_status: DoctorArtifactChecksumStatus::Mismatched,
+        invalid_reason: Some(reason),
+    }
+}
+
+fn doctor_verify_raw_mirror_manifest(
+    data_dir: &Path,
+    root: &Path,
+    manifest_path: &Path,
+    manifest: DoctorRawMirrorManifestFile,
+) -> DoctorRawMirrorManifestReport {
+    let manifest_path_string = manifest_path.display().to_string();
+    let invalid =
+        |reason: String| doctor_raw_mirror_invalid_manifest_report(data_dir, manifest_path, reason);
+
+    if manifest.schema_version != DOCTOR_RAW_MIRROR_SCHEMA_VERSION {
+        return invalid(format!(
+            "unsupported raw mirror schema version {}",
+            manifest.schema_version
+        ));
+    }
+    if manifest.manifest_kind != DOCTOR_RAW_MIRROR_MANIFEST_KIND {
+        return invalid(format!(
+            "unsupported manifest kind '{}'",
+            manifest.manifest_kind
+        ));
+    }
+    if manifest.blob_hash_algorithm != DOCTOR_RAW_MIRROR_HASH_ALGORITHM {
+        return invalid(format!(
+            "unsupported blob hash algorithm '{}'",
+            manifest.blob_hash_algorithm
+        ));
+    }
+    let expected_blob_relative = match doctor_raw_mirror_blob_relative_path(&manifest.blob_blake3) {
+        Some(path) => path,
+        None => return invalid("blob_blake3 is not a 64-hex blake3 digest".to_string()),
+    };
+    if manifest.blob_relative_path != expected_blob_relative {
+        return invalid(format!(
+            "blob_relative_path '{}' does not match content-addressed path '{}'",
+            manifest.blob_relative_path, expected_blob_relative
+        ));
+    }
+    let relative_blob = match doctor_raw_mirror_validate_relative_path(&manifest.blob_relative_path)
+    {
+        Ok(path) => path,
+        Err(reason) => return invalid(reason),
+    };
+    let blob_path = root.join(relative_blob);
+    let blob_path_string = blob_path.display().to_string();
+    if std::fs::symlink_metadata(manifest_path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return invalid("manifest path is a symlink".to_string());
+    }
+    if path_has_symlink_below_root(manifest_path, root) {
+        return invalid("manifest path contains a symlinked component".to_string());
+    }
+    let expected_manifest_id = doctor_raw_mirror_manifest_id(
+        &manifest.provider,
+        &manifest.source_id,
+        &manifest.origin_kind,
+        manifest.origin_host.as_deref(),
+        &manifest.original_path_blake3,
+        &manifest.blob_blake3,
+    );
+    if manifest.manifest_id != expected_manifest_id {
+        return invalid("manifest_id does not match canonical source/blob identity".to_string());
+    }
+    let expected_manifest_relative =
+        doctor_raw_mirror_manifest_relative_path(&manifest.manifest_id);
+    if let Ok(relative_manifest) = manifest_path.strip_prefix(root)
+        && relative_manifest != Path::new(&expected_manifest_relative)
+    {
+        return invalid(format!(
+            "manifest path '{}' does not match canonical path '{}'",
+            relative_manifest.display(),
+            expected_manifest_relative
+        ));
+    }
+
+    let computed_manifest_blake3 = doctor_raw_mirror_manifest_blake3(&manifest);
+    let manifest_checksum_status = match manifest.manifest_blake3.as_deref() {
+        Some(expected) if expected == computed_manifest_blake3 => {
+            DoctorArtifactChecksumStatus::Matched
+        }
+        Some(_) => DoctorArtifactChecksumStatus::Mismatched,
+        None => DoctorArtifactChecksumStatus::NotRecorded,
+    };
+
+    if path_has_symlink_below_root(&blob_path, root) {
+        return DoctorRawMirrorManifestReport {
+            manifest_id: manifest.manifest_id,
+            manifest_path: manifest_path_string.clone(),
+            redacted_manifest_path: doctor_redacted_path(&manifest_path_string, data_dir),
+            blob_relative_path: manifest.blob_relative_path,
+            blob_path: blob_path_string.clone(),
+            redacted_blob_path: doctor_redacted_path(&blob_path_string, data_dir),
+            blob_blake3: manifest.blob_blake3,
+            blob_size_bytes: manifest.blob_size_bytes,
+            provider: doctor_normalized_provider_slug(&manifest.provider),
+            source_id: manifest.source_id,
+            origin_kind: manifest.origin_kind,
+            origin_host: manifest.origin_host,
+            original_path: manifest.original_path.clone(),
+            redacted_original_path: if manifest.redacted_original_path.trim().is_empty() {
+                doctor_redacted_path(&manifest.original_path, data_dir)
+            } else {
+                manifest.redacted_original_path
+            },
+            original_path_blake3: manifest.original_path_blake3,
+            captured_at_ms: manifest.captured_at_ms,
+            source_mtime_ms: manifest.source_mtime_ms,
+            source_size_bytes: manifest.source_size_bytes,
+            compression_state: manifest.compression.state,
+            encryption_state: manifest.encryption.state,
+            db_link_count: doctor_raw_mirror_unique_db_links(&manifest.db_links).len(),
+            upstream_path_exists: if manifest.original_path.trim().is_empty() {
+                None
+            } else {
+                Some(Path::new(&manifest.original_path).exists())
+            },
+            status: "invalid_manifest".to_string(),
+            blob_checksum_status: DoctorArtifactChecksumStatus::Mismatched,
+            manifest_checksum_status,
+            invalid_reason: Some("blob path contains a symlinked component".to_string()),
+        };
+    }
+
+    let (blob_checksum_status, status, invalid_reason) = match std::fs::symlink_metadata(&blob_path)
+    {
+        Ok(metadata) if metadata.file_type().is_symlink() => (
+            DoctorArtifactChecksumStatus::Mismatched,
+            "invalid_manifest".to_string(),
+            Some("blob path is a symlink".to_string()),
+        ),
+        Ok(metadata) => {
+            let size_matches = metadata.len() == manifest.blob_size_bytes;
+            match doctor_file_blake3(&blob_path) {
+                Ok(actual_hash) if actual_hash == manifest.blob_blake3 && size_matches => {
+                    match manifest_checksum_status {
+                        DoctorArtifactChecksumStatus::Mismatched => (
+                            DoctorArtifactChecksumStatus::Matched,
+                            "manifest_drift".to_string(),
+                            Some("manifest_blake3 does not match manifest metadata".to_string()),
+                        ),
+                        DoctorArtifactChecksumStatus::NotRecorded => (
+                            DoctorArtifactChecksumStatus::Matched,
+                            "manifest_unverified".to_string(),
+                            Some(
+                                "manifest_blake3 is not recorded; metadata integrity cannot be verified"
+                                    .to_string(),
+                            ),
+                        ),
+                        _ => (
+                            DoctorArtifactChecksumStatus::Matched,
+                            "verified".to_string(),
+                            None,
+                        ),
+                    }
+                }
+                Ok(_) => (
+                    DoctorArtifactChecksumStatus::Mismatched,
+                    "checksum_mismatch".to_string(),
+                    Some("blob bytes or size do not match manifest".to_string()),
+                ),
+                Err(err) => (
+                    DoctorArtifactChecksumStatus::Mismatched,
+                    "checksum_mismatch".to_string(),
+                    Some(format!("failed to hash blob: {err}")),
+                ),
+            }
+        }
+        Err(_) => (
+            DoctorArtifactChecksumStatus::Missing,
+            "missing_blob".to_string(),
+            Some("content-addressed blob is missing".to_string()),
+        ),
+    };
+
+    let original_path_blake3 = doctor_raw_mirror_original_path_blake3(&manifest.original_path);
+    let mut invalid_reason = invalid_reason;
+    if original_path_blake3 != manifest.original_path_blake3 {
+        invalid_reason = Some("original_path_blake3 does not match original_path".to_string());
+    }
+    let mut status = status;
+    if original_path_blake3 != manifest.original_path_blake3 {
+        status = "invalid_manifest".to_string();
+    }
+    if manifest
+        .verification
+        .content_blake3
+        .as_deref()
+        .is_some_and(|verified| verified != manifest.blob_blake3)
+    {
+        invalid_reason = Some("verification content_blake3 does not match blob_blake3".to_string());
+        status = "invalid_manifest".to_string();
+    }
+
+    DoctorRawMirrorManifestReport {
+        manifest_id: manifest.manifest_id,
+        manifest_path: manifest_path_string.clone(),
+        redacted_manifest_path: doctor_redacted_path(&manifest_path_string, data_dir),
+        blob_relative_path: manifest.blob_relative_path,
+        blob_path: blob_path_string.clone(),
+        redacted_blob_path: doctor_redacted_path(&blob_path_string, data_dir),
+        blob_blake3: manifest.blob_blake3,
+        blob_size_bytes: manifest.blob_size_bytes,
+        provider: doctor_normalized_provider_slug(&manifest.provider),
+        source_id: manifest.source_id,
+        origin_kind: manifest.origin_kind,
+        origin_host: manifest.origin_host,
+        original_path: manifest.original_path.clone(),
+        redacted_original_path: if manifest.redacted_original_path.trim().is_empty() {
+            doctor_redacted_path(&manifest.original_path, data_dir)
+        } else {
+            manifest.redacted_original_path
+        },
+        original_path_blake3: manifest.original_path_blake3,
+        captured_at_ms: manifest.captured_at_ms,
+        source_mtime_ms: manifest.source_mtime_ms,
+        source_size_bytes: manifest.source_size_bytes,
+        compression_state: manifest.compression.state,
+        encryption_state: manifest.encryption.state,
+        db_link_count: doctor_raw_mirror_unique_db_links(&manifest.db_links).len(),
+        upstream_path_exists: if manifest.original_path.trim().is_empty() {
+            None
+        } else {
+            Some(Path::new(&manifest.original_path).exists())
+        },
+        status,
+        blob_checksum_status,
+        manifest_checksum_status,
+        invalid_reason,
+    }
+}
+
+fn doctor_raw_mirror_count_interrupted_captures(root: &Path) -> usize {
+    let tmp_dir = root.join("tmp");
+    std::fs::read_dir(tmp_dir)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(|entry| entry.ok()))
+        .count()
+}
+
+fn collect_doctor_raw_mirror_report(data_dir: &Path) -> DoctorRawMirrorReport {
+    let root = doctor_raw_mirror_root(data_dir);
+    let root_path = root.display().to_string();
+    let mut report = DoctorRawMirrorReport {
+        schema_version: DOCTOR_RAW_MIRROR_SCHEMA_VERSION,
+        status: "absent".to_string(),
+        root_path: root_path.clone(),
+        redacted_root_path: doctor_redacted_path(&root_path, data_dir),
+        exists: root.exists(),
+        layout: doctor_raw_mirror_layout_report(),
+        policy: doctor_raw_mirror_policy_report(),
+        summary: DoctorRawMirrorSummary::default(),
+        manifests: Vec::new(),
+        warnings: Vec::new(),
+        notes: vec![
+            "Raw mirror blobs are precious evidence and are never automatic cleanup candidates.".to_string(),
+            "A verified mirror blob remains useful when the upstream provider file has been pruned.".to_string(),
+        ],
+    };
+
+    if !root.exists() {
+        return report;
+    }
+    if std::fs::symlink_metadata(&root)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        report.status = "warn".to_string();
+        report
+            .warnings
+            .push("raw mirror root is a symlink and will not be trusted for repair".to_string());
+        return report;
+    }
+
+    report.summary.interrupted_capture_count = doctor_raw_mirror_count_interrupted_captures(&root);
+    if report.summary.interrupted_capture_count > 0 {
+        report.warnings.push(format!(
+            "{} interrupted raw mirror capture artifact(s) remain under tmp",
+            report.summary.interrupted_capture_count
+        ));
+    }
+
+    let manifest_root = root.join("manifests");
+    if manifest_root.exists() {
+        for entry in walkdir::WalkDir::new(&manifest_root)
+            .follow_links(false)
+            .into_iter()
+        {
+            match entry {
+                Ok(entry) if entry.file_type().is_file() || entry.file_type().is_symlink() => {
+                    let path = entry.path();
+                    if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                        continue;
+                    }
+                    let report_entry = if entry.file_type().is_symlink() {
+                        doctor_raw_mirror_invalid_manifest_report(
+                            data_dir,
+                            path,
+                            "manifest path is a symlink".to_string(),
+                        )
+                    } else {
+                        match std::fs::read_to_string(path)
+                            .ok()
+                            .and_then(|content| serde_json::from_str(&content).ok())
+                        {
+                            Some(manifest) => {
+                                doctor_verify_raw_mirror_manifest(data_dir, &root, path, manifest)
+                            }
+                            None => doctor_raw_mirror_invalid_manifest_report(
+                                data_dir,
+                                path,
+                                "manifest is not parseable JSON".to_string(),
+                            ),
+                        }
+                    };
+                    report.manifests.push(report_entry);
+                }
+                Ok(_) => {}
+                Err(err) => report
+                    .warnings
+                    .push(format!("failed to scan raw mirror manifest entry: {err}")),
+            }
+        }
+    }
+
+    report
+        .manifests
+        .sort_by(|left, right| left.manifest_path.cmp(&right.manifest_path));
+    report.summary.manifest_count = report.manifests.len();
+    let mut blob_reference_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut verified_blob_bytes: BTreeMap<String, u64> = BTreeMap::new();
+    for manifest in &report.manifests {
+        if !manifest.blob_blake3.is_empty() {
+            *blob_reference_counts
+                .entry(manifest.blob_blake3.clone())
+                .or_default() += 1;
+            if manifest.blob_checksum_status == DoctorArtifactChecksumStatus::Matched {
+                verified_blob_bytes
+                    .entry(manifest.blob_blake3.clone())
+                    .or_insert(manifest.blob_size_bytes);
+            }
+        }
+        if manifest.blob_checksum_status == DoctorArtifactChecksumStatus::Missing {
+            report.summary.missing_blob_count += 1;
+        }
+        if manifest.blob_checksum_status == DoctorArtifactChecksumStatus::Mismatched {
+            report.summary.checksum_mismatch_count += 1;
+        }
+        if manifest.manifest_checksum_status == DoctorArtifactChecksumStatus::Mismatched {
+            report.summary.manifest_checksum_mismatch_count += 1;
+        }
+        if manifest.manifest_checksum_status == DoctorArtifactChecksumStatus::NotRecorded {
+            report.summary.manifest_checksum_not_recorded_count += 1;
+        }
+        if manifest.status == "invalid_manifest" {
+            report.summary.invalid_manifest_count += 1;
+        }
+    }
+    report.summary.duplicate_blob_reference_count = blob_reference_counts
+        .values()
+        .map(|count| count.saturating_sub(1))
+        .sum();
+    report.summary.verified_blob_count = verified_blob_bytes.len();
+    report.summary.total_blob_bytes = verified_blob_bytes.values().copied().sum();
+
+    report.status = if report.summary.invalid_manifest_count > 0
+        || report.summary.missing_blob_count > 0
+        || report.summary.checksum_mismatch_count > 0
+        || report.summary.manifest_checksum_mismatch_count > 0
+        || report.summary.manifest_checksum_not_recorded_count > 0
+        || report.summary.interrupted_capture_count > 0
+    {
+        "warn".to_string()
+    } else if report.summary.manifest_count == 0 {
+        "empty".to_string()
+    } else {
+        "verified".to_string()
+    };
+
+    report
+}
+
 fn doctor_artifact_checksum_status(
     exists: bool,
     expected_content_blake3: Option<&str>,
@@ -15588,7 +16378,7 @@ fn cleanup_target_path_is_safe(
     if !path.starts_with(data_dir) || path == data_dir || path == db_path || path == index_path {
         return false;
     }
-    if cleanup_path_has_symlink_below_root(path, data_dir) {
+    if path_has_symlink_below_root(path, data_dir) {
         return false;
     }
     let Ok(canonical_path) = std::fs::canonicalize(path) else {
@@ -15635,7 +16425,7 @@ fn cleanup_target_path_is_safe(
     is_retained_publish_backup || is_manifest_backed_generation
 }
 
-fn cleanup_path_has_symlink_below_root(path: &Path, root: &Path) -> bool {
+fn path_has_symlink_below_root(path: &Path, root: &Path) -> bool {
     let mut current = path;
     loop {
         if current == root {
@@ -16306,6 +17096,286 @@ mod doctor_asset_taxonomy_tests {
         assert!(
             payload["source_inventory"]["providers"].is_array(),
             "source_inventory JSON should remain parseable and array-backed"
+        );
+    }
+
+    fn raw_mirror_test_manifest(
+        data_dir: &Path,
+        provider: &str,
+        source_id: &str,
+        original_path: &Path,
+        bytes: &[u8],
+        db_links: Vec<DoctorRawMirrorDbLink>,
+    ) -> DoctorRawMirrorManifestFile {
+        let blob_blake3 = blake3::hash(bytes).to_hex().to_string();
+        let original_path = original_path.display().to_string();
+        let original_path_blake3 = doctor_raw_mirror_original_path_blake3(&original_path);
+        let manifest_id = doctor_raw_mirror_manifest_id(
+            provider,
+            source_id,
+            "local",
+            None,
+            &original_path_blake3,
+            &blob_blake3,
+        );
+        let mut manifest = DoctorRawMirrorManifestFile {
+            schema_version: DOCTOR_RAW_MIRROR_SCHEMA_VERSION,
+            manifest_kind: DOCTOR_RAW_MIRROR_MANIFEST_KIND.to_string(),
+            manifest_id,
+            blob_hash_algorithm: DOCTOR_RAW_MIRROR_HASH_ALGORITHM.to_string(),
+            blob_relative_path: doctor_raw_mirror_blob_relative_path(&blob_blake3)
+                .expect("valid blob path"),
+            blob_size_bytes: bytes.len() as u64,
+            blob_blake3,
+            provider: provider.to_string(),
+            source_id: source_id.to_string(),
+            origin_kind: "local".to_string(),
+            origin_host: None,
+            original_path: original_path.clone(),
+            redacted_original_path: doctor_redacted_path(&original_path, data_dir),
+            original_path_blake3,
+            captured_at_ms: 1_733_000_000_000,
+            source_mtime_ms: Some(1_733_000_000_000),
+            source_size_bytes: Some(bytes.len() as u64),
+            compression: DoctorRawMirrorCompressionEnvelope {
+                state: "none".to_string(),
+                algorithm: None,
+                uncompressed_size_bytes: Some(bytes.len() as u64),
+            },
+            encryption: DoctorRawMirrorEncryptionEnvelope {
+                state: "none".to_string(),
+                algorithm: None,
+                key_id: None,
+                envelope_version: None,
+            },
+            db_links,
+            verification: DoctorRawMirrorVerificationRecord {
+                status: "captured".to_string(),
+                verifier: "test-fixture".to_string(),
+                content_blake3: None,
+                verified_at_ms: None,
+            },
+            manifest_blake3: None,
+        };
+        manifest.manifest_blake3 = Some(doctor_raw_mirror_manifest_blake3(&manifest));
+        manifest
+    }
+
+    fn write_raw_mirror_test_manifest(
+        data_dir: &Path,
+        manifest: &DoctorRawMirrorManifestFile,
+        bytes: &[u8],
+    ) -> (PathBuf, PathBuf) {
+        let root = doctor_raw_mirror_root(data_dir);
+        let blob_path = root.join(&manifest.blob_relative_path);
+        std::fs::create_dir_all(blob_path.parent().expect("blob parent"))
+            .expect("create blob parent");
+        std::fs::write(&blob_path, bytes).expect("write raw mirror blob");
+        let manifest_path = root.join(doctor_raw_mirror_manifest_relative_path(
+            &manifest.manifest_id,
+        ));
+        std::fs::create_dir_all(manifest_path.parent().expect("manifest parent"))
+            .expect("create manifest parent");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(manifest).expect("manifest json"),
+        )
+        .expect("write raw mirror manifest");
+        (blob_path, manifest_path)
+    }
+
+    #[test]
+    fn raw_mirror_layout_rejects_hostile_paths_and_documents_permission_intent() {
+        assert!(doctor_raw_mirror_validate_relative_path("../escape").is_err());
+        assert!(doctor_raw_mirror_validate_relative_path("/tmp/escape").is_err());
+        assert!(doctor_raw_mirror_validate_relative_path("blobs/blake3/ab/hash.raw").is_ok());
+
+        let policy = doctor_raw_mirror_policy_report();
+        assert!(policy.append_only);
+        assert!(policy.global_dedup_by_content_hash);
+        assert!(policy.never_overwrite_different_bytes);
+        assert_eq!(policy.directory_mode_octal, "0700");
+        assert_eq!(policy.file_mode_octal, "0600");
+        assert!(policy.enforce_private_files);
+        assert!(
+            policy.path_traversal_defense.contains("dot-dot")
+                && policy.symlink_defense.contains("refuses symlinked")
+        );
+
+        let layout = doctor_raw_mirror_layout_report();
+        assert_eq!(layout.root_relative_path, "raw-mirror/v1");
+        assert!(
+            layout
+                .case_insensitive_collision_behavior
+                .contains("path identity is hashed")
+        );
+    }
+
+    #[test]
+    fn raw_mirror_manifest_identity_supports_dedup_and_distinguishes_byte_changes() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = temp.path().join("cass-data");
+        let source_path = data_dir.join("sessions/source.jsonl");
+        let duplicate_link = DoctorRawMirrorDbLink {
+            conversation_id: Some(7),
+            message_count: Some(2),
+            source_path: Some(source_path.display().to_string()),
+            started_at_ms: Some(1_733_000_000_000),
+        };
+        let merged =
+            doctor_raw_mirror_unique_db_links(&[duplicate_link.clone(), duplicate_link.clone()]);
+        assert_eq!(
+            merged.len(),
+            1,
+            "same-hash metadata merge must deduplicate identical db_links"
+        );
+
+        let first = raw_mirror_test_manifest(
+            &data_dir,
+            "codex",
+            "local",
+            &source_path,
+            b"same bytes",
+            vec![duplicate_link],
+        );
+        let second_provider = raw_mirror_test_manifest(
+            &data_dir,
+            "claude_code",
+            "local",
+            &source_path,
+            b"same bytes",
+            Vec::new(),
+        );
+        assert_eq!(
+            first.blob_relative_path, second_provider.blob_relative_path,
+            "identical bytes should deduplicate to the same content-addressed blob"
+        );
+        assert_ne!(
+            first.manifest_id, second_provider.manifest_id,
+            "provider/source metadata remains independently addressable even when blob bytes dedup"
+        );
+
+        let changed_bytes = raw_mirror_test_manifest(
+            &data_dir,
+            "codex",
+            "local",
+            &source_path,
+            b"different bytes",
+            Vec::new(),
+        );
+        assert_ne!(
+            first.blob_relative_path, changed_bytes.blob_relative_path,
+            "different bytes at the same source identity must never overwrite the existing blob"
+        );
+        assert_ne!(first.manifest_id, changed_bytes.manifest_id);
+    }
+
+    #[test]
+    fn raw_mirror_report_verifies_blobs_flags_manifest_drift_and_interrupted_captures() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = temp.path().join("cass-data");
+        let source_path = data_dir.join("sessions/source.jsonl");
+        let bytes = b"{\"type\":\"message\",\"text\":\"hello\"}\n";
+        let good_manifest =
+            raw_mirror_test_manifest(&data_dir, "codex", "local", &source_path, bytes, Vec::new());
+        let (blob_path, _) = write_raw_mirror_test_manifest(&data_dir, &good_manifest, bytes);
+
+        let drift_path = data_dir.join("sessions/source-drift.jsonl");
+        let mut drift_manifest =
+            raw_mirror_test_manifest(&data_dir, "codex", "local", &drift_path, bytes, Vec::new());
+        drift_manifest.manifest_blake3 = Some("doctor-raw-mirror-manifest-v1-bad".to_string());
+        write_raw_mirror_test_manifest(&data_dir, &drift_manifest, bytes);
+
+        let unverified_bytes = b"{\"type\":\"message\",\"text\":\"needs manifest checksum\"}\n";
+        let unverified_path = data_dir.join("sessions/source-unverified.jsonl");
+        let mut unverified_manifest = raw_mirror_test_manifest(
+            &data_dir,
+            "codex",
+            "local",
+            &unverified_path,
+            unverified_bytes,
+            Vec::new(),
+        );
+        unverified_manifest.manifest_blake3 = None;
+        write_raw_mirror_test_manifest(&data_dir, &unverified_manifest, unverified_bytes);
+
+        let tmp_dir = doctor_raw_mirror_root(&data_dir).join("tmp/op-1");
+        std::fs::create_dir_all(&tmp_dir).expect("create tmp dir");
+        std::fs::write(tmp_dir.join("capture.tmp"), b"partial").expect("write tmp");
+
+        let report = collect_doctor_raw_mirror_report(&data_dir);
+        assert_eq!(report.status, "warn");
+        assert_eq!(report.summary.manifest_count, 3);
+        assert_eq!(report.summary.verified_blob_count, 2);
+        assert_eq!(report.summary.manifest_checksum_mismatch_count, 1);
+        assert_eq!(report.summary.manifest_checksum_not_recorded_count, 1);
+        assert_eq!(report.summary.interrupted_capture_count, 1);
+        assert_eq!(report.summary.duplicate_blob_reference_count, 1);
+        assert_eq!(
+            report.summary.total_blob_bytes,
+            (bytes.len() + unverified_bytes.len()) as u64,
+            "summary byte count should reflect unique deduplicated blob storage"
+        );
+        assert!(blob_path.exists());
+
+        let good_report = report
+            .manifests
+            .iter()
+            .find(|manifest| manifest.manifest_id == good_manifest.manifest_id)
+            .expect("good manifest report");
+        assert_eq!(
+            good_report.blob_checksum_status,
+            DoctorArtifactChecksumStatus::Matched
+        );
+        assert_eq!(
+            good_report.redacted_original_path,
+            "[cass-data]/sessions/source.jsonl"
+        );
+        assert_eq!(good_report.upstream_path_exists, Some(false));
+
+        let drift_report = report
+            .manifests
+            .iter()
+            .find(|manifest| manifest.manifest_id == drift_manifest.manifest_id)
+            .expect("drift manifest report");
+        assert_eq!(drift_report.status, "manifest_drift");
+        assert_eq!(
+            drift_report.manifest_checksum_status,
+            DoctorArtifactChecksumStatus::Mismatched
+        );
+
+        let unverified_report = report
+            .manifests
+            .iter()
+            .find(|manifest| manifest.manifest_id == unverified_manifest.manifest_id)
+            .expect("unverified manifest report");
+        assert_eq!(unverified_report.status, "manifest_unverified");
+        assert_eq!(
+            unverified_report.manifest_checksum_status,
+            DoctorArtifactChecksumStatus::NotRecorded
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raw_mirror_report_rejects_symlink_manifest_entries() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = temp.path().join("cass-data");
+        let root = doctor_raw_mirror_root(&data_dir);
+        let manifest_dir = root.join("manifests");
+        std::fs::create_dir_all(&manifest_dir).expect("create manifest dir");
+        let outside_target = temp.path().join("outside-manifest.json");
+        std::fs::write(&outside_target, "{}").expect("write external manifest");
+        std::os::unix::fs::symlink(&outside_target, manifest_dir.join("linked.json"))
+            .expect("create manifest symlink");
+
+        let report = collect_doctor_raw_mirror_report(&data_dir);
+        assert_eq!(report.status, "warn");
+        assert_eq!(report.summary.manifest_count, 1);
+        assert_eq!(report.summary.invalid_manifest_count, 1);
+        assert_eq!(
+            report.manifests[0].invalid_reason.as_deref(),
+            Some("manifest path is a symlink")
         );
     }
 
@@ -20023,6 +21093,53 @@ fn run_doctor(
         );
     }
 
+    let raw_mirror = collect_doctor_raw_mirror_report(&data_dir);
+    match raw_mirror.status.as_str() {
+        "absent" => {
+            add_check!(
+                "raw_mirror",
+                "pass",
+                "Raw mirror layout not initialized yet; future capture will use raw-mirror/v1",
+                false
+            );
+        }
+        "empty" => {
+            add_check!(
+                "raw_mirror",
+                "pass",
+                "Raw mirror layout exists but contains no manifests yet",
+                false
+            );
+        }
+        "verified" => {
+            add_check!(
+                "raw_mirror",
+                "pass",
+                format!(
+                    "Raw mirror verified ({} manifest(s), {} blob byte(s))",
+                    raw_mirror.summary.manifest_count, raw_mirror.summary.total_blob_bytes
+                ),
+                false
+            );
+        }
+        _ => {
+            add_check!(
+                "raw_mirror",
+                "warn",
+                format!(
+                    "Raw mirror needs inspection: {} invalid manifest(s), {} missing blob(s), {} checksum mismatch(es), {} unverified manifest checksum(s), {} interrupted capture artifact(s)",
+                    raw_mirror.summary.invalid_manifest_count,
+                    raw_mirror.summary.missing_blob_count,
+                    raw_mirror.summary.checksum_mismatch_count
+                        + raw_mirror.summary.manifest_checksum_mismatch_count,
+                    raw_mirror.summary.manifest_checksum_not_recorded_count,
+                    raw_mirror.summary.interrupted_capture_count
+                ),
+                false
+            );
+        }
+    }
+
     // Apply fix: rebuild index if needed (only when --fix is passed)
     if needs_rebuild && fix {
         let stderr_is_tty = std::io::stderr().is_terminal();
@@ -20326,6 +21443,7 @@ fn run_doctor(
             "asset_taxonomy": doctor_asset_taxonomy_report(),
             "repair_contract": doctor_repair_contract_report(),
             "source_inventory": source_inventory,
+            "raw_mirror": raw_mirror,
             "checks": checks,
             "quarantine": quarantine_report,
             "_meta": {
@@ -22609,6 +23727,120 @@ fn response_schema_doctor_source_inventory() -> serde_json::Value {
     })
 }
 
+fn response_schema_doctor_raw_mirror() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Read-only raw session mirror layout and verification report. Raw mirror blobs are precious archive evidence, not derived cleanup candidates.",
+        "properties": {
+            "schema_version": { "type": "integer" },
+            "status": { "type": "string" },
+            "root_path": { "type": "string" },
+            "redacted_root_path": { "type": "string" },
+            "exists": { "type": "boolean" },
+            "layout": {
+                "type": "object",
+                "properties": {
+                    "root_relative_path": { "type": "string" },
+                    "manifest_kind": { "type": "string" },
+                    "hash_algorithm": { "type": "string" },
+                    "blob_path_template": { "type": "string" },
+                    "manifest_path_template": { "type": "string" },
+                    "verification_path_template": { "type": "string" },
+                    "temp_path_template": { "type": "string" },
+                    "content_address_scope": { "type": "string" },
+                    "source_identity_scope": { "type": "string" },
+                    "db_link_contract": { "type": "string" },
+                    "case_insensitive_collision_behavior": { "type": "string" },
+                    "migration_contract": { "type": "string" }
+                }
+            },
+            "policy": {
+                "type": "object",
+                "properties": {
+                    "append_only": { "type": "boolean" },
+                    "global_dedup_by_content_hash": { "type": "boolean" },
+                    "never_overwrite_different_bytes": { "type": "boolean" },
+                    "directory_mode_octal": { "type": "string" },
+                    "file_mode_octal": { "type": "string" },
+                    "enforce_private_files": { "type": "boolean" },
+                    "atomic_publish": { "type": "string" },
+                    "fsync_required": { "type": "boolean" },
+                    "path_traversal_defense": { "type": "string" },
+                    "symlink_defense": { "type": "string" },
+                    "compression_contract": { "type": "string" },
+                    "encryption_contract": { "type": "string" },
+                    "support_bundle_redaction_contract": { "type": "string" },
+                    "missing_upstream_semantics": { "type": "string" }
+                }
+            },
+            "summary": {
+                "type": "object",
+                "properties": {
+                    "manifest_count": { "type": "integer" },
+                    "verified_blob_count": { "type": "integer" },
+                    "missing_blob_count": { "type": "integer" },
+                    "checksum_mismatch_count": { "type": "integer" },
+                    "manifest_checksum_mismatch_count": { "type": "integer" },
+                    "manifest_checksum_not_recorded_count": { "type": "integer" },
+                    "invalid_manifest_count": { "type": "integer" },
+                    "interrupted_capture_count": { "type": "integer" },
+                    "duplicate_blob_reference_count": { "type": "integer" },
+                    "total_blob_bytes": { "type": "integer" }
+                }
+            },
+            "manifests": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "manifest_id": { "type": "string" },
+                        "manifest_path": { "type": "string" },
+                        "redacted_manifest_path": { "type": "string" },
+                        "blob_relative_path": { "type": "string" },
+                        "blob_path": { "type": "string" },
+                        "redacted_blob_path": { "type": "string" },
+                        "blob_blake3": { "type": "string" },
+                        "blob_size_bytes": { "type": "integer" },
+                        "provider": { "type": "string" },
+                        "source_id": { "type": "string" },
+                        "origin_kind": { "type": "string" },
+                        "origin_host": { "type": ["string", "null"] },
+                        "original_path": { "type": "string" },
+                        "redacted_original_path": { "type": "string" },
+                        "original_path_blake3": { "type": "string" },
+                        "captured_at_ms": { "type": "integer" },
+                        "source_mtime_ms": { "type": ["integer", "null"] },
+                        "source_size_bytes": { "type": ["integer", "null"] },
+                        "compression_state": { "type": "string" },
+                        "encryption_state": { "type": "string" },
+                        "db_link_count": { "type": "integer" },
+                        "upstream_path_exists": { "type": ["boolean", "null"] },
+                        "status": { "type": "string" },
+                        "blob_checksum_status": { "type": "string" },
+                        "manifest_checksum_status": { "type": "string" },
+                        "invalid_reason": { "type": "string" }
+                    }
+                }
+            },
+            "warnings": { "type": "array", "items": { "type": "string" } },
+            "notes": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": [
+            "schema_version",
+            "status",
+            "root_path",
+            "redacted_root_path",
+            "exists",
+            "layout",
+            "policy",
+            "summary",
+            "manifests",
+            "warnings",
+            "notes"
+        ]
+    })
+}
+
 fn response_schema_search_hit() -> serde_json::Value {
     response_schema_object([
         ("source_path", serde_json::json!({ "type": "string" })),
@@ -23513,6 +24745,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                 "asset_taxonomy": response_schema_opaque_object_array(),
                 "repair_contract": response_schema_opaque_object(),
                 "source_inventory": response_schema_doctor_source_inventory(),
+                "raw_mirror": response_schema_doctor_raw_mirror(),
                 "quarantine": response_schema_opaque_object(),
                 "cleanup_apply": response_schema_doctor_cleanup_apply(),
                 "_meta": response_schema_opaque_object(),

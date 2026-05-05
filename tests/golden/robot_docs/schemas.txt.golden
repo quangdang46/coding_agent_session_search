@@ -109,6 +109,54 @@ schemas: (auto-generated from contract)
     - issues_found: integer
     - needs_rebuild: boolean
     - quarantine: object
+    - raw_mirror: object
+      - exists: boolean
+      - layout: object
+        - blob_path_template: string
+        - case_insensitive_collision_behavior: string
+        - content_address_scope: string
+        - db_link_contract: string
+        - hash_algorithm: string
+        - manifest_kind: string
+        - manifest_path_template: string
+        - migration_contract: string
+        - root_relative_path: string
+        - source_identity_scope: string
+        - temp_path_template: string
+        - verification_path_template: string
+      - manifests: array
+      - notes: array
+      - policy: object
+        - append_only: boolean
+        - atomic_publish: string
+        - compression_contract: string
+        - directory_mode_octal: string
+        - encryption_contract: string
+        - enforce_private_files: boolean
+        - file_mode_octal: string
+        - fsync_required: boolean
+        - global_dedup_by_content_hash: boolean
+        - missing_upstream_semantics: string
+        - never_overwrite_different_bytes: boolean
+        - path_traversal_defense: string
+        - support_bundle_redaction_contract: string
+        - symlink_defense: string
+      - redacted_root_path: string
+      - root_path: string
+      - schema_version: integer
+      - status: string
+      - summary: object
+        - checksum_mismatch_count: integer
+        - duplicate_blob_reference_count: integer
+        - interrupted_capture_count: integer
+        - invalid_manifest_count: integer
+        - manifest_checksum_mismatch_count: integer
+        - manifest_checksum_not_recorded_count: integer
+        - manifest_count: integer
+        - missing_blob_count: integer
+        - total_blob_bytes: integer
+        - verified_blob_count: integer
+      - warnings: array
     - recommended_action: ?
     - repair_contract: object
     - source_inventory: object

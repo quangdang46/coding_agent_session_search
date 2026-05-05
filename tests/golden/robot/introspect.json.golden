@@ -2550,6 +2550,273 @@
             "notes"
           ]
         },
+        "raw_mirror": {
+          "type": "object",
+          "description": "Read-only raw session mirror layout and verification report. Raw mirror blobs are precious archive evidence, not derived cleanup candidates.",
+          "properties": {
+            "schema_version": {
+              "type": "integer"
+            },
+            "status": {
+              "type": "string"
+            },
+            "root_path": {
+              "type": "string"
+            },
+            "redacted_root_path": {
+              "type": "string"
+            },
+            "exists": {
+              "type": "boolean"
+            },
+            "layout": {
+              "type": "object",
+              "properties": {
+                "root_relative_path": {
+                  "type": "string"
+                },
+                "manifest_kind": {
+                  "type": "string"
+                },
+                "hash_algorithm": {
+                  "type": "string"
+                },
+                "blob_path_template": {
+                  "type": "string"
+                },
+                "manifest_path_template": {
+                  "type": "string"
+                },
+                "verification_path_template": {
+                  "type": "string"
+                },
+                "temp_path_template": {
+                  "type": "string"
+                },
+                "content_address_scope": {
+                  "type": "string"
+                },
+                "source_identity_scope": {
+                  "type": "string"
+                },
+                "db_link_contract": {
+                  "type": "string"
+                },
+                "case_insensitive_collision_behavior": {
+                  "type": "string"
+                },
+                "migration_contract": {
+                  "type": "string"
+                }
+              }
+            },
+            "policy": {
+              "type": "object",
+              "properties": {
+                "append_only": {
+                  "type": "boolean"
+                },
+                "global_dedup_by_content_hash": {
+                  "type": "boolean"
+                },
+                "never_overwrite_different_bytes": {
+                  "type": "boolean"
+                },
+                "directory_mode_octal": {
+                  "type": "string"
+                },
+                "file_mode_octal": {
+                  "type": "string"
+                },
+                "enforce_private_files": {
+                  "type": "boolean"
+                },
+                "atomic_publish": {
+                  "type": "string"
+                },
+                "fsync_required": {
+                  "type": "boolean"
+                },
+                "path_traversal_defense": {
+                  "type": "string"
+                },
+                "symlink_defense": {
+                  "type": "string"
+                },
+                "compression_contract": {
+                  "type": "string"
+                },
+                "encryption_contract": {
+                  "type": "string"
+                },
+                "support_bundle_redaction_contract": {
+                  "type": "string"
+                },
+                "missing_upstream_semantics": {
+                  "type": "string"
+                }
+              }
+            },
+            "summary": {
+              "type": "object",
+              "properties": {
+                "manifest_count": {
+                  "type": "integer"
+                },
+                "verified_blob_count": {
+                  "type": "integer"
+                },
+                "missing_blob_count": {
+                  "type": "integer"
+                },
+                "checksum_mismatch_count": {
+                  "type": "integer"
+                },
+                "manifest_checksum_mismatch_count": {
+                  "type": "integer"
+                },
+                "manifest_checksum_not_recorded_count": {
+                  "type": "integer"
+                },
+                "invalid_manifest_count": {
+                  "type": "integer"
+                },
+                "interrupted_capture_count": {
+                  "type": "integer"
+                },
+                "duplicate_blob_reference_count": {
+                  "type": "integer"
+                },
+                "total_blob_bytes": {
+                  "type": "integer"
+                }
+              }
+            },
+            "manifests": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "manifest_id": {
+                    "type": "string"
+                  },
+                  "manifest_path": {
+                    "type": "string"
+                  },
+                  "redacted_manifest_path": {
+                    "type": "string"
+                  },
+                  "blob_relative_path": {
+                    "type": "string"
+                  },
+                  "blob_path": {
+                    "type": "string"
+                  },
+                  "redacted_blob_path": {
+                    "type": "string"
+                  },
+                  "blob_blake3": {
+                    "type": "string"
+                  },
+                  "blob_size_bytes": {
+                    "type": "integer"
+                  },
+                  "provider": {
+                    "type": "string"
+                  },
+                  "source_id": {
+                    "type": "string"
+                  },
+                  "origin_kind": {
+                    "type": "string"
+                  },
+                  "origin_host": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "original_path": {
+                    "type": "string"
+                  },
+                  "redacted_original_path": {
+                    "type": "string"
+                  },
+                  "original_path_blake3": {
+                    "type": "string"
+                  },
+                  "captured_at_ms": {
+                    "type": "integer"
+                  },
+                  "source_mtime_ms": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "source_size_bytes": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "compression_state": {
+                    "type": "string"
+                  },
+                  "encryption_state": {
+                    "type": "string"
+                  },
+                  "db_link_count": {
+                    "type": "integer"
+                  },
+                  "upstream_path_exists": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "status": {
+                    "type": "string"
+                  },
+                  "blob_checksum_status": {
+                    "type": "string"
+                  },
+                  "manifest_checksum_status": {
+                    "type": "string"
+                  },
+                  "invalid_reason": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "warnings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "notes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "schema_version",
+            "status",
+            "root_path",
+            "redacted_root_path",
+            "exists",
+            "layout",
+            "policy",
+            "summary",
+            "manifests",
+            "warnings",
+            "notes"
+          ]
+        },
         "quarantine": {
           "type": "object",
           "additionalProperties": true
