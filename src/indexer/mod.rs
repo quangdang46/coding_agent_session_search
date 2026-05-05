@@ -8418,6 +8418,10 @@ fn spawn_connector_producer(
             let local_origin = Origin::local();
             let mut batch_sender =
                 StreamingBatchSender::new(&tx, config.flow_limiter.clone(), name, is_discovered);
+            for root_path in &detect.root_paths {
+                let root = ScanRoot::local(root_path.clone());
+                capture_scan_root_file_before_parse(&config.data_dir, name, &root);
+            }
             match conn.scan_with_callback(&ctx, &mut |mut conversation| {
                 inject_provenance(&mut conversation, &local_origin);
                 compact_large_connector_extras(name, &mut conversation);
@@ -8453,10 +8457,6 @@ fn spawn_connector_producer(
                         );
                         return;
                     }
-                    for root_path in &detect.root_paths {
-                        let root = ScanRoot::local(root_path.clone());
-                        capture_scan_root_file_after_parse_failure(&config.data_dir, name, &root);
-                    }
                     tracing::warn!(connector = name, "local scan failed: {}", e);
                     let _ = tx.send(IndexMessage::ScanError {
                         connector_name: name,
@@ -8476,6 +8476,7 @@ fn spawn_connector_producer(
             );
             let mut batch_sender =
                 StreamingBatchSender::new(&tx, config.flow_limiter.clone(), name, is_discovered);
+            capture_scan_root_file_before_parse(&config.data_dir, name, root);
             match conn.scan_with_callback(&ctx, &mut |mut conversation| {
                 inject_provenance(&mut conversation, &root.origin);
                 apply_workspace_rewrite(&mut conversation, root);
@@ -8535,7 +8536,6 @@ fn spawn_connector_producer(
                         );
                         return;
                     }
-                    capture_scan_root_file_after_parse_failure(&config.data_dir, name, root);
                     tracing::warn!(
                         connector = name,
                         root = %root.path.display(),
@@ -9252,6 +9252,10 @@ fn run_batch_index_with_connector_factories(
 
                     let ctx =
                         crate::connectors::ScanContext::local_default(data_dir.clone(), since_ts);
+                    for root_path in &detect.root_paths {
+                        let root = ScanRoot::local(root_path.clone());
+                        capture_scan_root_file_before_parse(&data_dir, name, &root);
+                    }
                     match conn.scan(&ctx) {
                         Ok(mut local_convs) => {
                             let local_origin = Origin::local();
@@ -9264,10 +9268,6 @@ fn run_batch_index_with_connector_factories(
                         Err(e) => {
                             // Note: agent was counted as discovered but scan failed
                             // This is acceptable as detection succeeded (agent exists)
-                            for root_path in &detect.root_paths {
-                                let root = ScanRoot::local(root_path.clone());
-                                capture_scan_root_file_after_parse_failure(&data_dir, name, &root);
-                            }
                             tracing::warn!("scan failed for {}: {}", name, e);
                         }
                     }
@@ -9280,6 +9280,7 @@ fn run_batch_index_with_connector_factories(
                             vec![root.clone()],
                             since_ts,
                         );
+                        capture_scan_root_file_before_parse(&data_dir, name, root);
                         match conn.scan(&ctx) {
                             Ok(mut remote_convs) => {
                                 for conv in &mut remote_convs {
@@ -9290,7 +9291,6 @@ fn run_batch_index_with_connector_factories(
                                 convs.extend(remote_convs);
                             }
                             Err(e) => {
-                                capture_scan_root_file_after_parse_failure(&data_dir, name, root);
                                 tracing::warn!(
                                     connector = name,
                                     root = %root.path.display(),
@@ -15736,12 +15736,13 @@ fn reindex_paths_with_semantic_delta(
             since_ts,
         );
 
+        capture_scan_root_file_before_parse(&opts.data_dir, kind.slug(), &root);
+
         // SCAN PHASE: IO-heavy, no locks held
         let scan_start = Instant::now();
         let mut convs = match conn.scan(&ctx) {
             Ok(c) => c,
             Err(e) => {
-                capture_scan_root_file_after_parse_failure(&opts.data_dir, kind.slug(), &root);
                 tracing::debug!(
                     "watch scan failed for {:?} at {}: {}",
                     kind,
@@ -16624,7 +16625,7 @@ fn inject_provenance(conv: &mut NormalizedConversation, origin: &Origin) {
     }
 }
 
-fn capture_scan_root_file_after_parse_failure(data_dir: &Path, provider: &str, root: &ScanRoot) {
+fn capture_scan_root_file_before_parse(data_dir: &Path, provider: &str, root: &ScanRoot) {
     if !root.path.is_file() {
         return;
     }
@@ -16644,7 +16645,7 @@ fn capture_scan_root_file_after_parse_failure(data_dir: &Path, provider: &str, r
                 manifest_id = %record.manifest_id,
                 blob_blake3 = %record.blob_blake3,
                 already_present = record.already_present,
-                "captured explicit scan-root source into raw mirror after connector parse failure"
+                "captured explicit scan-root source into raw mirror before connector parse"
             );
         }
         Err(error) => {
@@ -16653,7 +16654,7 @@ fn capture_scan_root_file_after_parse_failure(data_dir: &Path, provider: &str, r
                 source_id = %root.origin.source_id,
                 path = %root.path.display(),
                 error = %error,
-                "failed to capture explicit scan-root source into raw mirror after connector parse failure"
+                "failed to capture explicit scan-root source into raw mirror before connector parse"
             );
         }
     }
@@ -20595,14 +20596,14 @@ mod tests {
     }
 
     #[test]
-    fn raw_mirror_capture_handles_explicit_file_root_after_parse_failure() {
+    fn raw_mirror_capture_handles_explicit_file_root_before_parse() {
         let temp = TempDir::new().expect("tempdir");
         let data_dir = temp.path().join("cass-data");
         let source_path = temp.path().join("parse-failure-candidate.jsonl");
         std::fs::write(&source_path, b"{not valid connector json\n").expect("write source");
         let root = ScanRoot::local(source_path.clone());
 
-        capture_scan_root_file_after_parse_failure(&data_dir, "codex", &root);
+        capture_scan_root_file_before_parse(&data_dir, "codex", &root);
 
         let manifest_root = data_dir.join("raw-mirror/v1/manifests");
         let manifests = std::fs::read_dir(&manifest_root)
