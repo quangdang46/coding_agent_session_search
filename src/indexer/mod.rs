@@ -8649,6 +8649,7 @@ fn run_streaming_consumer(
     rx: Receiver<IndexMessage>,
     num_producers: usize,
     storage: &FrankenStorage,
+    data_dir: &Path,
     mut t_index: Option<&mut TantivyIndex>,
     flow_limiter: Arc<StreamingByteLimiter>,
     progress: &Option<Arc<IndexingProgress>>,
@@ -8808,6 +8809,7 @@ fn run_streaming_consumer(
                 let ingest_result = ingest_batch(
                     storage,
                     t_index.as_deref_mut(),
+                    data_dir,
                     &combined_conversations,
                     progress,
                     lexical_strategy,
@@ -9113,6 +9115,7 @@ fn run_streaming_index_with_connector_factories(
         rx,
         num_connectors,
         storage,
+        &opts.data_dir,
         t_index,
         producer_config.flow_limiter.clone(),
         &opts.progress,
@@ -9378,6 +9381,7 @@ fn run_batch_index_with_connector_factories(
         canonical_mutations = canonical_mutations.accumulate(ingest_batch(
             storage,
             t_index.as_deref_mut(),
+            &opts.data_dir,
             &convs,
             &opts.progress,
             lexical_strategy,
@@ -15228,6 +15232,7 @@ fn rebuild_tantivy_from_db_with_options(
 fn ingest_batch(
     storage: &FrankenStorage,
     t_index: Option<&mut TantivyIndex>,
+    data_dir: &Path,
     convs: &[NormalizedConversation],
     progress: &Option<Arc<IndexingProgress>>,
     lexical_strategy: LexicalPopulationStrategy,
@@ -15236,9 +15241,10 @@ fn ingest_batch(
     // Persistence now uses short-lived writer connections internally so the
     // long-lived watch/session handle does not accumulate retained MVCC state
     // on older frankensqlite builds that ignore autocommit_retain.
-    let batch_outcome = persist::persist_conversations_batched(
+    let batch_outcome = persist::persist_conversations_batched_with_raw_mirror_links(
         storage,
         t_index,
+        data_dir,
         convs,
         lexical_strategy,
         defer_checkpoints,
@@ -15254,9 +15260,11 @@ fn ingest_batch(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ingest_batch_with_semantic_delta(
     storage: &FrankenStorage,
     t_index: Option<&mut TantivyIndex>,
+    data_dir: &Path,
     convs: &[NormalizedConversation],
     progress: &Option<Arc<IndexingProgress>>,
     lexical_strategy: LexicalPopulationStrategy,
@@ -15264,17 +15272,19 @@ fn ingest_batch_with_semantic_delta(
     semantic_delta: Option<&mut WatchSemanticDelta>,
 ) -> Result<persist::PersistBatchOutcome> {
     let batch_outcome = if semantic_delta.is_some() {
-        persist::persist_conversations_batched_with_semantic_delta(
+        persist::persist_conversations_batched_with_semantic_delta_and_raw_mirror_links(
             storage,
             t_index,
+            data_dir,
             convs,
             lexical_strategy,
             defer_checkpoints,
         )?
     } else {
-        persist::persist_conversations_batched(
+        persist::persist_conversations_batched_with_raw_mirror_links(
             storage,
             t_index,
+            data_dir,
             convs,
             lexical_strategy,
             defer_checkpoints,
@@ -15812,6 +15822,7 @@ fn reindex_paths_with_semantic_delta(
             let batch_outcome = ingest_batch_with_semantic_delta(
                 &storage,
                 Some(t_index),
+                &opts.data_dir,
                 &convs,
                 &opts.progress,
                 LexicalPopulationStrategy::IncrementalInline,
@@ -16906,6 +16917,7 @@ pub mod persist {
     use super::{LexicalPopulationStrategy, lexical_population_strategy_requires_inline_tantivy};
     use std::collections::{HashMap, HashSet};
     use std::ops::Range;
+    use std::path::Path;
     use std::time::Duration;
     #[cfg(test)]
     use std::time::Instant;
@@ -17117,6 +17129,65 @@ pub mod persist {
             &inserted_message_ids,
         )?;
         Ok((inputs, max_message_id))
+    }
+
+    fn raw_mirror_manifest_relative_path(conv: &NormalizedConversation) -> Option<&str> {
+        conv.metadata
+            .get("cass")
+            .and_then(|cass| cass.get("raw_mirror"))
+            .and_then(|raw_mirror| raw_mirror.get("manifest_relative_path"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    fn persisted_raw_mirror_db_link(
+        conv: &NormalizedConversation,
+        outcome: &InsertOutcome,
+    ) -> crate::raw_mirror::RawMirrorDbLink {
+        crate::raw_mirror::RawMirrorDbLink {
+            conversation_id: Some(outcome.conversation_id),
+            message_count: Some(conv.messages.len()),
+            source_path: Some(conv.source_path.display().to_string()),
+            started_at_ms: conv.started_at,
+        }
+    }
+
+    fn record_persisted_raw_mirror_db_link(
+        data_dir: &Path,
+        conv: &NormalizedConversation,
+        outcome: &InsertOutcome,
+    ) {
+        let Some(manifest_relative_path) = raw_mirror_manifest_relative_path(conv) else {
+            return;
+        };
+        let db_link = persisted_raw_mirror_db_link(conv, outcome);
+        if let Err(error) = crate::raw_mirror::merge_manifest_db_links(
+            data_dir,
+            manifest_relative_path,
+            std::slice::from_ref(&db_link),
+        ) {
+            tracing::warn!(
+                agent = %conv.agent_slug,
+                conversation_id = outcome.conversation_id,
+                manifest_relative_path,
+                error = %error,
+                "failed to record persisted raw mirror conversation link"
+            );
+        }
+    }
+
+    fn record_persisted_raw_mirror_db_links(
+        data_dir: Option<&Path>,
+        convs: &[NormalizedConversation],
+        outcomes: &[InsertOutcome],
+    ) {
+        let Some(data_dir) = data_dir else {
+            return;
+        };
+        for (conv, outcome) in convs.iter().zip(outcomes.iter()) {
+            record_persisted_raw_mirror_db_link(data_dir, conv, outcome);
+        }
     }
 
     fn begin_concurrent_writes_enabled() -> bool {
@@ -17617,14 +17688,16 @@ pub mod persist {
         false
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn persist_conversations_batched_begin_concurrent(
         storage: &FrankenStorage,
-        db_path: &std::path::Path,
+        db_path: &Path,
         mut t_index: Option<&mut TantivyIndex>,
         convs: &[NormalizedConversation],
         lexical_strategy: LexicalPopulationStrategy,
         defer_checkpoints: bool,
         capture_semantic_delta: bool,
+        raw_mirror_data_dir: Option<&Path>,
     ) -> Result<PersistBatchOutcome> {
         if lexical_population_strategy_requires_inline_tantivy(lexical_strategy)
             && t_index.is_none()
@@ -17752,6 +17825,13 @@ pub mod persist {
             ordered.extend(fallback_outcomes);
         }
         ordered.sort_by_key(|(idx, _)| *idx);
+        if let Some(data_dir) = raw_mirror_data_dir {
+            for (idx, outcome) in &ordered {
+                if let Some(conv) = convs.get(*idx) {
+                    record_persisted_raw_mirror_db_link(data_dir, conv, outcome);
+                }
+            }
+        }
 
         let defer_lexical_updates = defer_lexical_updates_enabled();
         let mut batch_outcome = PersistBatchOutcome::default();
@@ -18045,6 +18125,7 @@ pub mod persist {
     ///
     /// Uses `IndexingCache` (Opt 7.2) to prevent N+1 queries for agent/workspace IDs.
     /// Set `CASS_SQLITE_CACHE=0` to disable caching for debugging.
+    #[cfg(test)]
     pub(super) fn persist_conversations_batched(
         storage: &FrankenStorage,
         t_index: Option<&mut TantivyIndex>,
@@ -18059,12 +18140,33 @@ pub mod persist {
             lexical_strategy,
             defer_checkpoints,
             false,
+            None,
         )
     }
 
-    pub(super) fn persist_conversations_batched_with_semantic_delta(
+    pub(super) fn persist_conversations_batched_with_raw_mirror_links(
         storage: &FrankenStorage,
         t_index: Option<&mut TantivyIndex>,
+        data_dir: &Path,
+        convs: &[NormalizedConversation],
+        lexical_strategy: LexicalPopulationStrategy,
+        defer_checkpoints: bool,
+    ) -> Result<PersistBatchOutcome> {
+        persist_conversations_batched_inner(
+            storage,
+            t_index,
+            convs,
+            lexical_strategy,
+            defer_checkpoints,
+            false,
+            Some(data_dir),
+        )
+    }
+
+    pub(super) fn persist_conversations_batched_with_semantic_delta_and_raw_mirror_links(
+        storage: &FrankenStorage,
+        t_index: Option<&mut TantivyIndex>,
+        data_dir: &Path,
         convs: &[NormalizedConversation],
         lexical_strategy: LexicalPopulationStrategy,
         defer_checkpoints: bool,
@@ -18076,6 +18178,7 @@ pub mod persist {
             lexical_strategy,
             defer_checkpoints,
             true,
+            Some(data_dir),
         )
     }
 
@@ -18086,6 +18189,7 @@ pub mod persist {
         lexical_strategy: LexicalPopulationStrategy,
         defer_checkpoints: bool,
         capture_semantic_delta: bool,
+        raw_mirror_data_dir: Option<&Path>,
     ) -> Result<PersistBatchOutcome> {
         if convs.is_empty() {
             return Ok(PersistBatchOutcome::default());
@@ -18119,6 +18223,7 @@ pub mod persist {
                 lexical_strategy,
                 defer_checkpoints,
                 capture_semantic_delta,
+                raw_mirror_data_dir,
             );
         }
 
@@ -18207,6 +18312,7 @@ pub mod persist {
         )?;
         let defer_lexical_updates = defer_lexical_updates_enabled();
         let mut batch_outcome = PersistBatchOutcome::default();
+        record_persisted_raw_mirror_db_links(raw_mirror_data_dir, convs, &outcomes);
         if !defer_lexical_updates {
             // ibuuh.32 / 5b9p0: route the serial-batched lexical sink
             // through the packet pipeline. Build each packet ONCE and
@@ -18745,6 +18851,7 @@ pub mod persist {
                 LexicalPopulationStrategy::InlineRebuildFromScan,
                 false,
                 false,
+                None,
             )
             .expect("begin-concurrent persist should succeed");
 
@@ -18848,6 +18955,7 @@ pub mod persist {
                 LexicalPopulationStrategy::InlineRebuildFromScan,
                 false,
                 false,
+                None,
             )
             .expect("single conversation begin-concurrent persist should succeed");
 
@@ -18998,6 +19106,7 @@ pub mod persist {
                 LexicalPopulationStrategy::DeferredAuthoritativeDbRebuild,
                 false,
                 false,
+                None,
             )
             .expect("begin-concurrent deferred persist should succeed");
 
@@ -20674,6 +20783,88 @@ mod tests {
         assert_eq!(
             manifest["db_links"][0]["started_at_ms"].as_i64(),
             Some(1_733_000_000_000)
+        );
+        assert_eq!(
+            std::fs::read(&source_path).expect("source bytes"),
+            source_bytes
+        );
+    }
+
+    #[test]
+    fn ingest_batch_records_persisted_raw_mirror_conversation_id_link() {
+        let temp = TempDir::new().expect("tempdir");
+        let data_dir = temp.path().join("cass-data");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        let db_path = data_dir.join("raw-mirror-link.db");
+        let storage = FrankenStorage::open(&db_path).expect("storage");
+        ensure_fts_schema(&storage);
+
+        let source_path = temp.path().join("persisted-link.jsonl");
+        let source_bytes = b"{\"type\":\"message\",\"role\":\"user\",\"content\":\"hello\"}\n";
+        std::fs::write(&source_path, source_bytes).expect("write source");
+        let mut conv = NormalizedConversation {
+            agent_slug: "codex".to_string(),
+            external_id: Some("raw-mirror-persisted-link".to_string()),
+            title: Some("Raw mirror persisted link".to_string()),
+            workspace: None,
+            source_path: source_path.clone(),
+            started_at: Some(1_733_000_000_000),
+            ended_at: Some(1_733_000_000_100),
+            metadata: serde_json::json!({}),
+            messages: vec![NormalizedMessage {
+                idx: 0,
+                role: "user".to_string(),
+                author: None,
+                created_at: Some(1_733_000_000_000),
+                content: "hello".to_string(),
+                extra: serde_json::json!({}),
+                snippets: Vec::new(),
+                invocations: Vec::new(),
+            }],
+        };
+        inject_provenance(&mut conv, &Origin::local());
+        attach_raw_mirror_capture(&data_dir, &mut conv);
+        let manifest_relative = conv.metadata["cass"]["raw_mirror"]["manifest_relative_path"]
+            .as_str()
+            .expect("manifest relative path")
+            .to_string();
+
+        let mutations = ingest_batch(
+            &storage,
+            None,
+            &data_dir,
+            &[conv],
+            &None,
+            LexicalPopulationStrategy::DeferredAuthoritativeDbRebuild,
+            false,
+        )
+        .expect("ingest batch");
+        assert_eq!(mutations.inserted_conversations, 1);
+        assert_eq!(mutations.inserted_messages, 1);
+
+        let conversation_ids: Vec<i64> = storage
+            .raw()
+            .query_map_collect(
+                "SELECT id FROM conversations WHERE external_id = ?1",
+                &[ParamValue::from("raw-mirror-persisted-link")],
+                |row| row.get_typed(0),
+            )
+            .expect("conversation id query");
+        assert_eq!(conversation_ids.len(), 1);
+        let conversation_id = conversation_ids[0];
+
+        let manifest_path = data_dir.join("raw-mirror/v1").join(manifest_relative);
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(manifest_path).expect("manifest bytes"))
+                .expect("manifest json");
+        let db_links = manifest["db_links"].as_array().expect("db links");
+        assert!(
+            db_links.iter().any(|link| {
+                link["conversation_id"].as_i64() == Some(conversation_id)
+                    && link["message_count"].as_u64() == Some(1)
+                    && link["started_at_ms"].as_i64() == Some(1_733_000_000_000)
+            }),
+            "manifest should include persisted conversation_id link: {manifest:#}"
         );
         assert_eq!(
             std::fs::read(&source_path).expect("source bytes"),
@@ -26016,6 +26207,7 @@ mod tests {
             rx,
             1,
             &storage,
+            &data_dir,
             Some(&mut index),
             Arc::new(StreamingByteLimiter::new(STREAMING_MAX_BYTES_IN_FLIGHT)),
             &Some(progress.clone()),
@@ -26063,6 +26255,7 @@ mod tests {
             rx,
             1,
             &storage,
+            &data_dir,
             None,
             Arc::new(StreamingByteLimiter::new(STREAMING_MAX_BYTES_IN_FLIGHT)),
             &Some(progress.clone()),
@@ -26149,6 +26342,7 @@ mod tests {
             rx,
             2,
             &storage,
+            &data_dir,
             None,
             flow_limiter,
             &Some(progress.clone()),
@@ -26215,6 +26409,7 @@ mod tests {
         ingest_batch(
             &storage,
             Some(&mut index),
+            &data_dir,
             &first,
             &None,
             LexicalPopulationStrategy::IncrementalInline,
@@ -26230,6 +26425,7 @@ mod tests {
         ingest_batch(
             &storage,
             Some(&mut index),
+            &data_dir,
             &second,
             &None,
             LexicalPopulationStrategy::IncrementalInline,
@@ -26384,6 +26580,7 @@ mod tests {
             rx,
             2, // num_producers: enables combine-decision
             &storage,
+            &data_dir,
             Some(&mut index),
             flow_limiter,
             &Some(progress.clone()),
@@ -26487,6 +26684,7 @@ mod tests {
                 rx,
                 2,
                 &storage,
+                &data_dir,
                 Some(&mut index),
                 flow_limiter,
                 &Some(progress),
@@ -26564,6 +26762,7 @@ mod tests {
             rx,
             1,
             &storage,
+            &data_dir,
             Some(&mut index),
             flow_limiter,
             &Some(progress.clone()),
@@ -26609,6 +26808,7 @@ mod tests {
             rx,
             1, // single producer → drain loop body is bypassed
             &storage,
+            &data_dir,
             Some(&mut index),
             flow_limiter,
             &Some(progress.clone()),
@@ -26729,7 +26929,7 @@ mod tests {
             tx,
             StreamingProducerConfig {
                 flow_limiter: flow_limiter.clone(),
-                data_dir,
+                data_dir: data_dir.clone(),
                 additional_scan_roots: vec![ScanRoot::remote(
                     remote_root_path.clone(),
                     Origin::remote("fixture-host"),
@@ -26744,6 +26944,7 @@ mod tests {
             rx,
             1,
             &storage,
+            &data_dir,
             Some(&mut index),
             flow_limiter,
             &Some(progress.clone()),
@@ -29113,6 +29314,7 @@ mod tests {
         ingest_batch(
             &storage,
             None,
+            &data_dir,
             &convs,
             &None,
             LexicalPopulationStrategy::DeferredAuthoritativeDbRebuild,
@@ -34446,6 +34648,7 @@ mod tests {
         ingest_batch(
             &storage,
             Some(&mut index),
+            &data_dir,
             &convs,
             &None,
             LexicalPopulationStrategy::IncrementalInline,
@@ -34498,6 +34701,7 @@ mod tests {
         ingest_batch(
             &storage,
             Some(&mut index),
+            &data_dir,
             &convs,
             &None,
             LexicalPopulationStrategy::IncrementalInline,
@@ -34557,6 +34761,7 @@ mod tests {
         ingest_batch(
             &storage,
             Some(&mut canonical_index),
+            &data_dir,
             &conv_a,
             &None,
             LexicalPopulationStrategy::IncrementalInline,
@@ -34566,6 +34771,7 @@ mod tests {
         ingest_batch(
             &storage,
             Some(&mut canonical_index),
+            &data_dir,
             &conv_b,
             &None,
             LexicalPopulationStrategy::IncrementalInline,

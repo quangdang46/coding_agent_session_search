@@ -231,7 +231,7 @@ pub(crate) fn capture_source_file(
                 &root,
                 &manifest_path,
                 input.db_links,
-                &blob_blake3,
+                Some(&blob_blake3),
             )?;
             let published = read_raw_mirror_manifest(&manifest_path)?;
             (
@@ -253,6 +253,19 @@ pub(crate) fn capture_source_file(
         source_mtime_ms: record_source_mtime_ms,
         already_present: blob_already_present && manifest_already_present,
     })
+}
+
+pub(crate) fn merge_manifest_db_links(
+    data_dir: &Path,
+    manifest_relative_path: &str,
+    links: &[RawMirrorDbLink],
+) -> Result<()> {
+    if links.is_empty() {
+        return Ok(());
+    }
+    let root = raw_mirror_root(data_dir);
+    let manifest_path = raw_mirror_manifest_path_from_relative(&root, manifest_relative_path)?;
+    merge_raw_mirror_manifest_db_links(&root, &manifest_path, links, None)
 }
 
 struct CopyToTempResult {
@@ -456,7 +469,7 @@ fn merge_raw_mirror_manifest_db_links(
     root: &Path,
     manifest_path: &Path,
     links: &[RawMirrorDbLink],
-    expected_blob_blake3: &str,
+    expected_blob_blake3: Option<&str>,
 ) -> Result<()> {
     if links.is_empty() {
         return Ok(());
@@ -468,7 +481,9 @@ fn merge_raw_mirror_manifest_db_links(
         .map_err(|_| anyhow!("raw mirror manifest update lock poisoned"))?;
 
     let mut manifest = read_raw_mirror_manifest(manifest_path)?;
-    if manifest.blob_blake3 != expected_blob_blake3 {
+    if let Some(expected_blob_blake3) = expected_blob_blake3
+        && manifest.blob_blake3 != expected_blob_blake3
+    {
         return Err(anyhow!(
             "existing raw mirror manifest {} points at blob {}, expected {}",
             manifest_path.display(),
@@ -528,6 +543,41 @@ fn replace_manifest_bytes(root: &Path, manifest_path: &Path, manifest_bytes: &[u
     Ok(())
 }
 
+fn raw_mirror_manifest_path_from_relative(root: &Path, relative_path: &str) -> Result<PathBuf> {
+    let relative = Path::new(relative_path);
+    if relative.is_absolute() {
+        return Err(anyhow!(
+            "raw mirror manifest path must be relative: {relative_path}"
+        ));
+    }
+
+    let mut normal_components = Vec::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(part) => normal_components.push(part),
+            _ => {
+                return Err(anyhow!(
+                    "raw mirror manifest path must use only normal relative components: {relative_path}"
+                ));
+            }
+        }
+    }
+
+    if normal_components.len() != 2
+        || normal_components[0] != std::ffi::OsStr::new("manifests")
+        || Path::new(normal_components[1])
+            .extension()
+            .and_then(|ext| ext.to_str())
+            != Some("json")
+    {
+        return Err(anyhow!(
+            "raw mirror manifest path must match manifests/<id>.json: {relative_path}"
+        ));
+    }
+
+    Ok(root.join(relative))
+}
+
 fn verify_existing_file(path: &Path, expected_blake3: &str) -> Result<()> {
     let actual = file_blake3(path)?;
     if actual == expected_blake3 {
@@ -557,6 +607,20 @@ fn verify_existing_manifest(path: &Path, expected_blob_blake3: &str) -> Result<(
 }
 
 fn read_raw_mirror_manifest(path: &Path) -> Result<RawMirrorManifestFile> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("stat raw mirror manifest {}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(anyhow!(
+            "refusing to read symlink raw mirror manifest {}",
+            path.display()
+        ));
+    }
+    if !metadata.is_file() {
+        return Err(anyhow!(
+            "refusing to read non-file raw mirror manifest {}",
+            path.display()
+        ));
+    }
     serde_json::from_slice(
         &fs::read(path).with_context(|| format!("read raw mirror manifest {}", path.display()))?,
     )
@@ -1059,6 +1123,63 @@ mod tests {
             "manifest checksum must be recomputed after DB-link merge"
         );
         assert_eq!(fs::read(&source_path).expect("source bytes"), source_bytes);
+    }
+
+    #[test]
+    fn merge_manifest_db_links_rejects_hostile_relative_paths() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = temp.path().join("cass-data");
+        let db_link = RawMirrorDbLink {
+            conversation_id: Some(42),
+            message_count: Some(1),
+            source_path: Some("source.jsonl".to_string()),
+            started_at_ms: Some(1_733_000_000_000),
+        };
+
+        for relative in [
+            "../escape.json",
+            "/tmp/escape.json",
+            "manifests/../escape.json",
+            "blobs/blake3/ab/not-a-manifest.raw",
+            "manifests/not-json.txt",
+        ] {
+            let err = merge_manifest_db_links(&data_dir, relative, std::slice::from_ref(&db_link))
+                .expect_err("hostile manifest path should be rejected");
+            assert!(
+                err.to_string().contains("raw mirror manifest path"),
+                "unexpected error for {relative}: {err}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_manifest_db_links_rejects_symlink_manifest_path() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = temp.path().join("cass-data");
+        let manifest_dir = data_dir.join("raw-mirror/v1/manifests");
+        fs::create_dir_all(&manifest_dir).expect("manifest dir");
+        let outside = temp.path().join("outside.json");
+        fs::write(&outside, "{}").expect("outside manifest");
+        std::os::unix::fs::symlink(&outside, manifest_dir.join("link.json"))
+            .expect("symlink manifest");
+        let db_link = RawMirrorDbLink {
+            conversation_id: Some(42),
+            message_count: Some(1),
+            source_path: Some("source.jsonl".to_string()),
+            started_at_ms: Some(1_733_000_000_000),
+        };
+
+        let err = merge_manifest_db_links(
+            &data_dir,
+            "manifests/link.json",
+            std::slice::from_ref(&db_link),
+        )
+        .expect_err("symlink manifest should be rejected");
+        assert!(
+            err.to_string().contains("symlink raw mirror manifest"),
+            "unexpected symlink-manifest error: {err}"
+        );
     }
 
     #[test]
