@@ -1,4 +1,5 @@
 pub mod e2e_log;
+pub mod doctor_fixture;
 pub mod search_asset_simulation;
 pub mod timeout;
 
