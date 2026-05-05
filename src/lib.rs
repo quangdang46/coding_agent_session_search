@@ -12339,9 +12339,10 @@ enum DoctorSeverity {
     Error,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum DoctorDataLossRisk {
+    #[default]
     None,
     Low,
     Medium,
@@ -13173,6 +13174,37 @@ enum DoctorRepairOutcomeKind {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum DoctorOperationOutcomeKind {
+    #[default]
+    OkNoActionNeeded,
+    OkReadOnlyDiagnosed,
+    Fixed,
+    PartiallyFixed,
+    RepairBlocked,
+    RepairRefused,
+    RepairIncomplete,
+    VerificationFailed,
+    CleanupDryRunOnly,
+    CleanupRefused,
+    AutoRunSkipped,
+    SupportBundleOnly,
+    BaselineDiffOnly,
+    RequiresManualReview,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum DoctorExitCodeKind {
+    #[default]
+    Success,
+    HealthFailure,
+    UsageError,
+    LockBusy,
+    RepairFailure,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum DoctorRepairRetrySafety {
     #[default]
@@ -13194,6 +13226,48 @@ struct DoctorRepairModePolicy {
     stderr_contract: &'static str,
     aborts_on: &'static [&'static str],
     notes: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DoctorOperationOutcomePolicy {
+    kind: DoctorOperationOutcomeKind,
+    reason: &'static str,
+    action_taken: &'static str,
+    action_not_taken: &'static str,
+    safe_to_retry: bool,
+    requires_override: bool,
+    data_loss_risk: DoctorDataLossRisk,
+    next_command: Option<&'static str>,
+    artifact_manifest_path: Option<&'static str>,
+    exit_code_kind: DoctorExitCodeKind,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+struct DoctorOperationOutcomeReport {
+    kind: DoctorOperationOutcomeKind,
+    reason: String,
+    action_taken: String,
+    action_not_taken: String,
+    safe_to_retry: bool,
+    requires_override: bool,
+    data_loss_risk: DoctorDataLossRisk,
+    next_command: Option<String>,
+    artifact_manifest_path: Option<String>,
+    exit_code_kind: DoctorExitCodeKind,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorOperationOutcomePolicyReport {
+    kind: DoctorOperationOutcomeKind,
+    reason: &'static str,
+    action_taken: &'static str,
+    action_not_taken: &'static str,
+    safe_to_retry: bool,
+    requires_override: bool,
+    data_loss_risk: DoctorDataLossRisk,
+    next_command: Option<&'static str>,
+    artifact_manifest_path: Option<&'static str>,
+    exit_code_kind: DoctorExitCodeKind,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -13226,6 +13300,8 @@ struct DoctorRepairContractReport {
     verification_contract: DoctorVerificationContractReport,
     approval_requirements: Vec<DoctorApprovalRequirement>,
     outcome_kinds: Vec<DoctorRepairOutcomeKind>,
+    operation_outcome_kinds: Vec<DoctorOperationOutcomeKind>,
+    operation_outcome_contract: Vec<DoctorOperationOutcomePolicyReport>,
     retry_safety_kinds: Vec<DoctorRepairRetrySafety>,
     mode_policies: Vec<DoctorRepairModePolicyReport>,
     legacy_aliases: Vec<DoctorRepairLegacyAliasReport>,
@@ -13485,11 +13561,197 @@ const DOCTOR_REPAIR_OUTCOME_KIND_VOCABULARY: &[DoctorRepairOutcomeKind] = &[
     DoctorRepairOutcomeKind::Blocked,
     DoctorRepairOutcomeKind::Failed,
 ];
+const DOCTOR_OPERATION_OUTCOME_KIND_VOCABULARY: &[DoctorOperationOutcomeKind] = &[
+    DoctorOperationOutcomeKind::OkNoActionNeeded,
+    DoctorOperationOutcomeKind::OkReadOnlyDiagnosed,
+    DoctorOperationOutcomeKind::Fixed,
+    DoctorOperationOutcomeKind::PartiallyFixed,
+    DoctorOperationOutcomeKind::RepairBlocked,
+    DoctorOperationOutcomeKind::RepairRefused,
+    DoctorOperationOutcomeKind::RepairIncomplete,
+    DoctorOperationOutcomeKind::VerificationFailed,
+    DoctorOperationOutcomeKind::CleanupDryRunOnly,
+    DoctorOperationOutcomeKind::CleanupRefused,
+    DoctorOperationOutcomeKind::AutoRunSkipped,
+    DoctorOperationOutcomeKind::SupportBundleOnly,
+    DoctorOperationOutcomeKind::BaselineDiffOnly,
+    DoctorOperationOutcomeKind::RequiresManualReview,
+];
 const DOCTOR_REPAIR_RETRY_SAFETY_VOCABULARY: &[DoctorRepairRetrySafety] = &[
     DoctorRepairRetrySafety::SafeToRetry,
     DoctorRepairRetrySafety::RetryAfterSameDryRun,
     DoctorRepairRetrySafety::RetryAfterInspection,
     DoctorRepairRetrySafety::DoNotRetryWithoutReview,
+];
+const DOCTOR_OPERATION_OUTCOME_POLICY_TABLE: &[DoctorOperationOutcomePolicy] = &[
+    DoctorOperationOutcomePolicy {
+        kind: DoctorOperationOutcomeKind::OkNoActionNeeded,
+        reason: "doctor found no work that needs action",
+        action_taken: "diagnostics completed",
+        action_not_taken: "no repair or cleanup was needed",
+        safe_to_retry: true,
+        requires_override: false,
+        data_loss_risk: DoctorDataLossRisk::None,
+        next_command: None,
+        artifact_manifest_path: None,
+        exit_code_kind: DoctorExitCodeKind::Success,
+    },
+    DoctorOperationOutcomePolicy {
+        kind: DoctorOperationOutcomeKind::OkReadOnlyDiagnosed,
+        reason: "doctor diagnosed issues without mutation",
+        action_taken: "read-only diagnostics completed",
+        action_not_taken: "repair was not attempted in read-only mode",
+        safe_to_retry: true,
+        requires_override: false,
+        data_loss_risk: DoctorDataLossRisk::Low,
+        next_command: Some("cass doctor --fix --json"),
+        artifact_manifest_path: None,
+        exit_code_kind: DoctorExitCodeKind::HealthFailure,
+    },
+    DoctorOperationOutcomePolicy {
+        kind: DoctorOperationOutcomeKind::Fixed,
+        reason: "requested operation completed all safe planned work",
+        action_taken: "safe repair or cleanup actions were applied",
+        action_not_taken: "no planned safe action was skipped",
+        safe_to_retry: true,
+        requires_override: false,
+        data_loss_risk: DoctorDataLossRisk::None,
+        next_command: Some("cass doctor --json"),
+        artifact_manifest_path: Some("receipt.artifact_manifest"),
+        exit_code_kind: DoctorExitCodeKind::Success,
+    },
+    DoctorOperationOutcomePolicy {
+        kind: DoctorOperationOutcomeKind::PartiallyFixed,
+        reason: "requested operation applied some work but left blocked work",
+        action_taken: "a subset of safe actions was applied",
+        action_not_taken: "blocked or skipped actions remain",
+        safe_to_retry: true,
+        requires_override: false,
+        data_loss_risk: DoctorDataLossRisk::Medium,
+        next_command: Some("cass doctor --json"),
+        artifact_manifest_path: Some("receipt.artifact_manifest"),
+        exit_code_kind: DoctorExitCodeKind::RepairFailure,
+    },
+    DoctorOperationOutcomePolicy {
+        kind: DoctorOperationOutcomeKind::RepairBlocked,
+        reason: "repair could not proceed because a required precondition was blocked",
+        action_taken: "no unsafe mutation was performed",
+        action_not_taken: "repair was not attempted until the blocker is resolved",
+        safe_to_retry: false,
+        requires_override: false,
+        data_loss_risk: DoctorDataLossRisk::Unknown,
+        next_command: Some("cass doctor --json"),
+        artifact_manifest_path: None,
+        exit_code_kind: DoctorExitCodeKind::LockBusy,
+    },
+    DoctorOperationOutcomePolicy {
+        kind: DoctorOperationOutcomeKind::RepairRefused,
+        reason: "repair request violated the doctor safety contract",
+        action_taken: "the unsafe request was refused",
+        action_not_taken: "no archive or source evidence was mutated",
+        safe_to_retry: false,
+        requires_override: true,
+        data_loss_risk: DoctorDataLossRisk::High,
+        next_command: Some("cass doctor --json"),
+        artifact_manifest_path: None,
+        exit_code_kind: DoctorExitCodeKind::UsageError,
+    },
+    DoctorOperationOutcomePolicy {
+        kind: DoctorOperationOutcomeKind::RepairIncomplete,
+        reason: "repair started but did not reach a verified receipt",
+        action_taken: "available receipt or event-log evidence was preserved",
+        action_not_taken: "doctor did not claim successful repair",
+        safe_to_retry: false,
+        requires_override: false,
+        data_loss_risk: DoctorDataLossRisk::Medium,
+        next_command: Some("cass doctor --json"),
+        artifact_manifest_path: Some("receipt.artifact_manifest"),
+        exit_code_kind: DoctorExitCodeKind::RepairFailure,
+    },
+    DoctorOperationOutcomePolicy {
+        kind: DoctorOperationOutcomeKind::VerificationFailed,
+        reason: "post-repair verification failed",
+        action_taken: "failure evidence was retained for inspection",
+        action_not_taken: "doctor refused to repeat repair automatically",
+        safe_to_retry: false,
+        requires_override: false,
+        data_loss_risk: DoctorDataLossRisk::High,
+        next_command: Some("cass doctor --json"),
+        artifact_manifest_path: Some("receipt.artifact_manifest"),
+        exit_code_kind: DoctorExitCodeKind::RepairFailure,
+    },
+    DoctorOperationOutcomePolicy {
+        kind: DoctorOperationOutcomeKind::CleanupDryRunOnly,
+        reason: "cleanup was planned without mutation",
+        action_taken: "cleanup candidates and approval fingerprint were reported",
+        action_not_taken: "no cleanup target was pruned",
+        safe_to_retry: true,
+        requires_override: false,
+        data_loss_risk: DoctorDataLossRisk::None,
+        next_command: Some("cass doctor --fix --json"),
+        artifact_manifest_path: Some("plan.artifact_manifest"),
+        exit_code_kind: DoctorExitCodeKind::Success,
+    },
+    DoctorOperationOutcomePolicy {
+        kind: DoctorOperationOutcomeKind::CleanupRefused,
+        reason: "cleanup target failed a safety gate",
+        action_taken: "cleanup refusal was reported",
+        action_not_taken: "no cleanup target was pruned",
+        safe_to_retry: false,
+        requires_override: false,
+        data_loss_risk: DoctorDataLossRisk::Medium,
+        next_command: Some("cass diag --json --quarantine"),
+        artifact_manifest_path: Some("receipt.artifact_manifest"),
+        exit_code_kind: DoctorExitCodeKind::RepairFailure,
+    },
+    DoctorOperationOutcomePolicy {
+        kind: DoctorOperationOutcomeKind::AutoRunSkipped,
+        reason: "auto-run found no issue eligible for automatic repair",
+        action_taken: "safe auto-run evaluated available actions",
+        action_not_taken: "no repair was applied automatically",
+        safe_to_retry: true,
+        requires_override: false,
+        data_loss_risk: DoctorDataLossRisk::Low,
+        next_command: Some("cass doctor --json"),
+        artifact_manifest_path: None,
+        exit_code_kind: DoctorExitCodeKind::HealthFailure,
+    },
+    DoctorOperationOutcomePolicy {
+        kind: DoctorOperationOutcomeKind::SupportBundleOnly,
+        reason: "support bundle generation is diagnostic-only",
+        action_taken: "support bundle metadata was produced",
+        action_not_taken: "no archive repair or cleanup was attempted",
+        safe_to_retry: true,
+        requires_override: false,
+        data_loss_risk: DoctorDataLossRisk::None,
+        next_command: None,
+        artifact_manifest_path: Some("support_bundle.artifact_manifest"),
+        exit_code_kind: DoctorExitCodeKind::Success,
+    },
+    DoctorOperationOutcomePolicy {
+        kind: DoctorOperationOutcomeKind::BaselineDiffOnly,
+        reason: "baseline diff is diagnostic-only",
+        action_taken: "baseline comparison was produced",
+        action_not_taken: "no archive repair or cleanup was attempted",
+        safe_to_retry: true,
+        requires_override: false,
+        data_loss_risk: DoctorDataLossRisk::None,
+        next_command: None,
+        artifact_manifest_path: Some("baseline_diff.artifact_manifest"),
+        exit_code_kind: DoctorExitCodeKind::Success,
+    },
+    DoctorOperationOutcomePolicy {
+        kind: DoctorOperationOutcomeKind::RequiresManualReview,
+        reason: "doctor found risk that needs human review",
+        action_taken: "risk was classified without mutation",
+        action_not_taken: "doctor did not choose an authority or repair path automatically",
+        safe_to_retry: false,
+        requires_override: false,
+        data_loss_risk: DoctorDataLossRisk::High,
+        next_command: Some("cass doctor --json"),
+        artifact_manifest_path: None,
+        exit_code_kind: DoctorExitCodeKind::HealthFailure,
+    },
 ];
 const DOCTOR_ACTION_STATUS_VOCABULARY: &[DoctorActionStatus] = &[
     DoctorActionStatus::Planned,
