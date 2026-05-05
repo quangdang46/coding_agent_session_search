@@ -12147,8 +12147,514 @@ fn run_diag(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorAssetClass {
+    SourceSessionLog,
+    RawMirrorBlob,
+    CanonicalArchiveDb,
+    ArchiveDbSidecar,
+    SourceCoverageLedger,
+    UserConfig,
+    BookmarkStore,
+    OperationReceipt,
+    EventLog,
+    ForensicBundle,
+    SupportBundle,
+    BackupBundle,
+    DerivedLexicalIndex,
+    DerivedSemanticIndex,
+    ModelCache,
+    MemoCache,
+    RetainedPublishBackup,
+    FailedSeedBundle,
+    QuarantinedLexicalGeneration,
+    QuarantinedLexicalShard,
+    ReclaimableDerivedCache,
+    ExternalUpstreamSource,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorAssetSafetyClassification {
+    PreciousEvidence,
+    CanonicalArchive,
+    RecoverableSidecar,
+    UserConfiguration,
+    AuditTrail,
+    DiagnosticEvidence,
+    BackupEvidence,
+    DerivedRebuildable,
+    DerivedReclaimable,
+    ExternalSource,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorAssetOperation {
+    Read,
+    Backup,
+    Copy,
+    MoveQuarantine,
+    Rebuild,
+    Normalize,
+    PruneReclaim,
+    Restore,
+    Redact,
+    Export,
+    SupportBundle,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DoctorAssetPolicy {
+    asset_class: DoctorAssetClass,
+    safety_classification: DoctorAssetSafetyClassification,
+    derived: bool,
+    precious: bool,
+    auto_delete_allowed: bool,
+    safe_to_gc_allowed: bool,
+    allowed_operations: &'static [DoctorAssetOperation],
+    notes: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorAssetTaxonomyEntry {
+    asset_class: DoctorAssetClass,
+    safety_classification: DoctorAssetSafetyClassification,
+    derived: bool,
+    precious: bool,
+    auto_delete_allowed: bool,
+    safe_to_gc_allowed: bool,
+    allowed_operations: Vec<DoctorAssetOperation>,
+    notes: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct DoctorAssetSafety {
+    asset_class: DoctorAssetClass,
+    safety_classification: DoctorAssetSafetyClassification,
+    derived: bool,
+    precious: bool,
+    auto_delete_allowed: bool,
+    safe_to_gc_allowed: bool,
+}
+
+const DOCTOR_ASSET_ALL_OPERATIONS: &[DoctorAssetOperation] = &[
+    DoctorAssetOperation::Read,
+    DoctorAssetOperation::Backup,
+    DoctorAssetOperation::Copy,
+    DoctorAssetOperation::MoveQuarantine,
+    DoctorAssetOperation::Rebuild,
+    DoctorAssetOperation::Normalize,
+    DoctorAssetOperation::PruneReclaim,
+    DoctorAssetOperation::Restore,
+    DoctorAssetOperation::Redact,
+    DoctorAssetOperation::Export,
+    DoctorAssetOperation::SupportBundle,
+];
+
+const DOCTOR_ASSET_PRECIOUS_EVIDENCE_OPS: &[DoctorAssetOperation] = &[
+    DoctorAssetOperation::Read,
+    DoctorAssetOperation::Backup,
+    DoctorAssetOperation::Copy,
+    DoctorAssetOperation::MoveQuarantine,
+    DoctorAssetOperation::Normalize,
+    DoctorAssetOperation::Redact,
+    DoctorAssetOperation::Export,
+    DoctorAssetOperation::SupportBundle,
+];
+
+const DOCTOR_ASSET_ARCHIVE_OPS: &[DoctorAssetOperation] = &[
+    DoctorAssetOperation::Read,
+    DoctorAssetOperation::Backup,
+    DoctorAssetOperation::Copy,
+    DoctorAssetOperation::Normalize,
+    DoctorAssetOperation::Rebuild,
+    DoctorAssetOperation::Restore,
+    DoctorAssetOperation::Redact,
+    DoctorAssetOperation::Export,
+    DoctorAssetOperation::SupportBundle,
+];
+
+const DOCTOR_ASSET_SIDECAR_OPS: &[DoctorAssetOperation] = &[
+    DoctorAssetOperation::Read,
+    DoctorAssetOperation::Backup,
+    DoctorAssetOperation::Copy,
+    DoctorAssetOperation::Rebuild,
+    DoctorAssetOperation::Restore,
+    DoctorAssetOperation::SupportBundle,
+];
+
+const DOCTOR_ASSET_USER_STATE_OPS: &[DoctorAssetOperation] = &[
+    DoctorAssetOperation::Read,
+    DoctorAssetOperation::Backup,
+    DoctorAssetOperation::Copy,
+    DoctorAssetOperation::Restore,
+    DoctorAssetOperation::Redact,
+    DoctorAssetOperation::Export,
+    DoctorAssetOperation::SupportBundle,
+];
+
+const DOCTOR_ASSET_AUDIT_OPS: &[DoctorAssetOperation] = &[
+    DoctorAssetOperation::Read,
+    DoctorAssetOperation::Backup,
+    DoctorAssetOperation::Copy,
+    DoctorAssetOperation::Redact,
+    DoctorAssetOperation::Export,
+    DoctorAssetOperation::SupportBundle,
+];
+
+const DOCTOR_ASSET_BACKUP_OPS: &[DoctorAssetOperation] = &[
+    DoctorAssetOperation::Read,
+    DoctorAssetOperation::Copy,
+    DoctorAssetOperation::Restore,
+    DoctorAssetOperation::Redact,
+    DoctorAssetOperation::Export,
+    DoctorAssetOperation::SupportBundle,
+];
+
+const DOCTOR_ASSET_DERIVED_REBUILDABLE_OPS: &[DoctorAssetOperation] = &[
+    DoctorAssetOperation::Read,
+    DoctorAssetOperation::Backup,
+    DoctorAssetOperation::Copy,
+    DoctorAssetOperation::MoveQuarantine,
+    DoctorAssetOperation::Rebuild,
+    DoctorAssetOperation::SupportBundle,
+];
+
+const DOCTOR_ASSET_DERIVED_RECLAIMABLE_OPS: &[DoctorAssetOperation] = &[
+    DoctorAssetOperation::Read,
+    DoctorAssetOperation::Backup,
+    DoctorAssetOperation::Copy,
+    DoctorAssetOperation::MoveQuarantine,
+    DoctorAssetOperation::Rebuild,
+    DoctorAssetOperation::PruneReclaim,
+    DoctorAssetOperation::SupportBundle,
+];
+
+const DOCTOR_ASSET_DIAGNOSTIC_OPS: &[DoctorAssetOperation] = &[
+    DoctorAssetOperation::Read,
+    DoctorAssetOperation::Backup,
+    DoctorAssetOperation::Copy,
+    DoctorAssetOperation::Redact,
+    DoctorAssetOperation::Export,
+    DoctorAssetOperation::SupportBundle,
+];
+
+const DOCTOR_ASSET_EXTERNAL_SOURCE_OPS: &[DoctorAssetOperation] = &[
+    DoctorAssetOperation::Read,
+    DoctorAssetOperation::Copy,
+    DoctorAssetOperation::SupportBundle,
+];
+
+const DOCTOR_ASSET_NO_OPS: &[DoctorAssetOperation] = &[];
+
+const DOCTOR_ASSET_POLICY_TABLE: &[DoctorAssetPolicy] = &[
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::SourceSessionLog,
+        safety_classification: DoctorAssetSafetyClassification::PreciousEvidence,
+        derived: false,
+        precious: true,
+        auto_delete_allowed: false,
+        safe_to_gc_allowed: false,
+        allowed_operations: DOCTOR_ASSET_PRECIOUS_EVIDENCE_OPS,
+        notes: "Original provider session logs may be the only surviving archive copy.",
+    },
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::RawMirrorBlob,
+        safety_classification: DoctorAssetSafetyClassification::PreciousEvidence,
+        derived: false,
+        precious: true,
+        auto_delete_allowed: false,
+        safe_to_gc_allowed: false,
+        allowed_operations: DOCTOR_ASSET_PRECIOUS_EVIDENCE_OPS,
+        notes: "Raw mirrors preserve original bytes for future parser recovery.",
+    },
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::CanonicalArchiveDb,
+        safety_classification: DoctorAssetSafetyClassification::CanonicalArchive,
+        derived: false,
+        precious: true,
+        auto_delete_allowed: false,
+        safe_to_gc_allowed: false,
+        allowed_operations: DOCTOR_ASSET_ARCHIVE_OPS,
+        notes: "SQLite archive state is the source of truth for indexed conversations.",
+    },
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::ArchiveDbSidecar,
+        safety_classification: DoctorAssetSafetyClassification::RecoverableSidecar,
+        derived: false,
+        precious: true,
+        auto_delete_allowed: false,
+        safe_to_gc_allowed: false,
+        allowed_operations: DOCTOR_ASSET_SIDECAR_OPS,
+        notes: "WAL/SHM and related sidecars can contain uncheckpointed archive state.",
+    },
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::SourceCoverageLedger,
+        safety_classification: DoctorAssetSafetyClassification::AuditTrail,
+        derived: false,
+        precious: true,
+        auto_delete_allowed: false,
+        safe_to_gc_allowed: false,
+        allowed_operations: DOCTOR_ASSET_AUDIT_OPS,
+        notes: "Coverage ledgers explain which source paths have been mirrored or indexed.",
+    },
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::UserConfig,
+        safety_classification: DoctorAssetSafetyClassification::UserConfiguration,
+        derived: false,
+        precious: true,
+        auto_delete_allowed: false,
+        safe_to_gc_allowed: false,
+        allowed_operations: DOCTOR_ASSET_USER_STATE_OPS,
+        notes: "User configuration must be preserved unless an operator explicitly edits it.",
+    },
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::BookmarkStore,
+        safety_classification: DoctorAssetSafetyClassification::UserConfiguration,
+        derived: false,
+        precious: true,
+        auto_delete_allowed: false,
+        safe_to_gc_allowed: false,
+        allowed_operations: DOCTOR_ASSET_USER_STATE_OPS,
+        notes: "Bookmarks are user-authored archive annotations.",
+    },
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::OperationReceipt,
+        safety_classification: DoctorAssetSafetyClassification::AuditTrail,
+        derived: false,
+        precious: true,
+        auto_delete_allowed: false,
+        safe_to_gc_allowed: false,
+        allowed_operations: DOCTOR_ASSET_AUDIT_OPS,
+        notes: "Receipts prove what doctor changed or refused to change.",
+    },
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::EventLog,
+        safety_classification: DoctorAssetSafetyClassification::AuditTrail,
+        derived: false,
+        precious: true,
+        auto_delete_allowed: false,
+        safe_to_gc_allowed: false,
+        allowed_operations: DOCTOR_ASSET_AUDIT_OPS,
+        notes: "Event logs are forensic breadcrumbs for repair and support.",
+    },
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::ForensicBundle,
+        safety_classification: DoctorAssetSafetyClassification::DiagnosticEvidence,
+        derived: false,
+        precious: true,
+        auto_delete_allowed: false,
+        safe_to_gc_allowed: false,
+        allowed_operations: DOCTOR_ASSET_DIAGNOSTIC_OPS,
+        notes: "Forensic bundles are captured evidence, not cleanup candidates.",
+    },
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::SupportBundle,
+        safety_classification: DoctorAssetSafetyClassification::DiagnosticEvidence,
+        derived: false,
+        precious: true,
+        auto_delete_allowed: false,
+        safe_to_gc_allowed: false,
+        allowed_operations: DOCTOR_ASSET_DIAGNOSTIC_OPS,
+        notes: "Support bundles can be redacted and exported but never auto-pruned.",
+    },
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::BackupBundle,
+        safety_classification: DoctorAssetSafetyClassification::BackupEvidence,
+        derived: false,
+        precious: true,
+        auto_delete_allowed: false,
+        safe_to_gc_allowed: false,
+        allowed_operations: DOCTOR_ASSET_BACKUP_OPS,
+        notes: "Backups may be the only rollback point after a failed repair.",
+    },
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::DerivedLexicalIndex,
+        safety_classification: DoctorAssetSafetyClassification::DerivedRebuildable,
+        derived: true,
+        precious: false,
+        auto_delete_allowed: false,
+        safe_to_gc_allowed: false,
+        allowed_operations: DOCTOR_ASSET_DERIVED_REBUILDABLE_OPS,
+        notes: "Live lexical indexes are derived but must be reclassified before pruning.",
+    },
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::DerivedSemanticIndex,
+        safety_classification: DoctorAssetSafetyClassification::DerivedRebuildable,
+        derived: true,
+        precious: false,
+        auto_delete_allowed: false,
+        safe_to_gc_allowed: false,
+        allowed_operations: DOCTOR_ASSET_DERIVED_REBUILDABLE_OPS,
+        notes: "Semantic indexes are derived and rebuildable but can be expensive to recreate.",
+    },
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::ModelCache,
+        safety_classification: DoctorAssetSafetyClassification::DerivedRebuildable,
+        derived: true,
+        precious: false,
+        auto_delete_allowed: false,
+        safe_to_gc_allowed: false,
+        allowed_operations: DOCTOR_ASSET_DERIVED_REBUILDABLE_OPS,
+        notes: "Model caches are opt-in downloads; do not silently delete them.",
+    },
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::MemoCache,
+        safety_classification: DoctorAssetSafetyClassification::DerivedReclaimable,
+        derived: true,
+        precious: false,
+        auto_delete_allowed: true,
+        safe_to_gc_allowed: true,
+        allowed_operations: DOCTOR_ASSET_DERIVED_RECLAIMABLE_OPS,
+        notes: "Memoization caches are derived and may be reclaimed when a plan proves safety.",
+    },
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::RetainedPublishBackup,
+        safety_classification: DoctorAssetSafetyClassification::DerivedReclaimable,
+        derived: true,
+        precious: false,
+        auto_delete_allowed: true,
+        safe_to_gc_allowed: true,
+        allowed_operations: DOCTOR_ASSET_DERIVED_RECLAIMABLE_OPS,
+        notes: "Bounded old lexical publish backups are derived rollback copies.",
+    },
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::FailedSeedBundle,
+        safety_classification: DoctorAssetSafetyClassification::DiagnosticEvidence,
+        derived: false,
+        precious: true,
+        auto_delete_allowed: false,
+        safe_to_gc_allowed: false,
+        allowed_operations: DOCTOR_ASSET_DIAGNOSTIC_OPS,
+        notes: "Failed seed bundles explain initialization failures and require inspection.",
+    },
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::QuarantinedLexicalGeneration,
+        safety_classification: DoctorAssetSafetyClassification::DiagnosticEvidence,
+        derived: true,
+        precious: false,
+        auto_delete_allowed: false,
+        safe_to_gc_allowed: false,
+        allowed_operations: DOCTOR_ASSET_DIAGNOSTIC_OPS,
+        notes: "Quarantined generations are retained as evidence until inspection clears them.",
+    },
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::QuarantinedLexicalShard,
+        safety_classification: DoctorAssetSafetyClassification::DiagnosticEvidence,
+        derived: true,
+        precious: false,
+        auto_delete_allowed: false,
+        safe_to_gc_allowed: false,
+        allowed_operations: DOCTOR_ASSET_DIAGNOSTIC_OPS,
+        notes: "Quarantined shards are retained as validation-failure evidence.",
+    },
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::ReclaimableDerivedCache,
+        safety_classification: DoctorAssetSafetyClassification::DerivedReclaimable,
+        derived: true,
+        precious: false,
+        auto_delete_allowed: true,
+        safe_to_gc_allowed: true,
+        allowed_operations: DOCTOR_ASSET_DERIVED_RECLAIMABLE_OPS,
+        notes: "A repair planner may use this only after proving the artifact is derived and replaceable.",
+    },
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::ExternalUpstreamSource,
+        safety_classification: DoctorAssetSafetyClassification::ExternalSource,
+        derived: false,
+        precious: true,
+        auto_delete_allowed: false,
+        safe_to_gc_allowed: false,
+        allowed_operations: DOCTOR_ASSET_EXTERNAL_SOURCE_OPS,
+        notes: "External provider stores are never owned by cass doctor cleanup.",
+    },
+    DoctorAssetPolicy {
+        asset_class: DoctorAssetClass::Unknown,
+        safety_classification: DoctorAssetSafetyClassification::Unknown,
+        derived: false,
+        precious: true,
+        auto_delete_allowed: false,
+        safe_to_gc_allowed: false,
+        allowed_operations: DOCTOR_ASSET_NO_OPS,
+        notes: "Unknown assets fail closed until a specific class is added to the taxonomy.",
+    },
+];
+
+fn doctor_asset_policy(asset_class: DoctorAssetClass) -> &'static DoctorAssetPolicy {
+    DOCTOR_ASSET_POLICY_TABLE
+        .iter()
+        .find(|policy| policy.asset_class == asset_class)
+        .expect("doctor asset policy table must cover every class")
+}
+
+fn doctor_asset_safety(asset_class: DoctorAssetClass) -> DoctorAssetSafety {
+    let policy = doctor_asset_policy(asset_class);
+    DoctorAssetSafety {
+        asset_class,
+        safety_classification: policy.safety_classification,
+        derived: policy.derived,
+        precious: policy.precious,
+        auto_delete_allowed: policy.auto_delete_allowed,
+        safe_to_gc_allowed: policy.safe_to_gc_allowed,
+    }
+}
+
+fn doctor_asset_allows_operation(
+    asset_class: DoctorAssetClass,
+    operation: DoctorAssetOperation,
+) -> bool {
+    doctor_asset_policy(asset_class)
+        .allowed_operations
+        .contains(&operation)
+}
+
+fn doctor_asset_safe_to_gc(asset_class: DoctorAssetClass, candidate_safe_to_gc: bool) -> bool {
+    let policy = doctor_asset_policy(asset_class);
+    candidate_safe_to_gc
+        && policy.safe_to_gc_allowed
+        && policy.auto_delete_allowed
+        && doctor_asset_allows_operation(asset_class, DoctorAssetOperation::PruneReclaim)
+}
+
+fn doctor_asset_taxonomy_report() -> Vec<DoctorAssetTaxonomyEntry> {
+    DOCTOR_ASSET_POLICY_TABLE
+        .iter()
+        .map(|policy| DoctorAssetTaxonomyEntry {
+            asset_class: policy.asset_class,
+            safety_classification: policy.safety_classification,
+            derived: policy.derived,
+            precious: policy.precious,
+            auto_delete_allowed: policy.auto_delete_allowed,
+            safe_to_gc_allowed: policy.safe_to_gc_allowed,
+            allowed_operations: policy.allowed_operations.to_vec(),
+            notes: policy.notes,
+        })
+        .collect()
+}
+
+fn doctor_asset_class_for_cleanup_disposition(
+    disposition: crate::indexer::lexical_generation::LexicalCleanupDisposition,
+) -> DoctorAssetClass {
+    use crate::indexer::lexical_generation::LexicalCleanupDisposition;
+
+    match disposition {
+        LexicalCleanupDisposition::SupersededReclaimable
+        | LexicalCleanupDisposition::FailedReclaimable => DoctorAssetClass::ReclaimableDerivedCache,
+        LexicalCleanupDisposition::QuarantinedRetained => {
+            DoctorAssetClass::QuarantinedLexicalGeneration
+        }
+        _ => DoctorAssetClass::DerivedLexicalIndex,
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct DiagQuarantineArtifact {
+    #[serde(flatten)]
+    asset_safety: DoctorAssetSafety,
     path: String,
     size_bytes: u64,
     age_seconds: Option<u64>,
@@ -12159,6 +12665,8 @@ struct DiagQuarantineArtifact {
 
 #[derive(Debug, Clone, Serialize)]
 struct DiagQuarantinedGeneration {
+    #[serde(flatten)]
+    asset_safety: DoctorAssetSafety,
     path: String,
     generation_id: String,
     publish_state: &'static str,
@@ -12176,6 +12684,8 @@ struct DiagQuarantinedGeneration {
 
 #[derive(Debug, Clone, Serialize)]
 struct DiagQuarantineInspectionArtifact {
+    #[serde(flatten)]
+    asset_safety: DoctorAssetSafety,
     artifact_kind: String,
     path: String,
     generation_id: Option<String>,
@@ -12267,6 +12777,8 @@ struct DiagCleanupApplyInventory {
 
 #[derive(Debug, Clone, Serialize)]
 struct DiagCleanupApplyAction {
+    #[serde(flatten)]
+    asset_safety: DoctorAssetSafety,
     artifact_kind: String,
     path: String,
     generation_id: Option<String>,
@@ -12323,6 +12835,7 @@ fn collect_diag_quarantine_report(data_dir: &Path, index_path: &Path) -> DiagQua
                 report
                     .failed_seed_bundle_files
                     .push(DiagQuarantineArtifact {
+                        asset_safety: doctor_asset_safety(DoctorAssetClass::FailedSeedBundle),
                         path: path.display().to_string(),
                         size_bytes: observation.size_bytes,
                         age_seconds: observation.age_seconds,
@@ -12334,6 +12847,7 @@ fn collect_diag_quarantine_report(data_dir: &Path, index_path: &Path) -> DiagQua
                 report
                     .quarantined_artifacts
                     .push(DiagQuarantineInspectionArtifact {
+                        asset_safety: doctor_asset_safety(DoctorAssetClass::FailedSeedBundle),
                         artifact_kind: "failed_seed_bundle_file".to_string(),
                         path: path.display().to_string(),
                         generation_id: None,
@@ -12386,7 +12900,8 @@ fn collect_diag_quarantine_report(data_dir: &Path, index_path: &Path) -> DiagQua
                     .then_with(|| left.0.cmp(&right.0))
             });
             for (index, (path, observation)) in retained_entries.into_iter().enumerate() {
-                let safe_to_gc = index >= retention_limit;
+                let safe_to_gc =
+                    doctor_asset_safe_to_gc(DoctorAssetClass::RetainedPublishBackup, index >= retention_limit);
                 let gc_reason = if safe_to_gc {
                     format!(
                         "retained lexical publish backup falls outside retention cap ({retention_limit})"
@@ -12399,6 +12914,7 @@ fn collect_diag_quarantine_report(data_dir: &Path, index_path: &Path) -> DiagQua
                 report
                     .retained_publish_backups
                     .push(DiagQuarantineArtifact {
+                        asset_safety: doctor_asset_safety(DoctorAssetClass::RetainedPublishBackup),
                         path: path.display().to_string(),
                         size_bytes: observation.size_bytes,
                         age_seconds: observation.age_seconds,
@@ -12457,11 +12973,15 @@ fn collect_diag_quarantine_report(data_dir: &Path, index_path: &Path) -> DiagQua
             .map(|inventory| inventory.reclaimable_bytes)
             .unwrap_or(0);
         let inspection_required = inspection_required_ids.contains(&entry.manifest.generation_id);
-        let safe_to_gc = reclaimable_bytes > 0
+        let candidate_safe_to_gc = reclaimable_bytes > 0
             && inventory
                 .map(|inventory| inventory.reclaimable_bytes >= inventory.artifact_bytes)
                 .unwrap_or(false)
             && !inspection_required;
+        let safe_to_gc = doctor_asset_safe_to_gc(
+            DoctorAssetClass::QuarantinedLexicalGeneration,
+            candidate_safe_to_gc,
+        );
         let gc_reason = if safe_to_gc {
             format!(
                 "cleanup dry-run marks the full retained generation reclaimable ({} bytes)",
@@ -12485,6 +13005,9 @@ fn collect_diag_quarantine_report(data_dir: &Path, index_path: &Path) -> DiagQua
             report
                 .quarantined_artifacts
                 .push(DiagQuarantineInspectionArtifact {
+                    asset_safety: doctor_asset_safety(
+                        DoctorAssetClass::QuarantinedLexicalGeneration,
+                    ),
                     artifact_kind: "lexical_generation".to_string(),
                     path: entry.path.display().to_string(),
                     generation_id: Some(entry.manifest.generation_id.clone()),
@@ -12507,6 +13030,7 @@ fn collect_diag_quarantine_report(data_dir: &Path, index_path: &Path) -> DiagQua
             report
                 .quarantined_artifacts
                 .push(DiagQuarantineInspectionArtifact {
+                    asset_safety: doctor_asset_safety(DoctorAssetClass::QuarantinedLexicalShard),
                     artifact_kind: "lexical_shard".to_string(),
                     path: entry.path.display().to_string(),
                     generation_id: Some(entry.manifest.generation_id.clone()),
@@ -12523,6 +13047,7 @@ fn collect_diag_quarantine_report(data_dir: &Path, index_path: &Path) -> DiagQua
                 });
         }
         report.lexical_generations.push(DiagQuarantinedGeneration {
+            asset_safety: doctor_asset_safety(DoctorAssetClass::QuarantinedLexicalGeneration),
             path: entry.path.display().to_string(),
             generation_id: entry.manifest.generation_id,
             publish_state: lexical_publish_state_label(entry.manifest.publish_state),
@@ -12801,7 +13326,9 @@ fn apply_diag_quarantine_cleanup(
         .filter(|artifact| artifact.safe_to_gc)
     {
         let path = PathBuf::from(&artifact.path);
+        let asset_class = DoctorAssetClass::RetainedPublishBackup;
         let mut action = DiagCleanupApplyAction {
+            asset_safety: doctor_asset_safety(asset_class),
             artifact_kind: "retained_publish_backup".to_string(),
             path: artifact.path.clone(),
             generation_id: None,
@@ -12815,7 +13342,7 @@ fn apply_diag_quarantine_cleanup(
             skip_reason: None,
         };
 
-        match prune_cleanup_target(&path, data_dir, db_path, index_path) {
+        match prune_cleanup_target(&path, data_dir, db_path, index_path, asset_class) {
             Ok(reclaimed_bytes) => {
                 action.reclaimed_bytes = reclaimed_bytes;
                 action.applied = true;
@@ -12871,7 +13398,9 @@ fn apply_diag_quarantine_cleanup(
                 continue;
             }
 
+            let asset_class = doctor_asset_class_for_cleanup_disposition(inventory.disposition);
             let mut action = DiagCleanupApplyAction {
+                asset_safety: doctor_asset_safety(asset_class),
                 artifact_kind: "lexical_generation".to_string(),
                 path: entry.path.display().to_string(),
                 generation_id: Some(entry.manifest.generation_id.clone()),
@@ -12907,7 +13436,7 @@ fn apply_diag_quarantine_cleanup(
                 continue;
             }
 
-            match prune_cleanup_target(&entry.path, data_dir, db_path, index_path) {
+            match prune_cleanup_target(&entry.path, data_dir, db_path, index_path, asset_class) {
                 Ok(reclaimed_bytes) => {
                     action.reclaimed_bytes = reclaimed_bytes;
                     action.applied = true;
@@ -12979,7 +13508,14 @@ fn prune_cleanup_target(
     data_dir: &Path,
     db_path: &Path,
     index_path: &Path,
+    asset_class: DoctorAssetClass,
 ) -> Result<u64, String> {
+    if !doctor_asset_safe_to_gc(asset_class, true) {
+        return Err(format!(
+            "refusing to prune asset class {:?}: taxonomy does not allow automatic reclaim",
+            asset_class
+        ));
+    }
     if !cleanup_target_path_is_safe(path, data_dir, db_path, index_path) {
         return Err(format!(
             "refusing to prune unsafe cleanup target {}",
@@ -13077,6 +13613,205 @@ fn cleanup_path_has_symlink_below_root(path: &Path, root: &Path) -> bool {
             return true;
         }
         current = parent;
+    }
+}
+
+#[cfg(test)]
+mod doctor_asset_taxonomy_tests {
+    use super::*;
+
+    const ALL_DOCTOR_ASSET_CLASSES: &[DoctorAssetClass] = &[
+        DoctorAssetClass::SourceSessionLog,
+        DoctorAssetClass::RawMirrorBlob,
+        DoctorAssetClass::CanonicalArchiveDb,
+        DoctorAssetClass::ArchiveDbSidecar,
+        DoctorAssetClass::SourceCoverageLedger,
+        DoctorAssetClass::UserConfig,
+        DoctorAssetClass::BookmarkStore,
+        DoctorAssetClass::OperationReceipt,
+        DoctorAssetClass::EventLog,
+        DoctorAssetClass::ForensicBundle,
+        DoctorAssetClass::SupportBundle,
+        DoctorAssetClass::BackupBundle,
+        DoctorAssetClass::DerivedLexicalIndex,
+        DoctorAssetClass::DerivedSemanticIndex,
+        DoctorAssetClass::ModelCache,
+        DoctorAssetClass::MemoCache,
+        DoctorAssetClass::RetainedPublishBackup,
+        DoctorAssetClass::FailedSeedBundle,
+        DoctorAssetClass::QuarantinedLexicalGeneration,
+        DoctorAssetClass::QuarantinedLexicalShard,
+        DoctorAssetClass::ReclaimableDerivedCache,
+        DoctorAssetClass::ExternalUpstreamSource,
+        DoctorAssetClass::Unknown,
+    ];
+
+    #[test]
+    fn doctor_asset_taxonomy_explicitly_covers_every_class_and_operation() {
+        let policy_classes: HashSet<_> = DOCTOR_ASSET_POLICY_TABLE
+            .iter()
+            .map(|policy| policy.asset_class)
+            .collect();
+        let expected_classes: HashSet<_> = ALL_DOCTOR_ASSET_CLASSES.iter().copied().collect();
+        assert_eq!(
+            policy_classes, expected_classes,
+            "every doctor asset class must be represented in the central policy table"
+        );
+
+        for &asset_class in ALL_DOCTOR_ASSET_CLASSES {
+            let policy = doctor_asset_policy(asset_class);
+            for &operation in DOCTOR_ASSET_ALL_OPERATIONS {
+                let policy_says_allowed = policy.allowed_operations.contains(&operation);
+                assert_eq!(
+                    doctor_asset_allows_operation(asset_class, operation),
+                    policy_says_allowed,
+                    "operation matrix drifted for {asset_class:?} / {operation:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn precious_archive_evidence_is_never_pruneable_or_safe_to_gc() {
+        let precious_classes = [
+            DoctorAssetClass::SourceSessionLog,
+            DoctorAssetClass::RawMirrorBlob,
+            DoctorAssetClass::CanonicalArchiveDb,
+            DoctorAssetClass::ArchiveDbSidecar,
+            DoctorAssetClass::SourceCoverageLedger,
+            DoctorAssetClass::UserConfig,
+            DoctorAssetClass::BookmarkStore,
+            DoctorAssetClass::OperationReceipt,
+            DoctorAssetClass::EventLog,
+            DoctorAssetClass::ForensicBundle,
+            DoctorAssetClass::SupportBundle,
+            DoctorAssetClass::BackupBundle,
+            DoctorAssetClass::ExternalUpstreamSource,
+        ];
+
+        for asset_class in precious_classes {
+            let policy = doctor_asset_policy(asset_class);
+            assert!(
+                policy.precious,
+                "{asset_class:?} should remain marked as precious evidence"
+            );
+            assert!(
+                !policy.auto_delete_allowed,
+                "{asset_class:?} must not be auto-deleted"
+            );
+            assert!(
+                !doctor_asset_safe_to_gc(asset_class, true),
+                "{asset_class:?} must fail closed even when a caller claims it is safe"
+            );
+            assert!(
+                !doctor_asset_allows_operation(asset_class, DoctorAssetOperation::PruneReclaim),
+                "{asset_class:?} must not allow prune/reclaim"
+            );
+        }
+    }
+
+    #[test]
+    fn quarantine_artifacts_remain_inspection_only() {
+        for asset_class in [
+            DoctorAssetClass::FailedSeedBundle,
+            DoctorAssetClass::QuarantinedLexicalGeneration,
+            DoctorAssetClass::QuarantinedLexicalShard,
+        ] {
+            let policy = doctor_asset_policy(asset_class);
+            assert_eq!(
+                policy.safety_classification,
+                DoctorAssetSafetyClassification::DiagnosticEvidence
+            );
+            assert!(
+                doctor_asset_allows_operation(asset_class, DoctorAssetOperation::Read),
+                "{asset_class:?} should be readable for inspection"
+            );
+            assert!(
+                !doctor_asset_safe_to_gc(asset_class, true),
+                "{asset_class:?} must never become safe_to_gc without an explicit reclassification"
+            );
+            assert!(
+                !doctor_asset_allows_operation(asset_class, DoctorAssetOperation::PruneReclaim),
+                "{asset_class:?} must not be pruneable while quarantined"
+            );
+        }
+    }
+
+    #[test]
+    fn support_bundle_policy_allows_redaction_but_not_pruning() {
+        assert!(doctor_asset_allows_operation(
+            DoctorAssetClass::SupportBundle,
+            DoctorAssetOperation::Redact
+        ));
+        assert!(doctor_asset_allows_operation(
+            DoctorAssetClass::SupportBundle,
+            DoctorAssetOperation::Export
+        ));
+        assert!(!doctor_asset_allows_operation(
+            DoctorAssetClass::SupportBundle,
+            DoctorAssetOperation::PruneReclaim
+        ));
+        assert!(!doctor_asset_safe_to_gc(
+            DoctorAssetClass::SupportBundle,
+            true
+        ));
+    }
+
+    #[test]
+    fn only_derived_reclaimable_classes_can_be_safe_to_gc() {
+        for policy in DOCTOR_ASSET_POLICY_TABLE {
+            if policy.safe_to_gc_allowed || policy.auto_delete_allowed {
+                assert!(
+                    policy.derived,
+                    "{:?} cannot be auto-reclaimable unless it is derived",
+                    policy.asset_class
+                );
+                assert!(
+                    !policy.precious,
+                    "{:?} cannot be both precious and auto-reclaimable",
+                    policy.asset_class
+                );
+                assert!(
+                    doctor_asset_allows_operation(
+                        policy.asset_class,
+                        DoctorAssetOperation::PruneReclaim
+                    ),
+                    "{:?} has safe_to_gc/auto-delete enabled but lacks prune permission",
+                    policy.asset_class
+                );
+            }
+        }
+
+        assert!(!doctor_asset_safe_to_gc(
+            DoctorAssetClass::DerivedLexicalIndex,
+            true
+        ));
+        assert!(doctor_asset_safe_to_gc(
+            DoctorAssetClass::ReclaimableDerivedCache,
+            true
+        ));
+        assert!(doctor_asset_safe_to_gc(
+            DoctorAssetClass::RetainedPublishBackup,
+            true
+        ));
+    }
+
+    #[test]
+    fn unknown_asset_class_fails_closed() {
+        let policy = doctor_asset_policy(DoctorAssetClass::Unknown);
+        assert_eq!(
+            policy.safety_classification,
+            DoctorAssetSafetyClassification::Unknown
+        );
+        assert!(policy.allowed_operations.is_empty());
+        assert!(!policy.auto_delete_allowed);
+        assert!(!doctor_asset_safe_to_gc(DoctorAssetClass::Unknown, true));
+        for &operation in DOCTOR_ASSET_ALL_OPERATIONS {
+            assert!(!doctor_asset_allows_operation(
+                DoctorAssetClass::Unknown,
+                operation
+            ));
+        }
     }
 }
 
@@ -16955,6 +17690,7 @@ fn run_doctor(
             "needs_rebuild": needs_rebuild,
             "auto_fix_applied": auto_fix_applied,
             "auto_fix_actions": auto_fix_actions,
+            "asset_taxonomy": doctor_asset_taxonomy_report(),
             "checks": checks,
             "quarantine": quarantine_report,
             "_meta": {
@@ -19854,6 +20590,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                 "needs_rebuild": { "type": "boolean" },
                 "auto_fix_applied": { "type": "boolean" },
                 "auto_fix_actions": { "type": "array", "items": { "type": "string" } },
+                "asset_taxonomy": response_schema_opaque_object_array(),
                 "quarantine": response_schema_opaque_object(),
                 "_meta": response_schema_opaque_object(),
                 "checks": {
