@@ -18426,6 +18426,8 @@ enum DoctorFsMutationKind {
     #[allow(dead_code)]
     CopyFileToStaging,
     #[allow(dead_code)]
+    WriteFileToStaging,
+    #[allow(dead_code)]
     PromoteStagedFile,
     #[allow(dead_code)]
     RestoreStagedFile,
@@ -18441,6 +18443,9 @@ impl DoctorFsMutationKind {
                 DoctorAssetOperation::PruneReclaim
             }
             DoctorFsMutationKind::CopyFileToStaging => DoctorAssetOperation::Copy,
+            // In-memory staging writes materialize copy-like verified candidates. Live
+            // replacement still requires a separate Promote or Restore operation.
+            DoctorFsMutationKind::WriteFileToStaging => DoctorAssetOperation::Copy,
             DoctorFsMutationKind::PromoteStagedFile => DoctorAssetOperation::Promote,
             DoctorFsMutationKind::RestoreStagedFile => DoctorAssetOperation::Restore,
             DoctorFsMutationKind::MoveFileToQuarantine => DoctorAssetOperation::MoveQuarantine,
@@ -18464,6 +18469,21 @@ struct DoctorFsMutationRequest<'a> {
     expected_source_blake3: Option<&'a str>,
     planned_bytes: u64,
     required_min_age_seconds: Option<u64>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct DoctorFsWriteMutationRequest<'a> {
+    operation_id: &'a str,
+    action_id: &'a str,
+    mode: DoctorRepairMode,
+    asset_class: DoctorAssetClass,
+    target_path: &'a Path,
+    data_dir: &'a Path,
+    staging_root: &'a Path,
+    payload: &'a [u8],
+    expected_payload_blake3: &'a str,
+    planned_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -19303,6 +19323,14 @@ fn execute_doctor_fs_mutation(request: DoctorFsMutationRequest<'_>) -> DoctorFsM
         DoctorFsMutationKind::CopyFileToStaging => {
             execute_doctor_copy_file_to_staging(request, receipt)
         }
+        DoctorFsMutationKind::WriteFileToStaging => {
+            let mut receipt = receipt;
+            receipt.blocked_reasons.push(
+                "write file mutations require execute_doctor_fs_write_mutation with an explicit payload"
+                    .to_string(),
+            );
+            receipt
+        }
         DoctorFsMutationKind::PromoteStagedFile => {
             execute_doctor_promote_staged_file(request, receipt)
         }
@@ -19313,6 +19341,208 @@ fn execute_doctor_fs_mutation(request: DoctorFsMutationRequest<'_>) -> DoctorFsM
             execute_doctor_move_file_to_quarantine(request, receipt)
         }
     }
+}
+
+#[allow(dead_code)]
+fn execute_doctor_fs_write_mutation(
+    request: DoctorFsWriteMutationRequest<'_>,
+) -> DoctorFsMutationReceipt {
+    let mut receipt = DoctorFsMutationReceipt {
+        schema_version: 1,
+        operation_id: request.operation_id.to_string(),
+        action_id: request.action_id.to_string(),
+        mutation_kind: DoctorFsMutationKind::WriteFileToStaging,
+        mode: request.mode,
+        asset_class: request.asset_class,
+        source_path: None,
+        redacted_source_path: None,
+        target_path: request.target_path.display().to_string(),
+        redacted_target_path: doctor_redacted_path(
+            &request.target_path.display().to_string(),
+            request.data_dir,
+        ),
+        staging_root: Some(request.staging_root.display().to_string()),
+        redacted_staging_root: Some(doctor_redacted_path(
+            &request.staging_root.display().to_string(),
+            request.data_dir,
+        )),
+        expected_source_blake3: None,
+        actual_source_blake3: None,
+        actual_target_blake3: None,
+        planned_bytes: request.planned_bytes,
+        affected_bytes: 0,
+        status: DoctorActionStatus::Blocked,
+        blocked_reasons: Vec::new(),
+        precondition_checks: vec!["mutation_kind_write_file_to_staging".to_string()],
+    };
+
+    if !doctor_repair_mode_allows_asset_operation_mutation(
+        request.mode,
+        request.asset_class,
+        DoctorFsMutationKind::WriteFileToStaging.asset_operation(),
+    ) {
+        receipt.blocked_reasons.push(format!(
+            "refusing to write staging asset class {:?}: mode {:?} does not allow staging write mutation",
+            request.asset_class, request.mode
+        ));
+        return receipt;
+    }
+    receipt
+        .precondition_checks
+        .push("mode_allows_asset_operation".to_string());
+
+    let payload_len = request.payload.len() as u64;
+    if request.planned_bytes != payload_len {
+        receipt.blocked_reasons.push(format!(
+            "refusing to write staging target {}: planned_bytes={} does not match payload_bytes={payload_len}",
+            request.target_path.display(),
+            request.planned_bytes
+        ));
+        return receipt;
+    }
+    receipt
+        .precondition_checks
+        .push("planned_bytes_match_payload".to_string());
+
+    let payload_blake3 = blake3::hash(request.payload).to_hex().to_string();
+    if request.expected_payload_blake3 != payload_blake3 {
+        receipt.blocked_reasons.push(format!(
+            "refusing to write staging target {}: expected payload blake3 {}, observed {payload_blake3}",
+            request.target_path.display(),
+            request.expected_payload_blake3
+        ));
+        return receipt;
+    }
+    receipt
+        .precondition_checks
+        .push("expected_payload_blake3_matched".to_string());
+
+    let Some(target_parent) = request.target_path.parent() else {
+        receipt.blocked_reasons.push(format!(
+            "refusing to write staging target without parent {}",
+            request.target_path.display()
+        ));
+        return receipt;
+    };
+    if !target_parent.is_dir() {
+        receipt.blocked_reasons.push(format!(
+            "refusing to write staging target with missing parent {}",
+            target_parent.display()
+        ));
+        return receipt;
+    }
+    receipt
+        .precondition_checks
+        .push("target_parent_exists".to_string());
+
+    if !doctor_staging_target_path_is_safe(
+        request.target_path,
+        request.staging_root,
+        request.data_dir,
+    ) {
+        receipt.blocked_reasons.push(format!(
+            "refusing to write unsafe staging target {}",
+            request.target_path.display()
+        ));
+        return receipt;
+    }
+    receipt
+        .precondition_checks
+        .push("target_path_confined_to_staging_root".to_string());
+
+    match std::fs::symlink_metadata(request.target_path) {
+        Ok(_) => {
+            receipt.blocked_reasons.push(format!(
+                "refusing to write over existing staging target {}",
+                request.target_path.display()
+            ));
+            return receipt;
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => {
+            receipt.blocked_reasons.push(format!(
+                "refusing to write staging target {}: could not verify target absence: {err}",
+                request.target_path.display()
+            ));
+            return receipt;
+        }
+    }
+    receipt
+        .precondition_checks
+        .push("target_does_not_exist".to_string());
+
+    let write_result = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(request.target_path)
+        .and_then(|mut file| {
+            use std::io::Write as _;
+            file.write_all(request.payload)
+        });
+    match write_result {
+        Ok(()) => {
+            receipt.affected_bytes = payload_len;
+            receipt
+                .precondition_checks
+                .push("filesystem_write_completed".to_string());
+        }
+        Err(err) => {
+            receipt.status = DoctorActionStatus::Failed;
+            receipt.blocked_reasons.push(format!(
+                "failed to write staging target {}: {err}",
+                request.target_path.display()
+            ));
+            return receipt;
+        }
+    }
+
+    let target_blake3 = match file_blake3_hex(request.target_path) {
+        Ok(hash) => hash,
+        Err(err) => {
+            receipt.status = DoctorActionStatus::Failed;
+            receipt.blocked_reasons.push(err);
+            return receipt;
+        }
+    };
+    receipt.actual_target_blake3 = Some(target_blake3.clone());
+    if target_blake3 != payload_blake3 {
+        receipt.status = DoctorActionStatus::Failed;
+        receipt.blocked_reasons.push(format!(
+            "written staging target {} hash mismatch: expected payload blake3 {payload_blake3}, observed target blake3 {target_blake3}",
+            request.target_path.display()
+        ));
+        return receipt;
+    }
+    receipt
+        .precondition_checks
+        .push("target_blake3_matched_payload".to_string());
+
+    match sync_file(request.target_path, "written staging target") {
+        Ok(()) => {
+            receipt
+                .precondition_checks
+                .push("target_file_sync_completed".to_string());
+        }
+        Err(err) => {
+            receipt.status = DoctorActionStatus::Failed;
+            receipt.blocked_reasons.push(err);
+            return receipt;
+        }
+    }
+
+    match sync_directory(target_parent) {
+        Ok(()) => {
+            receipt.status = DoctorActionStatus::Applied;
+            receipt
+                .precondition_checks
+                .push("target_parent_sync_completed".to_string());
+        }
+        Err(err) => {
+            receipt.status = DoctorActionStatus::Failed;
+            receipt.blocked_reasons.push(err);
+        }
+    }
+    receipt
 }
 
 fn execute_doctor_prune_cleanup_target(
@@ -22483,6 +22713,326 @@ mod doctor_asset_taxonomy_tests {
     }
 
     #[test]
+    fn doctor_fs_write_mutation_writes_verified_payload_to_staging_with_receipt() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let data_dir = temp.path().join("cass-data");
+        let index_path = data_dir.join("index").join("live-generation");
+        std::fs::create_dir_all(&index_path).expect("create live index");
+        let db_path = data_dir.join("agent_search.db");
+        std::fs::write(&db_path, b"precious archive").expect("write db placeholder");
+
+        let staging_root = data_dir.join("doctor-staging").join("write-op-1");
+        let target_path = staging_root.join("candidate").join("derived.idx");
+        std::fs::create_dir_all(target_path.parent().expect("target parent"))
+            .expect("create write target parent");
+        let payload = b"derived lexical candidate bytes";
+        let expected_payload_blake3 = blake3::hash(payload).to_hex().to_string();
+
+        let receipt = execute_doctor_fs_write_mutation(DoctorFsWriteMutationRequest {
+            operation_id: "repair-apply-write-derived",
+            action_id: "write-derived-candidate",
+            mode: DoctorRepairMode::RepairApply,
+            asset_class: DoctorAssetClass::DerivedLexicalIndex,
+            target_path: &target_path,
+            data_dir: &data_dir,
+            staging_root: &staging_root,
+            payload,
+            expected_payload_blake3: &expected_payload_blake3,
+            planned_bytes: payload.len() as u64,
+        });
+
+        assert_eq!(receipt.status, DoctorActionStatus::Applied);
+        assert_eq!(
+            receipt.mutation_kind,
+            DoctorFsMutationKind::WriteFileToStaging
+        );
+        assert_eq!(receipt.asset_class, DoctorAssetClass::DerivedLexicalIndex);
+        assert_eq!(receipt.planned_bytes, payload.len() as u64);
+        assert_eq!(receipt.affected_bytes, payload.len() as u64);
+        assert_eq!(
+            receipt.actual_target_blake3.as_deref(),
+            Some(expected_payload_blake3.as_str())
+        );
+        assert_eq!(receipt.source_path, None);
+        assert_eq!(
+            receipt.redacted_target_path,
+            "[cass-data]/doctor-staging/write-op-1/candidate/derived.idx"
+        );
+        assert_eq!(
+            receipt.redacted_staging_root.as_deref(),
+            Some("[cass-data]/doctor-staging/write-op-1")
+        );
+        for expected in [
+            "mutation_kind_write_file_to_staging",
+            "mode_allows_asset_operation",
+            "planned_bytes_match_payload",
+            "expected_payload_blake3_matched",
+            "target_parent_exists",
+            "target_path_confined_to_staging_root",
+            "target_does_not_exist",
+            "filesystem_write_completed",
+            "target_blake3_matched_payload",
+            "target_file_sync_completed",
+            "target_parent_sync_completed",
+        ] {
+            assert!(
+                receipt
+                    .precondition_checks
+                    .iter()
+                    .any(|observed| observed == expected),
+                "missing write receipt precondition {expected}: {:?}",
+                receipt.precondition_checks
+            );
+        }
+        assert_eq!(
+            std::fs::read(&target_path).expect("read written target"),
+            payload
+        );
+        assert!(
+            db_path.exists(),
+            "staging write must not touch the canonical archive DB"
+        );
+    }
+
+    #[test]
+    fn doctor_fs_write_mutation_refuses_payload_hash_mismatch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let data_dir = temp.path().join("cass-data");
+        let index_path = data_dir.join("index").join("live-generation");
+        std::fs::create_dir_all(&index_path).expect("create live index");
+        let staging_root = data_dir.join("doctor-staging").join("write-hash-mismatch");
+        let target_path = staging_root.join("candidate.idx");
+        std::fs::create_dir_all(target_path.parent().expect("target parent"))
+            .expect("create write target parent");
+        let payload = b"derived lexical candidate bytes";
+
+        let receipt = execute_doctor_fs_write_mutation(DoctorFsWriteMutationRequest {
+            operation_id: "repair-apply-write-derived",
+            action_id: "write-hash-mismatch",
+            mode: DoctorRepairMode::RepairApply,
+            asset_class: DoctorAssetClass::DerivedLexicalIndex,
+            target_path: &target_path,
+            data_dir: &data_dir,
+            staging_root: &staging_root,
+            payload,
+            expected_payload_blake3: "doctor-test-wrong-payload-hash",
+            planned_bytes: payload.len() as u64,
+        });
+
+        assert_eq!(receipt.status, DoctorActionStatus::Blocked);
+        assert!(
+            receipt
+                .blocked_reasons
+                .iter()
+                .any(|reason| reason.contains("expected payload blake3")),
+            "payload hash mismatch should be a pre-write blocker: {:?}",
+            receipt.blocked_reasons
+        );
+        assert!(
+            !target_path.exists(),
+            "blocked payload hash mismatch must not create a staging file"
+        );
+    }
+
+    #[test]
+    fn doctor_fs_write_mutation_refuses_planned_byte_mismatch_before_write() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let data_dir = temp.path().join("cass-data");
+        let index_path = data_dir.join("index").join("live-generation");
+        std::fs::create_dir_all(&index_path).expect("create live index");
+        let staging_root = data_dir.join("doctor-staging").join("write-size-mismatch");
+        let target_path = staging_root.join("candidate.idx");
+        std::fs::create_dir_all(target_path.parent().expect("target parent"))
+            .expect("create write target parent");
+        let payload = b"derived lexical candidate bytes";
+        let expected_payload_blake3 = blake3::hash(payload).to_hex().to_string();
+
+        let receipt = execute_doctor_fs_write_mutation(DoctorFsWriteMutationRequest {
+            operation_id: "repair-apply-write-derived",
+            action_id: "write-size-mismatch",
+            mode: DoctorRepairMode::RepairApply,
+            asset_class: DoctorAssetClass::DerivedLexicalIndex,
+            target_path: &target_path,
+            data_dir: &data_dir,
+            staging_root: &staging_root,
+            payload,
+            expected_payload_blake3: &expected_payload_blake3,
+            planned_bytes: payload.len() as u64 + 1,
+        });
+
+        assert_eq!(receipt.status, DoctorActionStatus::Blocked);
+        assert!(
+            receipt
+                .blocked_reasons
+                .iter()
+                .any(|reason| reason.contains("planned_bytes")),
+            "planned byte mismatch should be a pre-write blocker: {:?}",
+            receipt.blocked_reasons
+        );
+        assert!(
+            !target_path.exists(),
+            "blocked planned byte mismatch must not create a staging file"
+        );
+    }
+
+    #[test]
+    fn doctor_fs_write_mutation_refuses_existing_staging_target() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let data_dir = temp.path().join("cass-data");
+        let index_path = data_dir.join("index").join("live-generation");
+        std::fs::create_dir_all(&index_path).expect("create live index");
+        let staging_root = data_dir.join("doctor-staging").join("write-existing");
+        let target_path = staging_root.join("candidate.idx");
+        std::fs::create_dir_all(target_path.parent().expect("target parent"))
+            .expect("create write target parent");
+        std::fs::write(&target_path, b"existing staging bytes").expect("write existing target");
+        let payload = b"derived lexical candidate bytes";
+        let expected_payload_blake3 = blake3::hash(payload).to_hex().to_string();
+
+        let receipt = execute_doctor_fs_write_mutation(DoctorFsWriteMutationRequest {
+            operation_id: "repair-apply-write-derived",
+            action_id: "write-existing-target",
+            mode: DoctorRepairMode::RepairApply,
+            asset_class: DoctorAssetClass::DerivedLexicalIndex,
+            target_path: &target_path,
+            data_dir: &data_dir,
+            staging_root: &staging_root,
+            payload,
+            expected_payload_blake3: &expected_payload_blake3,
+            planned_bytes: payload.len() as u64,
+        });
+
+        assert_eq!(receipt.status, DoctorActionStatus::Blocked);
+        assert!(
+            receipt
+                .blocked_reasons
+                .iter()
+                .any(|reason| reason.contains("existing staging target")),
+            "staging write must refuse existing targets: {:?}",
+            receipt.blocked_reasons
+        );
+        assert_eq!(
+            std::fs::read(&target_path).expect("read existing target"),
+            b"existing staging bytes"
+        );
+    }
+
+    #[test]
+    fn doctor_fs_write_mutation_reports_file_sync_failure_after_write() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let data_dir = temp.path().join("cass-data");
+        let index_path = data_dir.join("index").join("live-generation");
+        std::fs::create_dir_all(&index_path).expect("create live index");
+        let staging_root = data_dir.join("doctor-staging").join("write-sync-fail");
+        let target_path = staging_root.join("candidate.idx");
+        std::fs::create_dir_all(target_path.parent().expect("target parent"))
+            .expect("create write target parent");
+        let payload = b"derived lexical candidate bytes";
+        let expected_payload_blake3 = blake3::hash(payload).to_hex().to_string();
+
+        doctor_test_inject_next_file_sync_failure();
+        let receipt = execute_doctor_fs_write_mutation(DoctorFsWriteMutationRequest {
+            operation_id: "repair-apply-write-derived",
+            action_id: "write-file-sync-fail",
+            mode: DoctorRepairMode::RepairApply,
+            asset_class: DoctorAssetClass::DerivedLexicalIndex,
+            target_path: &target_path,
+            data_dir: &data_dir,
+            staging_root: &staging_root,
+            payload,
+            expected_payload_blake3: &expected_payload_blake3,
+            planned_bytes: payload.len() as u64,
+        });
+
+        assert_eq!(receipt.status, DoctorActionStatus::Failed);
+        assert!(
+            receipt
+                .blocked_reasons
+                .iter()
+                .any(|reason| reason
+                    .contains("injected test failure syncing written staging target")),
+            "write sync failure should be explicit: {:?}",
+            receipt.blocked_reasons
+        );
+        assert!(
+            receipt
+                .precondition_checks
+                .iter()
+                .any(|check| check == "filesystem_write_completed"),
+            "sync failure should record that the write happened"
+        );
+        assert!(
+            !receipt
+                .precondition_checks
+                .iter()
+                .any(|check| check == "target_file_sync_completed"),
+            "sync failure must not claim target fsync completed"
+        );
+        assert_eq!(
+            std::fs::read(&target_path).expect("read written target after sync failure"),
+            payload,
+            "failed receipt must leave the staged bytes available for inspection"
+        );
+    }
+
+    #[test]
+    fn doctor_fs_write_mutation_reports_parent_sync_failure_after_file_sync() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let data_dir = temp.path().join("cass-data");
+        let index_path = data_dir.join("index").join("live-generation");
+        std::fs::create_dir_all(&index_path).expect("create live index");
+        let staging_root = data_dir.join("doctor-staging").join("write-dir-sync-fail");
+        let target_path = staging_root.join("candidate.idx");
+        std::fs::create_dir_all(target_path.parent().expect("target parent"))
+            .expect("create write target parent");
+        let payload = b"derived lexical candidate bytes";
+        let expected_payload_blake3 = blake3::hash(payload).to_hex().to_string();
+
+        doctor_test_inject_next_directory_sync_failure();
+        let receipt = execute_doctor_fs_write_mutation(DoctorFsWriteMutationRequest {
+            operation_id: "repair-apply-write-derived",
+            action_id: "write-dir-sync-fail",
+            mode: DoctorRepairMode::RepairApply,
+            asset_class: DoctorAssetClass::DerivedLexicalIndex,
+            target_path: &target_path,
+            data_dir: &data_dir,
+            staging_root: &staging_root,
+            payload,
+            expected_payload_blake3: &expected_payload_blake3,
+            planned_bytes: payload.len() as u64,
+        });
+
+        assert_eq!(receipt.status, DoctorActionStatus::Failed);
+        assert!(
+            receipt
+                .blocked_reasons
+                .iter()
+                .any(|reason| reason.contains("injected test failure syncing directory")),
+            "parent directory sync failure should be explicit: {:?}",
+            receipt.blocked_reasons
+        );
+        assert!(
+            receipt
+                .precondition_checks
+                .iter()
+                .any(|check| check == "target_file_sync_completed"),
+            "parent sync failure should record that file fsync completed"
+        );
+        assert!(
+            !receipt
+                .precondition_checks
+                .iter()
+                .any(|check| check == "target_parent_sync_completed"),
+            "parent sync failure must not claim parent fsync completed"
+        );
+        assert_eq!(
+            std::fs::read(&target_path).expect("read written target after parent sync failure"),
+            payload,
+            "failed receipt must leave the staged bytes available for inspection"
+        );
+    }
+
+    #[test]
     fn doctor_fs_mutation_executor_refuses_to_overwrite_staging_target() {
         let temp = tempfile::tempdir().expect("tempdir");
         let data_dir = temp.path().join("cass-data");
@@ -25099,6 +25649,63 @@ mod cleanup_target_safety_tests {
         assert!(
             !outside_target.exists(),
             "copy must not create the broken symlink target outside staging"
+        );
+    }
+
+    #[test]
+    fn doctor_fs_write_mutation_rejects_symlinked_target_even_when_broken() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let data_dir = temp.path().join("cass-data");
+        let index_path = data_dir.join("index").join("live-generation");
+        std::fs::create_dir_all(&index_path).expect("create live index");
+
+        let staging_root = data_dir.join("doctor-staging").join("write-target-symlink");
+        std::fs::create_dir_all(&staging_root).expect("create staging root");
+        let outside_target = temp
+            .path()
+            .join("outside-written-through-broken-symlink.idx");
+        let target_path = staging_root.join("candidate.idx");
+        std::os::unix::fs::symlink(&outside_target, &target_path)
+            .expect("create broken symlink as write target");
+        assert!(
+            !target_path.exists(),
+            "regression setup expects Path::exists to miss the broken symlink"
+        );
+        let payload = b"derived lexical candidate bytes";
+        let expected_payload_blake3 = blake3::hash(payload).to_hex().to_string();
+
+        let receipt = execute_doctor_fs_write_mutation(DoctorFsWriteMutationRequest {
+            operation_id: "repair-apply-write-derived",
+            action_id: "write-symlinked-staging-target",
+            mode: DoctorRepairMode::RepairApply,
+            asset_class: DoctorAssetClass::DerivedLexicalIndex,
+            target_path: &target_path,
+            data_dir: &data_dir,
+            staging_root: &staging_root,
+            payload,
+            expected_payload_blake3: &expected_payload_blake3,
+            planned_bytes: payload.len() as u64,
+        });
+
+        assert_eq!(receipt.status, DoctorActionStatus::Blocked);
+        assert!(
+            receipt
+                .blocked_reasons
+                .iter()
+                .any(|reason| reason.contains("existing staging target")),
+            "write executor must treat broken symlink targets as existing targets: {:?}",
+            receipt.blocked_reasons
+        );
+        assert!(
+            std::fs::symlink_metadata(&target_path)
+                .expect("target symlink still exists")
+                .file_type()
+                .is_symlink(),
+            "blocked write must leave the symlink untouched for operator inspection"
+        );
+        assert!(
+            !outside_target.exists(),
+            "write must not create the broken symlink target outside staging"
         );
     }
 
