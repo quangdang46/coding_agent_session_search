@@ -2,34 +2,26 @@
   "query": "hello",
   "limit": 2,
   "offset": 0,
-  "count": 0,
-  "total_matches": 0,
-  "hits": [],
+  "count": 1,
+  "total_matches": 1,
+  "hits": [
+    {
+      "title": "Aider Chat: coding_agent_session_search",
+      "snippet": "-git --message **hello** world\nUsing openrouter/deepseek/deepseek-r1:free model with API key from environment.\nAider v0.86.1\nModel: openrouter/deepseek/deepseek-r1:…",
+      "content": "/data/projects/coding_agent_session_search/.venv/bin/aider --no-git --message hello world\nUsing openrouter/deepseek/deepseek-r1:free model with API key from environment.\nAider v0.86.1\nModel: openrouter/deepseek/deepseek-r1:free with diff edit format, prompt cache, infinite output\nGit repo: none\nRepo-map: disabled\nhttps://aider.chat/HISTORY.html#release-notes",
+      "score": 1.3554823398590088,
+      "source_path": "/data/projects/coding_agent_session_search/.aider.chat.history.md",
+      "agent": "aider",
+      "workspace": "/data/projects/coding_agent_session_search",
+      "created_at": 1764619673394,
+      "line_number": 2,
+      "match_type": "exact",
+      "source_id": "local",
+      "origin_kind": "local"
+    }
+  ],
   "max_tokens": null,
   "request_id": null,
   "cursor": null,
-  "hits_clamped": false,
-  "suggestions": [
-    {
-      "kind": "wildcard_query",
-      "message": "Try broader search: \"*hello*\"",
-      "suggested_query": "*hello*",
-      "suggested_filters": null,
-      "shortcut": 1
-    },
-    {
-      "kind": "alternate_agent",
-      "message": "Try searching in: aider",
-      "suggested_query": null,
-      "suggested_filters": {
-        "agents": [
-          "aider"
-        ],
-        "workspaces": [],
-        "created_from": null,
-        "created_to": null
-      },
-      "shortcut": 2
-    }
-  ]
+  "hits_clamped": false
 }

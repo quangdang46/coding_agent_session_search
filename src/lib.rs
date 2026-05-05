@@ -12744,6 +12744,7 @@ struct DoctorRepairContractReport {
     default_mode: DoctorRepairMode,
     default_non_destructive: bool,
     fail_closed: bool,
+    plan_receipt_schema: DoctorPlanReceiptSchemaReport,
     approval_requirements: Vec<DoctorApprovalRequirement>,
     outcome_kinds: Vec<DoctorRepairOutcomeKind>,
     retry_safety_kinds: Vec<DoctorRepairRetrySafety>,
@@ -12754,14 +12755,194 @@ struct DoctorRepairContractReport {
 #[derive(Debug, Clone, Serialize, Default)]
 struct DoctorRepairReceipt {
     receipt_kind: &'static str,
+    schema_version: u32,
     mode: DoctorRepairMode,
     outcome_kind: DoctorRepairOutcomeKind,
     approval_fingerprint: String,
+    plan_fingerprint: String,
+    started_at_ms: Option<i64>,
+    finished_at_ms: Option<i64>,
+    duration_ms: Option<i64>,
     planned_action_count: usize,
     applied_action_count: usize,
     skipped_action_count: usize,
+    failed_action_count: usize,
+    bytes_planned: u64,
+    bytes_copied: u64,
+    bytes_moved: u64,
+    bytes_pruned: u64,
     reclaimed_bytes: u64,
+    backup_paths: Vec<String>,
+    selected_authorities: Vec<String>,
+    rejected_authorities: Vec<String>,
+    verification_outcomes: Vec<String>,
+    remaining_risk: Vec<String>,
+    event_log: DoctorEventLogMetadata,
+    forensic_bundle: DoctorForensicBundleMetadata,
+    artifact_manifest: DoctorArtifactManifest,
+    artifact_checksums: Vec<DoctorArtifact>,
+    drift_detection_status: DoctorDriftDetectionStatus,
+    coverage_before: DoctorCoverageSnapshot,
+    coverage_after: DoctorCoverageSnapshot,
+    actions: Vec<DoctorAction>,
+    action_status_counts: BTreeMap<String, usize>,
     blocked_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorActionStatus {
+    #[default]
+    Planned,
+    Applied,
+    Skipped,
+    Blocked,
+    Failed,
+    Refused,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorArtifactChecksumStatus {
+    #[default]
+    NotRecorded,
+    Matched,
+    Mismatched,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorDriftDetectionStatus {
+    #[default]
+    NotChecked,
+    Verified,
+    ChecksumMismatch,
+    MissingArtifact,
+    ManifestMismatch,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorPlanReceiptSchemaReport {
+    plan_schema_version: u32,
+    receipt_schema_version: u32,
+    action_schema_version: u32,
+    artifact_schema_version: u32,
+    fingerprint_algorithm: &'static str,
+    plan_fingerprint_includes: Vec<&'static str>,
+    receipt_required_fields: Vec<&'static str>,
+    artifact_checksum_statuses: Vec<DoctorArtifactChecksumStatus>,
+    drift_detection_statuses: Vec<DoctorDriftDetectionStatus>,
+    redaction_contract: &'static str,
+    tamper_evidence_scope: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+struct DoctorCoverageSnapshot {
+    generation_count: usize,
+    reclaim_candidate_count: usize,
+    reclaimable_bytes: u64,
+    retained_bytes: u64,
+    artifact_count: usize,
+    covered_asset_classes: Vec<DoctorAssetClass>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorSafetyGate {
+    mode: DoctorRepairMode,
+    asset_class: DoctorAssetClass,
+    allowed_by_mode: bool,
+    allowed_by_taxonomy: bool,
+    path_safe: bool,
+    approval_requirement: DoctorApprovalRequirement,
+    approval_fingerprint: String,
+    passed: bool,
+    blocked_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorArtifact {
+    artifact_id: String,
+    artifact_kind: String,
+    asset_class: DoctorAssetClass,
+    path: String,
+    redacted_path: String,
+    exists: bool,
+    size_bytes: Option<u64>,
+    descriptor_blake3: String,
+    expected_content_blake3: Option<String>,
+    actual_content_blake3: Option<String>,
+    checksum_status: DoctorArtifactChecksumStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorAction {
+    action_id: String,
+    action_kind: String,
+    status: DoctorActionStatus,
+    mode: DoctorRepairMode,
+    asset_class: DoctorAssetClass,
+    target_path: String,
+    redacted_target_path: String,
+    reason: String,
+    authority_decision: String,
+    selected_authorities: Vec<String>,
+    rejected_authorities: Vec<String>,
+    safety_gate: DoctorSafetyGate,
+    planned_bytes: u64,
+    bytes_copied: u64,
+    bytes_moved: u64,
+    bytes_pruned: u64,
+    backup_paths: Vec<String>,
+    verification_outcome: String,
+    remaining_risk: Vec<String>,
+    artifacts: Vec<DoctorArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+struct DoctorEventLogMetadata {
+    path: Option<String>,
+    checksum_blake3: Option<String>,
+    hash_chain_tip: Option<String>,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+struct DoctorForensicBundleMetadata {
+    path: Option<String>,
+    checksum_blake3: Option<String>,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+struct DoctorArtifactManifest {
+    schema_version: u32,
+    artifact_count: usize,
+    manifest_blake3: String,
+    drift_detection_status: DoctorDriftDetectionStatus,
+    artifacts: Vec<DoctorArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorPlan {
+    plan_kind: &'static str,
+    schema_version: u32,
+    mode: DoctorRepairMode,
+    approval_requirement: DoctorApprovalRequirement,
+    approval_fingerprint: String,
+    plan_fingerprint: String,
+    fingerprint_algorithm: &'static str,
+    outcome_contract: DoctorRepairOutcomeKind,
+    coverage_before: DoctorCoverageSnapshot,
+    safety_gates: Vec<DoctorSafetyGate>,
+    actions: Vec<DoctorAction>,
+    artifact_manifest: DoctorArtifactManifest,
+    event_log: DoctorEventLogMetadata,
+    forensic_bundle: DoctorForensicBundleMetadata,
+    selected_authorities: Vec<String>,
+    rejected_authorities: Vec<String>,
+    blocked_reasons: Vec<String>,
+    remaining_risk: Vec<String>,
 }
 
 #[cfg(test)]
@@ -12803,6 +12984,27 @@ const DOCTOR_REPAIR_RETRY_SAFETY_VOCABULARY: &[DoctorRepairRetrySafety] = &[
     DoctorRepairRetrySafety::RetryAfterInspection,
     DoctorRepairRetrySafety::DoNotRetryWithoutReview,
 ];
+const DOCTOR_ACTION_STATUS_VOCABULARY: &[DoctorActionStatus] = &[
+    DoctorActionStatus::Planned,
+    DoctorActionStatus::Applied,
+    DoctorActionStatus::Skipped,
+    DoctorActionStatus::Blocked,
+    DoctorActionStatus::Failed,
+    DoctorActionStatus::Refused,
+];
+const DOCTOR_ARTIFACT_CHECKSUM_STATUS_VOCABULARY: &[DoctorArtifactChecksumStatus] = &[
+    DoctorArtifactChecksumStatus::NotRecorded,
+    DoctorArtifactChecksumStatus::Matched,
+    DoctorArtifactChecksumStatus::Mismatched,
+    DoctorArtifactChecksumStatus::Missing,
+];
+const DOCTOR_DRIFT_DETECTION_STATUS_VOCABULARY: &[DoctorDriftDetectionStatus] = &[
+    DoctorDriftDetectionStatus::NotChecked,
+    DoctorDriftDetectionStatus::Verified,
+    DoctorDriftDetectionStatus::ChecksumMismatch,
+    DoctorDriftDetectionStatus::MissingArtifact,
+    DoctorDriftDetectionStatus::ManifestMismatch,
+];
 const DOCTOR_REPAIR_DERIVED_CLEANUP_ASSETS: &[DoctorAssetClass] = &[
     DoctorAssetClass::RetainedPublishBackup,
     DoctorAssetClass::ReclaimableDerivedCache,
@@ -12837,6 +13039,38 @@ const DOCTOR_REPAIR_MUTATION_FIELDS: &[&str] = &[
 ];
 const DOCTOR_REPAIR_REHEARSAL_FIELDS: &[&str] =
     &["mode", "planned_actions", "blocked_reasons", "outcome_kind"];
+const DOCTOR_PLAN_FINGERPRINT_FIELDS: &[&str] = &[
+    "plan_kind",
+    "schema_version",
+    "mode",
+    "approval_requirement",
+    "approval_fingerprint",
+    "outcome_contract",
+    "coverage_before",
+    "safety_gates",
+    "actions",
+    "artifact_manifest",
+    "selected_authorities",
+    "rejected_authorities",
+    "blocked_reasons",
+    "remaining_risk",
+];
+const DOCTOR_RECEIPT_REQUIRED_FIELDS: &[&str] = &[
+    "receipt_kind",
+    "schema_version",
+    "mode",
+    "outcome_kind",
+    "approval_fingerprint",
+    "plan_fingerprint",
+    "started_at_ms",
+    "finished_at_ms",
+    "actions",
+    "action_status_counts",
+    "artifact_manifest",
+    "drift_detection_status",
+    "coverage_before",
+    "coverage_after",
+];
 const DOCTOR_REPAIR_READ_ONLY_ABORTS: &[&str] = &["schema_error", "io_error"];
 const DOCTOR_REPAIR_MUTATION_ABORTS: &[&str] = &[
     "active_rebuild_lock",
@@ -13043,11 +13277,28 @@ fn doctor_repair_mode_policy_report() -> Vec<DoctorRepairModePolicyReport> {
         .collect()
 }
 
+fn doctor_plan_receipt_schema_report() -> DoctorPlanReceiptSchemaReport {
+    DoctorPlanReceiptSchemaReport {
+        plan_schema_version: 1,
+        receipt_schema_version: 1,
+        action_schema_version: 1,
+        artifact_schema_version: 1,
+        fingerprint_algorithm: "blake3-canonical-json-v1",
+        plan_fingerprint_includes: DOCTOR_PLAN_FINGERPRINT_FIELDS.to_vec(),
+        receipt_required_fields: DOCTOR_RECEIPT_REQUIRED_FIELDS.to_vec(),
+        artifact_checksum_statuses: DOCTOR_ARTIFACT_CHECKSUM_STATUS_VOCABULARY.to_vec(),
+        drift_detection_statuses: DOCTOR_DRIFT_DETECTION_STATUS_VOCABULARY.to_vec(),
+        redaction_contract: "robot receipts may expose existing doctor paths; support bundles must redact before export",
+        tamper_evidence_scope: "plan fingerprints, artifact manifests, event logs, and forensic bundles",
+    }
+}
+
 fn doctor_repair_contract_report() -> DoctorRepairContractReport {
     DoctorRepairContractReport {
         default_mode: DoctorRepairMode::Check,
         default_non_destructive: true,
         fail_closed: true,
+        plan_receipt_schema: doctor_plan_receipt_schema_report(),
         approval_requirements: DOCTOR_REPAIR_APPROVAL_REQUIREMENT_VOCABULARY.to_vec(),
         outcome_kinds: DOCTOR_REPAIR_OUTCOME_KIND_VOCABULARY.to_vec(),
         retry_safety_kinds: DOCTOR_REPAIR_RETRY_SAFETY_VOCABULARY.to_vec(),
@@ -13116,9 +13367,11 @@ fn finalize_cleanup_apply_contract(result: &mut DiagCleanupApplyResult) {
     result.planned_actions = result.actions.clone();
     result.receipt = DoctorRepairReceipt {
         receipt_kind: "doctor_cleanup_apply_v1",
+        schema_version: 1,
         mode: result.mode,
         outcome_kind: result.outcome_kind,
         approval_fingerprint: result.approval_fingerprint.clone(),
+        plan_fingerprint: result.approval_fingerprint.clone(),
         planned_action_count: result.planned_actions.len(),
         applied_action_count: result
             .planned_actions
@@ -13130,8 +13383,15 @@ fn finalize_cleanup_apply_contract(result: &mut DiagCleanupApplyResult) {
             .iter()
             .filter(|action| action.skipped)
             .count(),
+        bytes_planned: result
+            .planned_actions
+            .iter()
+            .map(|action| action.planned_reclaimable_bytes)
+            .sum(),
+        bytes_pruned: result.reclaimed_bytes,
         reclaimed_bytes: result.reclaimed_bytes,
         blocked_reasons: result.blocked_reasons.clone(),
+        ..DoctorRepairReceipt::default()
     };
 }
 
