@@ -400,6 +400,24 @@ fn doctor_json_surfaces_quarantine_gc_eligibility() {
         Some(true)
     );
     assert_eq!(repair_contract["fail_closed"].as_bool(), Some(true));
+    let plan_receipt_schema = &repair_contract["plan_receipt_schema"];
+    assert_eq!(plan_receipt_schema["plan_schema_version"].as_u64(), Some(1));
+    assert!(
+        plan_receipt_schema["plan_fingerprint_includes"]
+            .as_array()
+            .expect("plan fingerprint includes")
+            .iter()
+            .any(|field| field.as_str() == Some("artifact_manifest")),
+        "doctor should publish what the approval fingerprint covers"
+    );
+    assert!(
+        plan_receipt_schema["receipt_required_fields"]
+            .as_array()
+            .expect("receipt required fields")
+            .iter()
+            .any(|field| field.as_str() == Some("plan_fingerprint")),
+        "doctor should publish the stable receipt field contract"
+    );
     let mode_policies = repair_contract["mode_policies"]
         .as_array()
         .expect("doctor repair mode policy table");
@@ -954,6 +972,52 @@ fn doctor_fix_prunes_safe_derivative_cleanup_candidates() {
     );
     assert_eq!(receipt["planned_action_count"].as_u64(), Some(2));
     assert_eq!(receipt["applied_action_count"].as_u64(), Some(2));
+    assert_eq!(
+        receipt["bytes_pruned"].as_u64(),
+        cleanup["reclaimed_bytes"].as_u64()
+    );
+    assert_eq!(
+        receipt["drift_detection_status"].as_str(),
+        Some("not_checked")
+    );
+    assert!(
+        receipt["started_at_ms"].as_i64().is_some(),
+        "mutating doctor receipt should record a start timestamp"
+    );
+    assert!(
+        receipt["finished_at_ms"].as_i64().is_some(),
+        "mutating doctor receipt should record a finish timestamp"
+    );
+    let plan = cleanup["plan"].as_object().expect("cleanup plan object");
+    assert_eq!(
+        plan["approval_fingerprint"].as_str(),
+        cleanup["approval_fingerprint"].as_str()
+    );
+    assert_eq!(
+        receipt["plan_fingerprint"].as_str(),
+        plan["plan_fingerprint"].as_str()
+    );
+    assert!(
+        plan["actions"]
+            .as_array()
+            .expect("plan actions")
+            .iter()
+            .all(|action| action["status"].as_str() == Some("planned")),
+        "dry-run plan actions should stay planned even when receipt actions applied"
+    );
+    assert!(
+        receipt["actions"]
+            .as_array()
+            .expect("receipt actions")
+            .iter()
+            .any(|action| {
+                action["status"].as_str() == Some("applied")
+                    && action["redacted_target_path"]
+                        .as_str()
+                        .is_some_and(|path| path.starts_with("[cass-data]/"))
+            }),
+        "receipt actions should expose applied status and support-bundle redacted paths"
+    );
     assert!(
         actions.iter().any(|action| {
             action["artifact_kind"].as_str() == Some("retained_publish_backup")

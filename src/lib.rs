@@ -12924,7 +12924,6 @@ struct DoctorArtifactManifest {
     artifacts: Vec<DoctorArtifact>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 struct DoctorPlan {
     plan_kind: &'static str,
@@ -13337,12 +13336,9 @@ fn doctor_now_ms() -> i64 {
 
 fn doctor_canonical_json_value(value: serde_json::Value) -> serde_json::Value {
     match value {
-        serde_json::Value::Array(items) => serde_json::Value::Array(
-            items
-                .into_iter()
-                .map(doctor_canonical_json_value)
-                .collect(),
-        ),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(doctor_canonical_json_value).collect())
+        }
         serde_json::Value::Object(map) => {
             let mut entries: Vec<_> = map.into_iter().collect();
             entries.sort_by(|left, right| left.0.cmp(&right.0));
@@ -13426,9 +13422,13 @@ fn doctor_artifact_from_cleanup_action(
     action: &DiagCleanupApplyAction,
     data_dir: &Path,
 ) -> DoctorArtifact {
-    let exists = action.applied || Path::new(&action.path).exists();
+    let exists = Path::new(&action.path).exists();
     let size_bytes = Some(action.planned_reclaimable_bytes);
-    let checksum_status = doctor_artifact_checksum_status(exists, None, None);
+    let checksum_status = if action.applied {
+        DoctorArtifactChecksumStatus::NotRecorded
+    } else {
+        doctor_artifact_checksum_status(exists, None, None)
+    };
     DoctorArtifact {
         artifact_id: doctor_canonical_blake3(
             "doctor-artifact-v1",
@@ -13656,7 +13656,9 @@ fn doctor_action_from_cleanup_action(
     }
 }
 
-fn doctor_sorted_cleanup_actions(actions: &[DiagCleanupApplyAction]) -> Vec<DiagCleanupApplyAction> {
+fn doctor_sorted_cleanup_actions(
+    actions: &[DiagCleanupApplyAction],
+) -> Vec<DiagCleanupApplyAction> {
     let mut sorted = actions.to_vec();
     sorted.sort_by(|left, right| {
         (
@@ -13868,7 +13870,10 @@ fn finalize_cleanup_apply_contract(
         result.after_retained_bytes,
         &result.actions,
     );
-    let duration_ms = match (result.operation_started_at_ms, result.operation_finished_at_ms) {
+    let duration_ms = match (
+        result.operation_started_at_ms,
+        result.operation_finished_at_ms,
+    ) {
         (Some(started), Some(finished)) => Some(finished.saturating_sub(started)),
         _ => None,
     };
@@ -15322,6 +15327,143 @@ mod doctor_asset_taxonomy_tests {
         assert_eq!(
             partially_blocked.retry_safety,
             DoctorRepairRetrySafety::RetryAfterSameDryRun
+        );
+    }
+
+    fn test_cleanup_action(path: &str, planned_reclaimable_bytes: u64) -> DiagCleanupApplyAction {
+        DiagCleanupApplyAction {
+            asset_safety: doctor_asset_safety(DoctorAssetClass::RetainedPublishBackup),
+            artifact_kind: "retained_publish_backup".to_string(),
+            path: path.to_string(),
+            generation_id: None,
+            shard_id: None,
+            disposition: None,
+            reason: "outside retention cap".to_string(),
+            planned_reclaimable_bytes,
+            reclaimed_bytes: 0,
+            applied: false,
+            skipped: false,
+            skip_reason: None,
+        }
+    }
+
+    #[test]
+    fn doctor_plan_fingerprint_is_deterministic_and_action_sensitive() {
+        let data_dir = Path::new("/tmp/cass");
+        let db_path = data_dir.join("agent_search.db");
+        let index_path = data_dir.join("index");
+        let action_a = test_cleanup_action("/tmp/cass/index/.lexical-publish-backups/a", 10);
+        let action_b = test_cleanup_action("/tmp/cass/index/.lexical-publish-backups/b", 20);
+        let result = DiagCleanupApplyResult {
+            mode: DoctorRepairMode::CleanupApply,
+            approval_requirement: DoctorApprovalRequirement::ApprovalFingerprint,
+            approval_fingerprint: "cleanup-v1-test".to_string(),
+            before_generation_count: 2,
+            before_reclaim_candidate_count: 2,
+            before_reclaimable_bytes: 30,
+            before_retained_bytes: 0,
+            actions: vec![action_a.clone(), action_b.clone()],
+            ..DiagCleanupApplyResult::default()
+        };
+        let reversed = DiagCleanupApplyResult {
+            actions: vec![action_b, action_a],
+            ..result.clone()
+        };
+
+        let plan = build_cleanup_doctor_plan(&result, data_dir, &db_path, &index_path);
+        let reversed_plan = build_cleanup_doctor_plan(&reversed, data_dir, &db_path, &index_path);
+
+        assert_eq!(
+            plan.plan_fingerprint, reversed_plan.plan_fingerprint,
+            "filesystem scan order must not change doctor approval fingerprints"
+        );
+
+        let mut changed = result.clone();
+        changed.actions[0].planned_reclaimable_bytes = 11;
+        let changed_plan = build_cleanup_doctor_plan(&changed, data_dir, &db_path, &index_path);
+        assert_ne!(
+            plan.plan_fingerprint, changed_plan.plan_fingerprint,
+            "fingerprint must change when the action byte contract changes"
+        );
+    }
+
+    #[test]
+    fn doctor_artifact_manifest_reports_checksum_mismatch_and_missing_artifacts() {
+        let matched = DoctorArtifact {
+            artifact_id: "matched".to_string(),
+            artifact_kind: "receipt".to_string(),
+            asset_class: DoctorAssetClass::OperationReceipt,
+            path: "/tmp/cass/receipts/matched.json".to_string(),
+            redacted_path: "[cass-data]/receipts/matched.json".to_string(),
+            exists: true,
+            size_bytes: Some(8),
+            descriptor_blake3: "descriptor".to_string(),
+            expected_content_blake3: Some("abc".to_string()),
+            actual_content_blake3: Some("abc".to_string()),
+            checksum_status: doctor_artifact_checksum_status(true, Some("abc"), Some("abc")),
+        };
+        let mismatched = DoctorArtifact {
+            artifact_id: "mismatched".to_string(),
+            actual_content_blake3: Some("def".to_string()),
+            checksum_status: doctor_artifact_checksum_status(true, Some("abc"), Some("def")),
+            ..matched.clone()
+        };
+        let missing = DoctorArtifact {
+            artifact_id: "missing".to_string(),
+            exists: false,
+            checksum_status: doctor_artifact_checksum_status(false, Some("abc"), None),
+            ..matched.clone()
+        };
+
+        assert_eq!(
+            doctor_artifact_manifest(vec![matched.clone()]).drift_detection_status,
+            DoctorDriftDetectionStatus::Verified
+        );
+        assert_eq!(
+            doctor_artifact_manifest(vec![matched, mismatched]).drift_detection_status,
+            DoctorDriftDetectionStatus::ChecksumMismatch
+        );
+        assert_eq!(
+            doctor_artifact_manifest(vec![missing]).drift_detection_status,
+            DoctorDriftDetectionStatus::MissingArtifact
+        );
+    }
+
+    #[test]
+    fn doctor_redacted_path_hides_cass_data_dir_prefix() {
+        let data_dir = Path::new("/home/example/.local/share/cass");
+        assert_eq!(
+            doctor_redacted_path(
+                "/home/example/.local/share/cass/index/.lexical-publish-backups/old",
+                data_dir
+            ),
+            "[cass-data]/index/.lexical-publish-backups/old"
+        );
+        assert_eq!(
+            doctor_redacted_path("/var/tmp/external-session.jsonl", data_dir),
+            "[external]/external-session.jsonl"
+        );
+    }
+
+    #[test]
+    fn doctor_plan_receipt_schema_report_names_required_contract_fields() {
+        let schema = doctor_plan_receipt_schema_report();
+        assert!(
+            schema
+                .plan_fingerprint_includes
+                .contains(&"artifact_manifest")
+        );
+        assert!(schema.receipt_required_fields.contains(&"plan_fingerprint"));
+        assert!(schema.receipt_required_fields.contains(&"finished_at_ms"));
+        assert!(
+            schema
+                .artifact_checksum_statuses
+                .contains(&DoctorArtifactChecksumStatus::Mismatched)
+        );
+        assert!(
+            schema
+                .drift_detection_statuses
+                .contains(&DoctorDriftDetectionStatus::MissingArtifact)
         );
     }
 }
@@ -21201,6 +21343,219 @@ fn response_schema_opaque_object_array() -> serde_json::Value {
     })
 }
 
+fn response_schema_doctor_coverage_snapshot() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "generation_count": { "type": "integer" },
+            "reclaim_candidate_count": { "type": "integer" },
+            "reclaimable_bytes": { "type": "integer" },
+            "retained_bytes": { "type": "integer" },
+            "artifact_count": { "type": "integer" },
+            "covered_asset_classes": { "type": "array", "items": { "type": "string" } }
+        }
+    })
+}
+
+fn response_schema_doctor_artifact() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "artifact_id": { "type": "string" },
+            "artifact_kind": { "type": "string" },
+            "asset_class": { "type": "string" },
+            "path": { "type": "string" },
+            "redacted_path": { "type": "string" },
+            "exists": { "type": "boolean" },
+            "size_bytes": { "type": ["integer", "null"] },
+            "descriptor_blake3": { "type": "string" },
+            "expected_content_blake3": { "type": ["string", "null"] },
+            "actual_content_blake3": { "type": ["string", "null"] },
+            "checksum_status": {
+                "type": "string",
+                "description": "not_recorded | matched | mismatched | missing"
+            }
+        },
+        "required": ["artifact_id", "artifact_kind", "asset_class", "path", "redacted_path", "exists", "descriptor_blake3", "checksum_status"]
+    })
+}
+
+fn response_schema_doctor_artifact_manifest() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "schema_version": { "type": "integer" },
+            "artifact_count": { "type": "integer" },
+            "manifest_blake3": { "type": "string" },
+            "drift_detection_status": {
+                "type": "string",
+                "description": "not_checked | verified | checksum_mismatch | missing_artifact | manifest_mismatch"
+            },
+            "artifacts": {
+                "type": "array",
+                "items": response_schema_doctor_artifact()
+            }
+        }
+    })
+}
+
+fn response_schema_doctor_safety_gate() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "mode": { "type": "string" },
+            "asset_class": { "type": "string" },
+            "allowed_by_mode": { "type": "boolean" },
+            "allowed_by_taxonomy": { "type": "boolean" },
+            "path_safe": { "type": "boolean" },
+            "approval_requirement": { "type": "string" },
+            "approval_fingerprint": { "type": "string" },
+            "passed": { "type": "boolean" },
+            "blocked_reasons": { "type": "array", "items": { "type": "string" } }
+        }
+    })
+}
+
+fn response_schema_doctor_action() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "action_id": { "type": "string" },
+            "action_kind": { "type": "string" },
+            "status": {
+                "type": "string",
+                "description": "planned | applied | skipped | blocked | failed | refused"
+            },
+            "mode": { "type": "string" },
+            "asset_class": { "type": "string" },
+            "target_path": { "type": "string" },
+            "redacted_target_path": { "type": "string" },
+            "reason": { "type": "string" },
+            "authority_decision": { "type": "string" },
+            "selected_authorities": { "type": "array", "items": { "type": "string" } },
+            "rejected_authorities": { "type": "array", "items": { "type": "string" } },
+            "safety_gate": response_schema_doctor_safety_gate(),
+            "planned_bytes": { "type": "integer" },
+            "bytes_copied": { "type": "integer" },
+            "bytes_moved": { "type": "integer" },
+            "bytes_pruned": { "type": "integer" },
+            "backup_paths": { "type": "array", "items": { "type": "string" } },
+            "verification_outcome": { "type": "string" },
+            "remaining_risk": { "type": "array", "items": { "type": "string" } },
+            "artifacts": { "type": "array", "items": response_schema_doctor_artifact() }
+        }
+    })
+}
+
+fn response_schema_doctor_event_log_metadata() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": { "type": ["string", "null"] },
+            "checksum_blake3": { "type": ["string", "null"] },
+            "hash_chain_tip": { "type": ["string", "null"] },
+            "status": { "type": "string" }
+        }
+    })
+}
+
+fn response_schema_doctor_forensic_bundle_metadata() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": { "type": ["string", "null"] },
+            "checksum_blake3": { "type": ["string", "null"] },
+            "status": { "type": "string" }
+        }
+    })
+}
+
+fn response_schema_doctor_plan() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "plan_kind": { "type": "string" },
+            "schema_version": { "type": "integer" },
+            "mode": { "type": "string" },
+            "approval_requirement": { "type": "string" },
+            "approval_fingerprint": { "type": "string" },
+            "plan_fingerprint": { "type": "string" },
+            "fingerprint_algorithm": { "type": "string" },
+            "outcome_contract": { "type": "string" },
+            "coverage_before": response_schema_doctor_coverage_snapshot(),
+            "safety_gates": { "type": "array", "items": response_schema_doctor_safety_gate() },
+            "actions": { "type": "array", "items": response_schema_doctor_action() },
+            "artifact_manifest": response_schema_doctor_artifact_manifest(),
+            "event_log": response_schema_doctor_event_log_metadata(),
+            "forensic_bundle": response_schema_doctor_forensic_bundle_metadata(),
+            "selected_authorities": { "type": "array", "items": { "type": "string" } },
+            "rejected_authorities": { "type": "array", "items": { "type": "string" } },
+            "blocked_reasons": { "type": "array", "items": { "type": "string" } },
+            "remaining_risk": { "type": "array", "items": { "type": "string" } }
+        }
+    })
+}
+
+fn response_schema_doctor_receipt() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "receipt_kind": { "type": "string" },
+            "schema_version": { "type": "integer" },
+            "mode": { "type": "string" },
+            "outcome_kind": { "type": "string" },
+            "approval_fingerprint": { "type": "string" },
+            "plan_fingerprint": { "type": "string" },
+            "started_at_ms": { "type": ["integer", "null"] },
+            "finished_at_ms": { "type": ["integer", "null"] },
+            "duration_ms": { "type": ["integer", "null"] },
+            "planned_action_count": { "type": "integer" },
+            "applied_action_count": { "type": "integer" },
+            "skipped_action_count": { "type": "integer" },
+            "failed_action_count": { "type": "integer" },
+            "bytes_planned": { "type": "integer" },
+            "bytes_copied": { "type": "integer" },
+            "bytes_moved": { "type": "integer" },
+            "bytes_pruned": { "type": "integer" },
+            "reclaimed_bytes": { "type": "integer" },
+            "backup_paths": { "type": "array", "items": { "type": "string" } },
+            "selected_authorities": { "type": "array", "items": { "type": "string" } },
+            "rejected_authorities": { "type": "array", "items": { "type": "string" } },
+            "verification_outcomes": { "type": "array", "items": { "type": "string" } },
+            "remaining_risk": { "type": "array", "items": { "type": "string" } },
+            "event_log": response_schema_doctor_event_log_metadata(),
+            "forensic_bundle": response_schema_doctor_forensic_bundle_metadata(),
+            "artifact_manifest": response_schema_doctor_artifact_manifest(),
+            "artifact_checksums": { "type": "array", "items": response_schema_doctor_artifact() },
+            "drift_detection_status": { "type": "string" },
+            "coverage_before": response_schema_doctor_coverage_snapshot(),
+            "coverage_after": response_schema_doctor_coverage_snapshot(),
+            "actions": { "type": "array", "items": response_schema_doctor_action() },
+            "action_status_counts": { "type": "object", "additionalProperties": { "type": "integer" } },
+            "blocked_reasons": { "type": "array", "items": { "type": "string" } }
+        }
+    })
+}
+
+fn response_schema_doctor_cleanup_apply() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "mode": { "type": "string" },
+            "approval_requirement": { "type": "string" },
+            "outcome_kind": { "type": "string" },
+            "retry_safety": { "type": "string" },
+            "approval_fingerprint": { "type": "string" },
+            "operation_started_at_ms": { "type": ["integer", "null"] },
+            "operation_finished_at_ms": { "type": ["integer", "null"] },
+            "planned_actions": { "type": "array", "items": response_schema_opaque_object() },
+            "actions": { "type": "array", "items": response_schema_opaque_object() },
+            "plan": response_schema_doctor_plan(),
+            "receipt": response_schema_doctor_receipt()
+        }
+    })
+}
+
 fn response_schema_search_hit() -> serde_json::Value {
     response_schema_object([
         ("source_path", serde_json::json!({ "type": "string" })),
@@ -22105,6 +22460,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                 "asset_taxonomy": response_schema_opaque_object_array(),
                 "repair_contract": response_schema_opaque_object(),
                 "quarantine": response_schema_opaque_object(),
+                "cleanup_apply": response_schema_doctor_cleanup_apply(),
                 "_meta": response_schema_opaque_object(),
                 "checks": {
                     "type": "array",
