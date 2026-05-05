@@ -6217,18 +6217,21 @@ impl FrankenStorage {
     pub fn list_conversation_footprints_for_lexical_rebuild(
         &self,
     ) -> Result<Vec<LexicalRebuildConversationFootprintRow>> {
-        let tail_state_by_conversation: HashMap<i64, Option<i64>> = self
-            .conn
-            .query_map_collect(
-                "SELECT conversation_id, last_message_idx
-                 FROM conversation_tail_state
-                 ORDER BY conversation_id ASC",
-                fparams![],
-                |row| Ok((row.get_typed::<i64>(0)?, row.get_typed::<Option<i64>>(1)?)),
-            )
-            .with_context(|| "listing lexical rebuild tail-state estimates")?
-            .into_iter()
-            .collect();
+        let tail_state_rows: Vec<(i64, Option<i64>)> = match self.conn.query_map_collect(
+            "SELECT conversation_id, last_message_idx
+             FROM conversation_tail_state
+             ORDER BY conversation_id ASC",
+            fparams![],
+            |row| Ok((row.get_typed::<i64>(0)?, row.get_typed::<Option<i64>>(1)?)),
+        ) {
+            Ok(rows) => rows,
+            Err(err) if error_indicates_missing_table(&err) => Vec::new(),
+            Err(err) => {
+                return Err(err).with_context(|| "listing lexical rebuild tail-state estimates");
+            }
+        };
+        let tail_state_by_conversation: HashMap<i64, Option<i64>> =
+            tail_state_rows.into_iter().collect();
 
         let rows = self
             .conn
@@ -18881,6 +18884,83 @@ mod tests {
                 message_bytes: 11 * LEXICAL_REBUILD_PLANNER_ESTIMATED_BYTES_PER_MESSAGE,
             }],
             "missing tail-cache metadata should fall back to messages MAX(idx) instead of treating legacy conversations as empty"
+        );
+    }
+
+    #[test]
+    fn list_conversation_footprints_for_lexical_rebuild_tolerates_missing_tail_state_table() {
+        use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
+        use std::path::PathBuf;
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("agent_search.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+        let agent = Agent {
+            id: None,
+            slug: "codex".into(),
+            name: "Codex".into(),
+            version: Some("0.2.3".into()),
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).unwrap();
+        let conversation_id = storage
+            .insert_conversation_tree(
+                agent_id,
+                None,
+                &Conversation {
+                    id: None,
+                    agent_slug: "codex".into(),
+                    workspace: Some(PathBuf::from("/tmp/workspace")),
+                    external_id: Some("footprint-missing-tail-table".to_string()),
+                    title: Some("footprint-missing-tail-table".to_string()),
+                    source_path: PathBuf::from("/tmp/footprint-missing-tail-table.jsonl"),
+                    started_at: Some(1_700_000_000_000),
+                    ended_at: Some(1_700_000_000_100),
+                    approx_tokens: None,
+                    metadata_json: serde_json::Value::Null,
+                    messages: vec![Message {
+                        id: None,
+                        idx: 10,
+                        role: MessageRole::User,
+                        author: None,
+                        created_at: Some(1_700_000_000_010),
+                        content: "legacy sparse tail without hot table".into(),
+                        extra_json: serde_json::Value::Null,
+                        snippets: Vec::new(),
+                    }],
+                    source_id: LOCAL_SOURCE_ID.into(),
+                    origin_host: None,
+                },
+            )
+            .unwrap()
+            .conversation_id;
+
+        storage
+            .conn
+            .execute_compat(
+                "UPDATE conversations
+                 SET last_message_idx = NULL, last_message_created_at = NULL
+                 WHERE id = ?1",
+                fparams![conversation_id],
+            )
+            .unwrap();
+        storage
+            .conn
+            .execute_compat("DROP TABLE conversation_tail_state", fparams![])
+            .unwrap();
+
+        let footprints = storage
+            .list_conversation_footprints_for_lexical_rebuild()
+            .unwrap();
+
+        assert_eq!(
+            footprints,
+            vec![LexicalRebuildConversationFootprintRow {
+                conversation_id,
+                message_count: 11,
+                message_bytes: 11 * LEXICAL_REBUILD_PLANNER_ESTIMATED_BYTES_PER_MESSAGE,
+            }],
+            "read-only lexical self-heal must tolerate pre-tail-cache databases and use messages MAX(idx)"
         );
     }
 
