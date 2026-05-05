@@ -3082,13 +3082,16 @@
             "status": {
               "type": "string"
             },
-            "root_path": {
-              "type": "string"
-            },
             "redacted_root_path": {
               "type": "string"
             },
             "exists": {
+              "type": "boolean"
+            },
+            "sensitive_paths_included": {
+              "type": "boolean"
+            },
+            "raw_content_included": {
               "type": "boolean"
             },
             "layout": {
@@ -3144,6 +3147,12 @@
                 "never_overwrite_different_bytes": {
                   "type": "boolean"
                 },
+                "storage_scope": {
+                  "type": "string"
+                },
+                "local_only_by_default": {
+                  "type": "boolean"
+                },
                 "directory_mode_octal": {
                   "type": "string"
                 },
@@ -3164,6 +3173,156 @@
                 },
                 "symlink_defense": {
                   "type": "string"
+                },
+                "default_report_contract": {
+                  "type": "string"
+                },
+                "sensitive_output_policy": {
+                  "type": "object",
+                  "properties": {
+                    "default_includes_exact_paths": {
+                      "type": "boolean"
+                    },
+                    "default_includes_raw_content": {
+                      "type": "boolean"
+                    },
+                    "safe_metadata_fields": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "redacted_by_default_fields": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "opt_in_sensitive_modes": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "redaction_marker_contract": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "compression_policy": {
+                  "type": "object",
+                  "properties": {
+                    "default_state": {
+                      "type": "string"
+                    },
+                    "optional": {
+                      "type": "boolean"
+                    },
+                    "allowed_states": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "required_metadata_fields": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "raw_content_hash_scope": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "encryption_policy": {
+                  "type": "object",
+                  "properties": {
+                    "default_state": {
+                      "type": "string"
+                    },
+                    "optional": {
+                      "type": "boolean"
+                    },
+                    "allowed_states": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "required_metadata_fields": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "key_material_reporting": {
+                      "type": "string"
+                    },
+                    "integrity_contract": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "backup_policy": {
+                  "type": "object",
+                  "properties": {
+                    "included_in_default_backup": {
+                      "type": "boolean"
+                    },
+                    "backup_mode": {
+                      "type": "string"
+                    },
+                    "backup_contents": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "restore_precondition": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "support_bundle_policy": {
+                  "type": "object",
+                  "properties": {
+                    "default_mode": {
+                      "type": "string"
+                    },
+                    "include_manifest_metadata": {
+                      "type": "boolean"
+                    },
+                    "include_blob_bytes": {
+                      "type": "boolean"
+                    },
+                    "include_exact_paths": {
+                      "type": "boolean"
+                    },
+                    "sensitive_attachment_gate": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "public_export_policy": {
+                  "type": "object",
+                  "properties": {
+                    "pages_exports_include_raw_mirror": {
+                      "type": "boolean"
+                    },
+                    "html_exports_include_raw_mirror": {
+                      "type": "boolean"
+                    },
+                    "default_logs_include_raw_content": {
+                      "type": "boolean"
+                    },
+                    "default_robot_json_includes_raw_content": {
+                      "type": "boolean"
+                    },
+                    "public_artifact_contract": {
+                      "type": "string"
+                    }
+                  }
                 },
                 "compression_contract": {
                   "type": "string"
@@ -3222,16 +3381,10 @@
                   "manifest_id": {
                     "type": "string"
                   },
-                  "manifest_path": {
-                    "type": "string"
-                  },
                   "redacted_manifest_path": {
                     "type": "string"
                   },
                   "blob_relative_path": {
-                    "type": "string"
-                  },
-                  "blob_path": {
                     "type": "string"
                   },
                   "redacted_blob_path": {
@@ -3257,9 +3410,6 @@
                       "string",
                       "null"
                     ]
-                  },
-                  "original_path": {
-                    "type": "string"
                   },
                   "redacted_original_path": {
                     "type": "string"
@@ -3287,6 +3437,52 @@
                   },
                   "encryption_state": {
                     "type": "string"
+                  },
+                  "compression": {
+                    "type": "object",
+                    "properties": {
+                      "state": {
+                        "type": "string"
+                      },
+                      "algorithm": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "uncompressed_size_bytes": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      }
+                    }
+                  },
+                  "encryption": {
+                    "type": "object",
+                    "properties": {
+                      "state": {
+                        "type": "string"
+                      },
+                      "algorithm": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "key_id": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "envelope_version": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      }
+                    }
                   },
                   "db_link_count": {
                     "type": "integer"
@@ -3328,9 +3524,10 @@
           "required": [
             "schema_version",
             "status",
-            "root_path",
             "redacted_root_path",
             "exists",
+            "sensitive_paths_included",
+            "raw_content_included",
             "layout",
             "policy",
             "summary",

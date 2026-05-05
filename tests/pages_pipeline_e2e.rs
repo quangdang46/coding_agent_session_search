@@ -149,6 +149,79 @@ fn test_pages_pipeline_decrypt_roundtrip() {
 }
 
 #[test]
+fn test_pages_bundle_excludes_raw_mirror_artifacts_by_default() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_path = temp_dir.path().join("export.db");
+    fs::write(&input_path, b"export database bytes").expect("write export db fixture");
+
+    let encrypt_dir = temp_dir.path().join("encrypt_staging");
+    let mut enc_engine = EncryptionEngine::new(1024 * 1024).expect("valid chunk size");
+    enc_engine
+        .add_password_slot(TEST_PASSWORD)
+        .expect("add password slot");
+    enc_engine
+        .encrypt_file(&input_path, &encrypt_dir, |_, _| {})
+        .expect("encrypt fixture");
+
+    let raw_secret = b"PAGES_RAW_MIRROR_SECRET_SHOULD_NOT_LEAK";
+    let raw_mirror_root = encrypt_dir.join("raw-mirror").join("v1");
+    let raw_mirror_blob = raw_mirror_root
+        .join("blobs")
+        .join("blake3")
+        .join("aa")
+        .join("secret.raw");
+    fs::create_dir_all(raw_mirror_blob.parent().expect("raw mirror blob parent"))
+        .expect("create raw mirror blob dir");
+    fs::write(&raw_mirror_blob, raw_secret).expect("write raw mirror blob fixture");
+
+    let raw_mirror_manifest = raw_mirror_root.join("manifests").join("secret.json");
+    fs::create_dir_all(
+        raw_mirror_manifest
+            .parent()
+            .expect("raw mirror manifest parent"),
+    )
+    .expect("create raw mirror manifest dir");
+    fs::write(
+        &raw_mirror_manifest,
+        br#"{"original_path":"/secret/project/session.jsonl","content":"PAGES_RAW_MIRROR_SECRET_SHOULD_NOT_LEAK"}"#,
+    )
+    .expect("write raw mirror manifest fixture");
+
+    let bundle_dir = temp_dir.path().join("bundle");
+    let bundle = BundleBuilder::new()
+        .title("Raw Mirror Privacy")
+        .description("Raw mirror privacy regression")
+        .generate_qr(false)
+        .build(&encrypt_dir, &bundle_dir, |_, _| {})
+        .expect("build pages bundle");
+
+    assert!(
+        !bundle.site_dir.join("raw-mirror").exists(),
+        "public Pages site must not copy raw mirror directories"
+    );
+    assert!(
+        !bundle.private_dir.join("raw-mirror").exists(),
+        "private Pages helper artifacts must not copy raw mirror directories by default"
+    );
+
+    for entry in walkdir::WalkDir::new(&bundle_dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+    {
+        let bytes = fs::read(entry.path()).expect("read generated bundle file");
+        assert!(
+            !bytes
+                .windows(raw_secret.len())
+                .any(|window| window == raw_secret),
+            "raw mirror bytes leaked into {}",
+            entry.path().display()
+        );
+    }
+}
+
+#[test]
 fn test_pages_config_validate_cli() {
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join("pages-config.json");

@@ -43,6 +43,8 @@ commands:
                     doctor JSON includes source_inventory; missing upstream provider files are
                     source coverage/prune-risk warnings, not proof that archived cass rows are lost.
                     raw_mirror defines/verifies the content-addressed raw session evidence layout.
+                    raw_mirror.policy states the privacy boundary: default robot JSON, logs,
+                    support bundles, HTML exports, and Pages exports do not include raw bytes or exact source paths.
   cass introspect [--json]         Full API schema: commands, arguments, response_schemas (alphabetical).
   cass api-version [--json]        Show crate_version + api_version + contract_version.
   cass state [--json]              Alias of `cass status` (index/db/rebuild/semantic readiness).

@@ -7304,6 +7304,8 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "                    doctor JSON includes source_inventory; missing upstream provider files are".to_string(),
             "                    source coverage/prune-risk warnings, not proof that archived cass rows are lost.".to_string(),
             "                    raw_mirror defines/verifies the content-addressed raw session evidence layout.".to_string(),
+            "                    raw_mirror.policy states the privacy boundary: default robot JSON, logs,".to_string(),
+            "                    support bundles, HTML exports, and Pages exports do not include raw bytes or exact source paths.".to_string(),
             "  cass introspect [--json]         Full API schema: commands, arguments, response_schemas (alphabetical).".to_string(),
             "  cass api-version [--json]        Show crate_version + api_version + contract_version.".to_string(),
             "  cass state [--json]              Alias of `cass status` (index/db/rebuild/semantic readiness).".to_string(),
@@ -15702,9 +15704,13 @@ const DOCTOR_RAW_MIRROR_FILE_MODE: &str = "0600";
 struct DoctorRawMirrorReport {
     schema_version: u32,
     status: String,
+    #[serde(skip_serializing)]
+    #[allow(dead_code)]
     root_path: String,
     redacted_root_path: String,
     exists: bool,
+    sensitive_paths_included: bool,
+    raw_content_included: bool,
     layout: DoctorRawMirrorLayoutReport,
     policy: DoctorRawMirrorPolicyReport,
     summary: DoctorRawMirrorSummary,
@@ -15734,6 +15740,8 @@ struct DoctorRawMirrorPolicyReport {
     append_only: bool,
     global_dedup_by_content_hash: bool,
     never_overwrite_different_bytes: bool,
+    storage_scope: String,
+    local_only_by_default: bool,
     directory_mode_octal: &'static str,
     file_mode_octal: &'static str,
     enforce_private_files: bool,
@@ -15741,10 +15749,72 @@ struct DoctorRawMirrorPolicyReport {
     fsync_required: bool,
     path_traversal_defense: String,
     symlink_defense: String,
+    default_report_contract: String,
+    sensitive_output_policy: DoctorRawMirrorSensitiveOutputPolicyReport,
+    compression_policy: DoctorRawMirrorCodecPolicyReport,
+    encryption_policy: DoctorRawMirrorEncryptionPolicyReport,
+    backup_policy: DoctorRawMirrorBackupPolicyReport,
+    support_bundle_policy: DoctorRawMirrorSupportBundlePolicyReport,
+    public_export_policy: DoctorRawMirrorPublicExportPolicyReport,
     compression_contract: String,
     encryption_contract: String,
     support_bundle_redaction_contract: String,
     missing_upstream_semantics: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorRawMirrorSensitiveOutputPolicyReport {
+    default_includes_exact_paths: bool,
+    default_includes_raw_content: bool,
+    safe_metadata_fields: Vec<&'static str>,
+    redacted_by_default_fields: Vec<&'static str>,
+    opt_in_sensitive_modes: Vec<&'static str>,
+    redaction_marker_contract: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorRawMirrorCodecPolicyReport {
+    default_state: &'static str,
+    optional: bool,
+    allowed_states: Vec<&'static str>,
+    required_metadata_fields: Vec<&'static str>,
+    raw_content_hash_scope: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorRawMirrorEncryptionPolicyReport {
+    default_state: &'static str,
+    optional: bool,
+    allowed_states: Vec<&'static str>,
+    required_metadata_fields: Vec<&'static str>,
+    key_material_reporting: &'static str,
+    integrity_contract: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorRawMirrorBackupPolicyReport {
+    included_in_default_backup: bool,
+    backup_mode: &'static str,
+    backup_contents: Vec<&'static str>,
+    restore_precondition: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorRawMirrorSupportBundlePolicyReport {
+    default_mode: &'static str,
+    include_manifest_metadata: bool,
+    include_blob_bytes: bool,
+    include_exact_paths: bool,
+    sensitive_attachment_gate: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorRawMirrorPublicExportPolicyReport {
+    pages_exports_include_raw_mirror: bool,
+    html_exports_include_raw_mirror: bool,
+    default_logs_include_raw_content: bool,
+    default_robot_json_includes_raw_content: bool,
+    public_artifact_contract: String,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -15764,9 +15834,12 @@ struct DoctorRawMirrorSummary {
 #[derive(Debug, Clone, Serialize)]
 struct DoctorRawMirrorManifestReport {
     manifest_id: String,
+    #[serde(skip_serializing)]
     manifest_path: String,
     redacted_manifest_path: String,
     blob_relative_path: String,
+    #[serde(skip_serializing)]
+    #[allow(dead_code)]
     blob_path: String,
     redacted_blob_path: String,
     blob_blake3: String,
@@ -15775,6 +15848,8 @@ struct DoctorRawMirrorManifestReport {
     source_id: String,
     origin_kind: String,
     origin_host: Option<String>,
+    #[serde(skip_serializing)]
+    #[allow(dead_code)]
     original_path: String,
     redacted_original_path: String,
     original_path_blake3: String,
@@ -15783,6 +15858,8 @@ struct DoctorRawMirrorManifestReport {
     source_size_bytes: Option<u64>,
     compression_state: String,
     encryption_state: String,
+    compression: DoctorRawMirrorCompressionEnvelope,
+    encryption: DoctorRawMirrorEncryptionEnvelope,
     db_link_count: usize,
     upstream_path_exists: Option<bool>,
     status: String,
@@ -15922,6 +15999,8 @@ fn doctor_raw_mirror_policy_report() -> DoctorRawMirrorPolicyReport {
         append_only: true,
         global_dedup_by_content_hash: true,
         never_overwrite_different_bytes: true,
+        storage_scope: "local cass data directory only; raw mirror bytes are not synced, published, or attached by default".to_string(),
+        local_only_by_default: true,
         directory_mode_octal: DOCTOR_RAW_MIRROR_DIR_MODE,
         file_mode_octal: DOCTOR_RAW_MIRROR_FILE_MODE,
         enforce_private_files: true,
@@ -15929,6 +16008,102 @@ fn doctor_raw_mirror_policy_report() -> DoctorRawMirrorPolicyReport {
         fsync_required: true,
         path_traversal_defense: "manifest blob paths must be relative normal components under raw-mirror/v1 and may not contain absolute paths, prefixes, dot-dot, or empty components".to_string(),
         symlink_defense: "doctor verification refuses symlinked blob or manifest paths and never follows symlinks while validating mirror evidence".to_string(),
+        default_report_contract: "default doctor reports expose redacted paths, content hashes, sizes, timestamps, provider/source identity, and codec/encryption metadata; exact paths and raw bytes stay internal unless a future explicit sensitive-evidence mode requests them".to_string(),
+        sensitive_output_policy: DoctorRawMirrorSensitiveOutputPolicyReport {
+            default_includes_exact_paths: false,
+            default_includes_raw_content: false,
+            safe_metadata_fields: vec![
+                "manifest_id",
+                "redacted_manifest_path",
+                "blob_relative_path",
+                "redacted_blob_path",
+                "blob_blake3",
+                "blob_size_bytes",
+                "provider",
+                "source_id",
+                "origin_kind",
+                "origin_host",
+                "redacted_original_path",
+                "original_path_blake3",
+                "captured_at_ms",
+                "source_mtime_ms",
+                "source_size_bytes",
+                "compression_state",
+                "encryption_state",
+                "compression",
+                "encryption",
+                "db_link_count",
+                "upstream_path_exists",
+                "status",
+                "blob_checksum_status",
+                "manifest_checksum_status",
+                "invalid_reason",
+            ],
+            redacted_by_default_fields: vec![
+                "root_path",
+                "manifest_path",
+                "blob_path",
+                "original_path",
+                "db_links.source_path",
+                "raw_session_content",
+                "attachment_payloads",
+                "environment_secrets",
+            ],
+            opt_in_sensitive_modes: vec![
+                "future --include-sensitive-evidence",
+                "future support-bundle --include-raw-mirror-bytes",
+                "future doctor evidence export with explicit fingerprint",
+            ],
+            redaction_marker_contract: "cass data dir paths are rendered as [cass-data]/... and external source paths as [external]/<file-name>; raw content is never replaced with a preview or snippet".to_string(),
+        },
+        compression_policy: DoctorRawMirrorCodecPolicyReport {
+            default_state: "none",
+            optional: true,
+            allowed_states: vec!["none", "compressed"],
+            required_metadata_fields: vec![
+                "state",
+                "algorithm",
+                "uncompressed_size_bytes",
+            ],
+            raw_content_hash_scope: "blob_blake3 always names the stored bytes; compression metadata must preserve the uncompressed byte count for future verification",
+        },
+        encryption_policy: DoctorRawMirrorEncryptionPolicyReport {
+            default_state: "none",
+            optional: true,
+            allowed_states: vec!["none", "encrypted"],
+            required_metadata_fields: vec![
+                "state",
+                "algorithm",
+                "key_id",
+                "envelope_version",
+            ],
+            key_material_reporting: "key material, passphrases, nonces, and decrypted previews must never appear in reports or support bundles",
+            integrity_contract: "encryption envelopes are metadata only; manifest identity, blob hash, and verification records must still make tampering detectable without decrypting in default doctor checks".to_string(),
+        },
+        backup_policy: DoctorRawMirrorBackupPolicyReport {
+            included_in_default_backup: true,
+            backup_mode: "manifest-and-blob-copy",
+            backup_contents: vec![
+                "raw-mirror/v1/manifests",
+                "raw-mirror/v1/blobs",
+                "raw-mirror/v1/verification",
+            ],
+            restore_precondition: "restore must verify manifests, blob checksums, and sidecar completeness before trusting backed-up raw mirror evidence".to_string(),
+        },
+        support_bundle_policy: DoctorRawMirrorSupportBundlePolicyReport {
+            default_mode: "manifest-only",
+            include_manifest_metadata: true,
+            include_blob_bytes: false,
+            include_exact_paths: false,
+            sensitive_attachment_gate: "explicit sensitive-evidence opt-in plus plan fingerprint; not available through default doctor --json",
+        },
+        public_export_policy: DoctorRawMirrorPublicExportPolicyReport {
+            pages_exports_include_raw_mirror: false,
+            html_exports_include_raw_mirror: false,
+            default_logs_include_raw_content: false,
+            default_robot_json_includes_raw_content: false,
+            public_artifact_contract: "Pages, HTML exports, robot logs, and default support bundles must not include raw mirror bytes, exact source paths, prompts, attachment payloads, or decrypted/encrypted evidence blobs".to_string(),
+        },
         compression_contract: "v1 stores plain bytes by default; future compression must be declared in the compression envelope and preserve uncompressed size/hash metadata".to_string(),
         encryption_contract: "v1 stores unencrypted local evidence by default; future encryption must be explicit in the encryption envelope and must not weaken manifest integrity checks".to_string(),
         support_bundle_redaction_contract: "support bundles use redacted_original_path and original_path_blake3; raw bytes are not exported unless an operator explicitly asks for evidence export".to_string(),
@@ -16085,6 +16260,14 @@ fn doctor_raw_mirror_invalid_manifest_report(
         source_size_bytes: None,
         compression_state: "unknown".to_string(),
         encryption_state: "unknown".to_string(),
+        compression: DoctorRawMirrorCompressionEnvelope {
+            state: "unknown".to_string(),
+            ..DoctorRawMirrorCompressionEnvelope::default()
+        },
+        encryption: DoctorRawMirrorEncryptionEnvelope {
+            state: "unknown".to_string(),
+            ..DoctorRawMirrorEncryptionEnvelope::default()
+        },
         db_link_count: 0,
         upstream_path_exists: None,
         status: "invalid_manifest".to_string(),
@@ -16127,8 +16310,10 @@ fn doctor_raw_mirror_loaded_invalid_manifest_report(
         captured_at_ms: manifest.captured_at_ms,
         source_mtime_ms: manifest.source_mtime_ms,
         source_size_bytes: manifest.source_size_bytes,
-        compression_state: manifest.compression.state,
-        encryption_state: manifest.encryption.state,
+        compression_state: manifest.compression.state.clone(),
+        encryption_state: manifest.encryption.state.clone(),
+        compression: manifest.compression,
+        encryption: manifest.encryption,
         db_link_count: doctor_raw_mirror_unique_db_links(&manifest.db_links).len(),
         upstream_path_exists: if manifest.original_path.trim().is_empty() {
             None
@@ -16335,8 +16520,10 @@ fn doctor_verify_raw_mirror_manifest(
         captured_at_ms: manifest.captured_at_ms,
         source_mtime_ms: manifest.source_mtime_ms,
         source_size_bytes: manifest.source_size_bytes,
-        compression_state: manifest.compression.state,
-        encryption_state: manifest.encryption.state,
+        compression_state: manifest.compression.state.clone(),
+        encryption_state: manifest.encryption.state.clone(),
+        compression: manifest.compression,
+        encryption: manifest.encryption,
         db_link_count: doctor_raw_mirror_unique_db_links(&manifest.db_links).len(),
         upstream_path_exists: if manifest.original_path.trim().is_empty() {
             None
@@ -16368,6 +16555,8 @@ fn collect_doctor_raw_mirror_report(data_dir: &Path) -> DoctorRawMirrorReport {
         root_path: root_path.clone(),
         redacted_root_path: doctor_redacted_path(&root_path, data_dir),
         exists: root.exists(),
+        sensitive_paths_included: false,
+        raw_content_included: false,
         layout: doctor_raw_mirror_layout_report(),
         policy: doctor_raw_mirror_policy_report(),
         summary: DoctorRawMirrorSummary::default(),
@@ -25942,6 +26131,29 @@ mod doctor_asset_taxonomy_tests {
             policy.path_traversal_defense.contains("dot-dot")
                 && policy.symlink_defense.contains("refuses symlinked")
         );
+        assert!(policy.local_only_by_default);
+        assert!(
+            policy
+                .storage_scope
+                .contains("local cass data directory only")
+        );
+        assert!(!policy.sensitive_output_policy.default_includes_exact_paths);
+        assert!(!policy.sensitive_output_policy.default_includes_raw_content);
+        assert!(
+            policy
+                .sensitive_output_policy
+                .redacted_by_default_fields
+                .contains(&"original_path")
+        );
+        assert!(policy.support_bundle_policy.include_manifest_metadata);
+        assert!(!policy.support_bundle_policy.include_blob_bytes);
+        assert!(!policy.support_bundle_policy.include_exact_paths);
+        assert!(!policy.public_export_policy.pages_exports_include_raw_mirror);
+        assert!(!policy.public_export_policy.html_exports_include_raw_mirror);
+        assert_eq!(policy.compression_policy.default_state, "none");
+        assert!(policy.compression_policy.optional);
+        assert_eq!(policy.encryption_policy.default_state, "none");
+        assert!(policy.encryption_policy.optional);
 
         let layout = doctor_raw_mirror_layout_report();
         assert_eq!(layout.root_relative_path, "raw-mirror/v1");
@@ -25949,6 +26161,78 @@ mod doctor_asset_taxonomy_tests {
             layout
                 .case_insensitive_collision_behavior
                 .contains("path identity is hashed")
+        );
+    }
+
+    #[test]
+    fn raw_mirror_report_serializes_redacted_manifest_metadata_only_by_default() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = temp.path().join("cass-data");
+        let source_path = temp
+            .path()
+            .join("workspace-with-secrets")
+            .join("private-session-with-token.jsonl");
+        let raw_bytes = b"RAW_MIRROR_SECRET_PROMPT_SHOULD_NOT_LEAK";
+        let mut manifest = raw_mirror_test_manifest(
+            &data_dir,
+            "codex",
+            "local",
+            &source_path,
+            raw_bytes,
+            Vec::new(),
+        );
+        manifest.compression = DoctorRawMirrorCompressionEnvelope {
+            state: "compressed".to_string(),
+            algorithm: Some("zstd".to_string()),
+            uncompressed_size_bytes: Some(raw_bytes.len() as u64),
+        };
+        manifest.encryption = DoctorRawMirrorEncryptionEnvelope {
+            state: "encrypted".to_string(),
+            algorithm: Some("aes-256-gcm".to_string()),
+            key_id: Some("local-key-1".to_string()),
+            envelope_version: Some(1),
+        };
+        manifest.manifest_blake3 = Some(doctor_raw_mirror_manifest_blake3(&manifest));
+        write_raw_mirror_test_manifest(&data_dir, &manifest, raw_bytes);
+
+        let report = collect_doctor_raw_mirror_report(&data_dir);
+        let payload = serde_json::to_value(&report).expect("raw mirror report json");
+        let rendered = serde_json::to_string(&payload).expect("raw mirror rendered json");
+
+        assert_eq!(payload["sensitive_paths_included"].as_bool(), Some(false));
+        assert_eq!(payload["raw_content_included"].as_bool(), Some(false));
+        assert!(
+            payload.get("root_path").is_none(),
+            "exact raw mirror root path must not serialize by default: {payload:#}"
+        );
+        let manifest_payload = &payload["manifests"][0];
+        assert!(manifest_payload.get("manifest_path").is_none());
+        assert!(manifest_payload.get("blob_path").is_none());
+        assert!(manifest_payload.get("original_path").is_none());
+        assert_eq!(
+            manifest_payload["redacted_original_path"].as_str(),
+            Some("[external]/private-session-with-token.jsonl")
+        );
+        assert_eq!(
+            manifest_payload["compression"]["state"].as_str(),
+            Some("compressed")
+        );
+        assert_eq!(
+            manifest_payload["compression"]["algorithm"].as_str(),
+            Some("zstd")
+        );
+        assert_eq!(
+            manifest_payload["encryption"]["state"].as_str(),
+            Some("encrypted")
+        );
+        assert_eq!(
+            manifest_payload["encryption"]["algorithm"].as_str(),
+            Some("aes-256-gcm")
+        );
+        assert!(!rendered.contains("RAW_MIRROR_SECRET_PROMPT_SHOULD_NOT_LEAK"));
+        assert!(
+            !rendered.contains(&source_path.display().to_string()),
+            "default raw mirror report must not serialize the exact source path"
         );
     }
 
@@ -33812,9 +34096,10 @@ fn response_schema_doctor_raw_mirror() -> serde_json::Value {
         "properties": {
             "schema_version": { "type": "integer" },
             "status": { "type": "string" },
-            "root_path": { "type": "string" },
             "redacted_root_path": { "type": "string" },
             "exists": { "type": "boolean" },
+            "sensitive_paths_included": { "type": "boolean" },
+            "raw_content_included": { "type": "boolean" },
             "layout": {
                 "type": "object",
                 "properties": {
@@ -33838,6 +34123,8 @@ fn response_schema_doctor_raw_mirror() -> serde_json::Value {
                     "append_only": { "type": "boolean" },
                     "global_dedup_by_content_hash": { "type": "boolean" },
                     "never_overwrite_different_bytes": { "type": "boolean" },
+                    "storage_scope": { "type": "string" },
+                    "local_only_by_default": { "type": "boolean" },
                     "directory_mode_octal": { "type": "string" },
                     "file_mode_octal": { "type": "string" },
                     "enforce_private_files": { "type": "boolean" },
@@ -33845,6 +34132,68 @@ fn response_schema_doctor_raw_mirror() -> serde_json::Value {
                     "fsync_required": { "type": "boolean" },
                     "path_traversal_defense": { "type": "string" },
                     "symlink_defense": { "type": "string" },
+                    "default_report_contract": { "type": "string" },
+                    "sensitive_output_policy": {
+                        "type": "object",
+                        "properties": {
+                            "default_includes_exact_paths": { "type": "boolean" },
+                            "default_includes_raw_content": { "type": "boolean" },
+                            "safe_metadata_fields": { "type": "array", "items": { "type": "string" } },
+                            "redacted_by_default_fields": { "type": "array", "items": { "type": "string" } },
+                            "opt_in_sensitive_modes": { "type": "array", "items": { "type": "string" } },
+                            "redaction_marker_contract": { "type": "string" }
+                        }
+                    },
+                    "compression_policy": {
+                        "type": "object",
+                        "properties": {
+                            "default_state": { "type": "string" },
+                            "optional": { "type": "boolean" },
+                            "allowed_states": { "type": "array", "items": { "type": "string" } },
+                            "required_metadata_fields": { "type": "array", "items": { "type": "string" } },
+                            "raw_content_hash_scope": { "type": "string" }
+                        }
+                    },
+                    "encryption_policy": {
+                        "type": "object",
+                        "properties": {
+                            "default_state": { "type": "string" },
+                            "optional": { "type": "boolean" },
+                            "allowed_states": { "type": "array", "items": { "type": "string" } },
+                            "required_metadata_fields": { "type": "array", "items": { "type": "string" } },
+                            "key_material_reporting": { "type": "string" },
+                            "integrity_contract": { "type": "string" }
+                        }
+                    },
+                    "backup_policy": {
+                        "type": "object",
+                        "properties": {
+                            "included_in_default_backup": { "type": "boolean" },
+                            "backup_mode": { "type": "string" },
+                            "backup_contents": { "type": "array", "items": { "type": "string" } },
+                            "restore_precondition": { "type": "string" }
+                        }
+                    },
+                    "support_bundle_policy": {
+                        "type": "object",
+                        "properties": {
+                            "default_mode": { "type": "string" },
+                            "include_manifest_metadata": { "type": "boolean" },
+                            "include_blob_bytes": { "type": "boolean" },
+                            "include_exact_paths": { "type": "boolean" },
+                            "sensitive_attachment_gate": { "type": "string" }
+                        }
+                    },
+                    "public_export_policy": {
+                        "type": "object",
+                        "properties": {
+                            "pages_exports_include_raw_mirror": { "type": "boolean" },
+                            "html_exports_include_raw_mirror": { "type": "boolean" },
+                            "default_logs_include_raw_content": { "type": "boolean" },
+                            "default_robot_json_includes_raw_content": { "type": "boolean" },
+                            "public_artifact_contract": { "type": "string" }
+                        }
+                    },
                     "compression_contract": { "type": "string" },
                     "encryption_contract": { "type": "string" },
                     "support_bundle_redaction_contract": { "type": "string" },
@@ -33872,10 +34221,8 @@ fn response_schema_doctor_raw_mirror() -> serde_json::Value {
                     "type": "object",
                     "properties": {
                         "manifest_id": { "type": "string" },
-                        "manifest_path": { "type": "string" },
                         "redacted_manifest_path": { "type": "string" },
                         "blob_relative_path": { "type": "string" },
-                        "blob_path": { "type": "string" },
                         "redacted_blob_path": { "type": "string" },
                         "blob_blake3": { "type": "string" },
                         "blob_size_bytes": { "type": "integer" },
@@ -33883,7 +34230,6 @@ fn response_schema_doctor_raw_mirror() -> serde_json::Value {
                         "source_id": { "type": "string" },
                         "origin_kind": { "type": "string" },
                         "origin_host": { "type": ["string", "null"] },
-                        "original_path": { "type": "string" },
                         "redacted_original_path": { "type": "string" },
                         "original_path_blake3": { "type": "string" },
                         "captured_at_ms": { "type": "integer" },
@@ -33891,6 +34237,23 @@ fn response_schema_doctor_raw_mirror() -> serde_json::Value {
                         "source_size_bytes": { "type": ["integer", "null"] },
                         "compression_state": { "type": "string" },
                         "encryption_state": { "type": "string" },
+                        "compression": {
+                            "type": "object",
+                            "properties": {
+                                "state": { "type": "string" },
+                                "algorithm": { "type": ["string", "null"] },
+                                "uncompressed_size_bytes": { "type": ["integer", "null"] }
+                            }
+                        },
+                        "encryption": {
+                            "type": "object",
+                            "properties": {
+                                "state": { "type": "string" },
+                                "algorithm": { "type": ["string", "null"] },
+                                "key_id": { "type": ["string", "null"] },
+                                "envelope_version": { "type": ["integer", "null"] }
+                            }
+                        },
                         "db_link_count": { "type": "integer" },
                         "upstream_path_exists": { "type": ["boolean", "null"] },
                         "status": { "type": "string" },
@@ -33906,9 +34269,10 @@ fn response_schema_doctor_raw_mirror() -> serde_json::Value {
         "required": [
             "schema_version",
             "status",
-            "root_path",
             "redacted_root_path",
             "exists",
+            "sensitive_paths_included",
+            "raw_content_included",
             "layout",
             "policy",
             "summary",

@@ -180,21 +180,31 @@ schemas: (auto-generated from contract)
       - policy: object
         - append_only: boolean
         - atomic_publish: string
+        - backup_policy: object
         - compression_contract: string
+        - compression_policy: object
+        - default_report_contract: string
         - directory_mode_octal: string
         - encryption_contract: string
+        - encryption_policy: object
         - enforce_private_files: boolean
         - file_mode_octal: string
         - fsync_required: boolean
         - global_dedup_by_content_hash: boolean
+        - local_only_by_default: boolean
         - missing_upstream_semantics: string
         - never_overwrite_different_bytes: boolean
         - path_traversal_defense: string
+        - public_export_policy: object
+        - sensitive_output_policy: object
+        - storage_scope: string
+        - support_bundle_policy: object
         - support_bundle_redaction_contract: string
         - symlink_defense: string
+      - raw_content_included: boolean
       - redacted_root_path: string
-      - root_path: string
       - schema_version: integer
+      - sensitive_paths_included: boolean
       - status: string
       - summary: object
         - checksum_mismatch_count: integer

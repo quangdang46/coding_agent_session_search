@@ -1370,8 +1370,9 @@ fn doctor_json_verifies_raw_mirror_after_upstream_source_is_pruned() {
     let data_dir = test_home.join("cass-data");
     seed_healthy_empty_index(test_home, &data_dir);
 
-    let missing_source = test_home.join(".codex/sessions/pruned-session.jsonl");
-    let mirrored_bytes = b"{\"type\":\"message\",\"role\":\"user\",\"content\":\"preserved\"}\n";
+    let missing_source = test_home.join(".codex/sessions/secret-project/pruned-session.jsonl");
+    let mirrored_bytes =
+        b"{\"type\":\"message\",\"role\":\"user\",\"content\":\"RAW_MIRROR_SECRET_PROMPT\"}\n";
     let manifest = write_raw_mirror_fixture(
         &data_dir,
         "codex",
@@ -1436,9 +1437,28 @@ fn doctor_json_verifies_raw_mirror_after_upstream_source_is_pruned() {
         "doctor must verify mirror evidence without recreating the pruned upstream path"
     );
 
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("RAW_MIRROR_SECRET_PROMPT"),
+        "default doctor robot JSON must not contain raw mirrored session bytes"
+    );
+    assert!(
+        !stdout.contains(&missing_source.display().to_string()),
+        "default doctor robot JSON must not contain exact raw source paths"
+    );
+
     let payload: Value = serde_json::from_slice(&out.stdout).expect("doctor json");
     let raw_mirror = &payload["raw_mirror"];
     assert_eq!(raw_mirror["status"].as_str(), Some("verified"));
+    assert_eq!(
+        raw_mirror["sensitive_paths_included"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(raw_mirror["raw_content_included"].as_bool(), Some(false));
+    assert!(
+        raw_mirror.get("root_path").is_none(),
+        "raw mirror exact root path should not serialize in default robot JSON: {raw_mirror:#}"
+    );
     assert_eq!(raw_mirror["summary"]["manifest_count"].as_u64(), Some(1));
     assert_eq!(
         raw_mirror["summary"]["verified_blob_count"].as_u64(),
@@ -1458,6 +1478,46 @@ fn doctor_json_verifies_raw_mirror_after_upstream_source_is_pruned() {
     );
     assert_eq!(
         raw_mirror["manifests"][0]["upstream_path_exists"].as_bool(),
+        Some(false)
+    );
+    assert!(
+        raw_mirror["manifests"][0].get("manifest_path").is_none(),
+        "exact manifest paths are internal-only in default raw mirror reports"
+    );
+    assert!(
+        raw_mirror["manifests"][0].get("blob_path").is_none(),
+        "exact blob paths are internal-only in default raw mirror reports"
+    );
+    assert!(
+        raw_mirror["manifests"][0].get("original_path").is_none(),
+        "exact original source paths are internal-only in default raw mirror reports"
+    );
+    assert_eq!(
+        raw_mirror["manifests"][0]["redacted_original_path"].as_str(),
+        Some("[external]/pruned-session.jsonl")
+    );
+    assert_eq!(
+        raw_mirror["manifests"][0]["compression"]["state"].as_str(),
+        Some("none")
+    );
+    assert_eq!(
+        raw_mirror["manifests"][0]["encryption"]["state"].as_str(),
+        Some("none")
+    );
+    assert_eq!(
+        raw_mirror["policy"]["support_bundle_policy"]["default_mode"].as_str(),
+        Some("manifest-only")
+    );
+    assert_eq!(
+        raw_mirror["policy"]["support_bundle_policy"]["include_blob_bytes"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        raw_mirror["policy"]["public_export_policy"]["pages_exports_include_raw_mirror"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        raw_mirror["policy"]["public_export_policy"]["html_exports_include_raw_mirror"].as_bool(),
         Some(false)
     );
 
