@@ -19527,12 +19527,22 @@ fn execute_doctor_copy_file_to_staging(
         .precondition_checks
         .push("target_path_confined_to_staging_root".to_string());
 
-    if request.target_path.exists() {
-        receipt.blocked_reasons.push(format!(
-            "refusing to overwrite existing staging target {}",
-            request.target_path.display()
-        ));
-        return receipt;
+    match std::fs::symlink_metadata(request.target_path) {
+        Ok(_) => {
+            receipt.blocked_reasons.push(format!(
+                "refusing to overwrite existing staging target {}",
+                request.target_path.display()
+            ));
+            return receipt;
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => {
+            receipt.blocked_reasons.push(format!(
+                "refusing to copy staging target {}: could not verify target absence: {err}",
+                request.target_path.display()
+            ));
+            return receipt;
+        }
     }
     receipt
         .precondition_checks
@@ -23174,6 +23184,81 @@ mod cleanup_target_safety_tests {
         assert!(
             !outside_parent.join("candidate.raw").exists(),
             "executor must not write through a symlinked staging parent"
+        );
+    }
+
+    #[test]
+    fn doctor_fs_mutation_executor_rejects_symlinked_copy_target_even_when_broken() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let data_dir = temp.path().join("cass-data");
+        let index_path = data_dir.join("index").join("live-generation");
+        std::fs::create_dir_all(&index_path).expect("create live index");
+        let db_path = data_dir.join("agent_search.db");
+        std::fs::write(&db_path, b"sqlite placeholder").expect("write db placeholder");
+
+        let source_path = data_dir.join("raw-mirror").join("source.raw");
+        let source_bytes = b"raw mirror bytes";
+        std::fs::create_dir_all(source_path.parent().expect("source parent"))
+            .expect("create source parent");
+        std::fs::write(&source_path, source_bytes).expect("write source");
+        let expected_source_blake3 = blake3::hash(source_bytes).to_hex().to_string();
+
+        let staging_root = data_dir.join("doctor-staging").join("op-target-symlink");
+        std::fs::create_dir_all(&staging_root).expect("create staging root");
+        let outside_target = temp
+            .path()
+            .join("outside-created-through-broken-symlink.raw");
+        let target_path = staging_root.join("candidate.raw");
+        std::os::unix::fs::symlink(&outside_target, &target_path)
+            .expect("create broken symlink as staging target");
+        assert!(
+            !target_path.exists(),
+            "regression setup expects Path::exists to miss the broken symlink"
+        );
+
+        let receipt = execute_doctor_fs_mutation(DoctorFsMutationRequest {
+            operation_id: "reconstruct-promote-copy-source",
+            action_id: "copy-symlinked-staging-target",
+            mutation_kind: DoctorFsMutationKind::CopyFileToStaging,
+            mode: DoctorRepairMode::ReconstructPromote,
+            asset_class: DoctorAssetClass::RawMirrorBlob,
+            source_path: Some(&source_path),
+            target_path: &target_path,
+            data_dir: &data_dir,
+            db_path: &db_path,
+            index_path: &index_path,
+            staging_root: Some(&staging_root),
+            expected_source_blake3: Some(&expected_source_blake3),
+            planned_bytes: source_bytes.len() as u64,
+            required_min_age_seconds: None,
+        });
+
+        assert_eq!(receipt.status, DoctorActionStatus::Blocked);
+        assert!(
+            receipt
+                .blocked_reasons
+                .iter()
+                .any(|reason| reason.contains("overwrite existing staging target")),
+            "executor must treat symlink targets as existing targets even when broken: {:?}",
+            receipt.blocked_reasons
+        );
+        assert!(
+            !receipt
+                .precondition_checks
+                .iter()
+                .any(|check| check == "filesystem_copy_completed"),
+            "symlink target must not reach filesystem copy"
+        );
+        assert!(
+            std::fs::symlink_metadata(&target_path)
+                .expect("target symlink still exists")
+                .file_type()
+                .is_symlink(),
+            "blocked copy must leave the symlink untouched for operator inspection"
+        );
+        assert!(
+            !outside_target.exists(),
+            "copy must not create the broken symlink target outside staging"
         );
     }
 
