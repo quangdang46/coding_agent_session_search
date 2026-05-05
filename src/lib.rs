@@ -14601,42 +14601,7 @@ fn doctor_verify_raw_mirror_manifest(
     };
 
     if path_has_symlink_below_root(&blob_path, root) {
-        return DoctorRawMirrorManifestReport {
-            manifest_id: manifest.manifest_id,
-            manifest_path: manifest_path_string.clone(),
-            redacted_manifest_path: doctor_redacted_path(&manifest_path_string, data_dir),
-            blob_relative_path: manifest.blob_relative_path,
-            blob_path: blob_path_string.clone(),
-            redacted_blob_path: doctor_redacted_path(&blob_path_string, data_dir),
-            blob_blake3: manifest.blob_blake3,
-            blob_size_bytes: manifest.blob_size_bytes,
-            provider: doctor_normalized_provider_slug(&manifest.provider),
-            source_id: manifest.source_id,
-            origin_kind: manifest.origin_kind,
-            origin_host: manifest.origin_host,
-            original_path: manifest.original_path.clone(),
-            redacted_original_path: if manifest.redacted_original_path.trim().is_empty() {
-                doctor_redacted_path(&manifest.original_path, data_dir)
-            } else {
-                manifest.redacted_original_path
-            },
-            original_path_blake3: manifest.original_path_blake3,
-            captured_at_ms: manifest.captured_at_ms,
-            source_mtime_ms: manifest.source_mtime_ms,
-            source_size_bytes: manifest.source_size_bytes,
-            compression_state: manifest.compression.state,
-            encryption_state: manifest.encryption.state,
-            db_link_count: doctor_raw_mirror_unique_db_links(&manifest.db_links).len(),
-            upstream_path_exists: if manifest.original_path.trim().is_empty() {
-                None
-            } else {
-                Some(Path::new(&manifest.original_path).exists())
-            },
-            status: "invalid_manifest".to_string(),
-            blob_checksum_status: DoctorArtifactChecksumStatus::Mismatched,
-            manifest_checksum_status,
-            invalid_reason: Some("blob path contains a symlinked component".to_string()),
-        };
+        return invalid("blob path contains a symlinked component".to_string());
     }
 
     let (blob_checksum_status, status, invalid_reason) = match std::fs::symlink_metadata(&blob_path)
@@ -17379,6 +17344,58 @@ mod doctor_asset_taxonomy_tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn raw_mirror_report_rejects_blob_paths_with_symlinked_ancestors() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = temp.path().join("cass-data");
+        let root = doctor_raw_mirror_root(&data_dir);
+        std::fs::create_dir_all(&root).expect("create raw mirror root");
+
+        let source_path = data_dir.join("sessions/source.jsonl");
+        let bytes = b"{\"type\":\"message\",\"text\":\"outside blob\"}\n";
+        let manifest =
+            raw_mirror_test_manifest(&data_dir, "codex", "local", &source_path, bytes, Vec::new());
+
+        let outside_blob_root = temp.path().join("outside-blob-root");
+        let outside_blob_path = outside_blob_root.join(
+            manifest
+                .blob_relative_path
+                .strip_prefix("blobs/")
+                .expect("blob relative path prefix"),
+        );
+        std::fs::create_dir_all(outside_blob_path.parent().expect("outside blob parent"))
+            .expect("create outside blob parent");
+        std::fs::write(&outside_blob_path, bytes).expect("write outside blob");
+        std::os::unix::fs::symlink(&outside_blob_root, root.join("blobs"))
+            .expect("create symlinked blob root");
+
+        let manifest_path = root.join(doctor_raw_mirror_manifest_relative_path(
+            &manifest.manifest_id,
+        ));
+        std::fs::create_dir_all(manifest_path.parent().expect("manifest parent"))
+            .expect("create manifest parent");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).expect("manifest json"),
+        )
+        .expect("write raw mirror manifest");
+
+        let report = collect_doctor_raw_mirror_report(&data_dir);
+        assert_eq!(report.status, "warn");
+        assert_eq!(report.summary.manifest_count, 1);
+        assert_eq!(report.summary.invalid_manifest_count, 1);
+        assert_eq!(
+            report.manifests[0].invalid_reason.as_deref(),
+            Some("blob path contains a symlinked component"),
+            "raw mirror verification must not follow symlinked blob ancestors"
+        );
+        assert_eq!(
+            report.summary.verified_blob_count, 0,
+            "a blob reached through a symlinked parent must not count as verified evidence"
+        );
+    }
+
     #[test]
     fn doctor_plan_receipt_schema_report_names_required_contract_fields() {
         let schema = doctor_plan_receipt_schema_report();
@@ -17573,7 +17590,7 @@ mod cleanup_target_safety_tests {
     /// ancestors are all regular directories). 0a89a96a's two
     /// fixtures both put the symlink on an ANCESTOR — this test
     /// exercises the distinct symlink_metadata(path) == is_symlink
-    /// arm at the top of cleanup_path_has_symlink_below_root.
+    /// arm at the top of path_has_symlink_below_root.
     #[test]
     fn cleanup_target_safety_rejects_candidate_that_is_itself_a_symlink() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -17719,7 +17736,7 @@ mod cleanup_target_safety_tests {
         let root = temp.path();
 
         assert!(
-            cleanup_path_has_symlink_below_root(&nonexistent, root),
+            path_has_symlink_below_root(&nonexistent, root),
             "helper must fail-closed when an ancestor's symlink_metadata \
              read fails — canonicalize defense-in-depth can be removed \
              in a future refactor and the helper must stand on its own"
@@ -17739,7 +17756,7 @@ mod cleanup_target_safety_tests {
         let foreign_root = temp.path().join("sibling-that-the-walk-never-reaches");
 
         assert!(
-            cleanup_path_has_symlink_below_root(&candidate, &foreign_root),
+            path_has_symlink_below_root(&candidate, &foreign_root),
             "helper must fail-closed when the walk reaches filesystem root \
              without hitting the configured root — the None parent arm is a \
              safety failure, not a green light"
@@ -17757,7 +17774,7 @@ mod cleanup_target_safety_tests {
         std::fs::create_dir_all(&candidate).expect("create candidate");
 
         assert!(
-            !cleanup_path_has_symlink_below_root(&candidate, &root),
+            !path_has_symlink_below_root(&candidate, &root),
             "helper must still return false for clean walks that reach root \
              — the fail-closed fix must not regress the happy path"
         );
