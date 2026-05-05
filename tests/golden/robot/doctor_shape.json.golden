@@ -40,6 +40,41 @@
         "type": "unknown"
       }
     },
+    "asset_taxonomy": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "asset_class": {
+            "type": "string"
+          },
+          "safety_classification": {
+            "type": "string"
+          },
+          "derived": {
+            "type": "boolean"
+          },
+          "precious": {
+            "type": "boolean"
+          },
+          "auto_delete_allowed": {
+            "type": "boolean"
+          },
+          "safe_to_gc_allowed": {
+            "type": "boolean"
+          },
+          "allowed_operations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "notes": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "checks": {
       "type": "array",
       "items": {

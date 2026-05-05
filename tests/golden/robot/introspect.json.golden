@@ -2384,6 +2384,13 @@
             "type": "string"
           }
         },
+        "asset_taxonomy": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
         "quarantine": {
           "type": "object",
           "additionalProperties": true

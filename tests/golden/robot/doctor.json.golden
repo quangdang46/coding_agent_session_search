@@ -11,6 +11,401 @@
   "needs_rebuild": false,
   "auto_fix_applied": false,
   "auto_fix_actions": [],
+  "asset_taxonomy": [
+    {
+      "asset_class": "source_session_log",
+      "safety_classification": "precious_evidence",
+      "derived": false,
+      "precious": true,
+      "auto_delete_allowed": false,
+      "safe_to_gc_allowed": false,
+      "allowed_operations": [
+        "read",
+        "backup",
+        "copy",
+        "move_quarantine",
+        "normalize",
+        "redact",
+        "export",
+        "support_bundle"
+      ],
+      "notes": "Original provider session logs may be the only surviving archive copy."
+    },
+    {
+      "asset_class": "raw_mirror_blob",
+      "safety_classification": "precious_evidence",
+      "derived": false,
+      "precious": true,
+      "auto_delete_allowed": false,
+      "safe_to_gc_allowed": false,
+      "allowed_operations": [
+        "read",
+        "backup",
+        "copy",
+        "move_quarantine",
+        "normalize",
+        "redact",
+        "export",
+        "support_bundle"
+      ],
+      "notes": "Raw mirrors preserve original bytes for future parser recovery."
+    },
+    {
+      "asset_class": "canonical_archive_db",
+      "safety_classification": "canonical_archive",
+      "derived": false,
+      "precious": true,
+      "auto_delete_allowed": false,
+      "safe_to_gc_allowed": false,
+      "allowed_operations": [
+        "read",
+        "backup",
+        "copy",
+        "normalize",
+        "rebuild",
+        "restore",
+        "redact",
+        "export",
+        "support_bundle"
+      ],
+      "notes": "SQLite archive state is the source of truth for indexed conversations."
+    },
+    {
+      "asset_class": "archive_db_sidecar",
+      "safety_classification": "recoverable_sidecar",
+      "derived": false,
+      "precious": true,
+      "auto_delete_allowed": false,
+      "safe_to_gc_allowed": false,
+      "allowed_operations": [
+        "read",
+        "backup",
+        "copy",
+        "rebuild",
+        "restore",
+        "support_bundle"
+      ],
+      "notes": "WAL/SHM and related sidecars can contain uncheckpointed archive state."
+    },
+    {
+      "asset_class": "source_coverage_ledger",
+      "safety_classification": "audit_trail",
+      "derived": false,
+      "precious": true,
+      "auto_delete_allowed": false,
+      "safe_to_gc_allowed": false,
+      "allowed_operations": [
+        "read",
+        "backup",
+        "copy",
+        "redact",
+        "export",
+        "support_bundle"
+      ],
+      "notes": "Coverage ledgers explain which source paths have been mirrored or indexed."
+    },
+    {
+      "asset_class": "user_config",
+      "safety_classification": "user_configuration",
+      "derived": false,
+      "precious": true,
+      "auto_delete_allowed": false,
+      "safe_to_gc_allowed": false,
+      "allowed_operations": [
+        "read",
+        "backup",
+        "copy",
+        "restore",
+        "redact",
+        "export",
+        "support_bundle"
+      ],
+      "notes": "User configuration must be preserved unless an operator explicitly edits it."
+    },
+    {
+      "asset_class": "bookmark_store",
+      "safety_classification": "user_configuration",
+      "derived": false,
+      "precious": true,
+      "auto_delete_allowed": false,
+      "safe_to_gc_allowed": false,
+      "allowed_operations": [
+        "read",
+        "backup",
+        "copy",
+        "restore",
+        "redact",
+        "export",
+        "support_bundle"
+      ],
+      "notes": "Bookmarks are user-authored archive annotations."
+    },
+    {
+      "asset_class": "operation_receipt",
+      "safety_classification": "audit_trail",
+      "derived": false,
+      "precious": true,
+      "auto_delete_allowed": false,
+      "safe_to_gc_allowed": false,
+      "allowed_operations": [
+        "read",
+        "backup",
+        "copy",
+        "redact",
+        "export",
+        "support_bundle"
+      ],
+      "notes": "Receipts prove what doctor changed or refused to change."
+    },
+    {
+      "asset_class": "event_log",
+      "safety_classification": "audit_trail",
+      "derived": false,
+      "precious": true,
+      "auto_delete_allowed": false,
+      "safe_to_gc_allowed": false,
+      "allowed_operations": [
+        "read",
+        "backup",
+        "copy",
+        "redact",
+        "export",
+        "support_bundle"
+      ],
+      "notes": "Event logs are forensic breadcrumbs for repair and support."
+    },
+    {
+      "asset_class": "forensic_bundle",
+      "safety_classification": "diagnostic_evidence",
+      "derived": false,
+      "precious": true,
+      "auto_delete_allowed": false,
+      "safe_to_gc_allowed": false,
+      "allowed_operations": [
+        "read",
+        "backup",
+        "copy",
+        "redact",
+        "export",
+        "support_bundle"
+      ],
+      "notes": "Forensic bundles are captured evidence, not cleanup candidates."
+    },
+    {
+      "asset_class": "support_bundle",
+      "safety_classification": "diagnostic_evidence",
+      "derived": false,
+      "precious": true,
+      "auto_delete_allowed": false,
+      "safe_to_gc_allowed": false,
+      "allowed_operations": [
+        "read",
+        "backup",
+        "copy",
+        "redact",
+        "export",
+        "support_bundle"
+      ],
+      "notes": "Support bundles can be redacted and exported but never auto-pruned."
+    },
+    {
+      "asset_class": "backup_bundle",
+      "safety_classification": "backup_evidence",
+      "derived": false,
+      "precious": true,
+      "auto_delete_allowed": false,
+      "safe_to_gc_allowed": false,
+      "allowed_operations": [
+        "read",
+        "copy",
+        "restore",
+        "redact",
+        "export",
+        "support_bundle"
+      ],
+      "notes": "Backups may be the only rollback point after a failed repair."
+    },
+    {
+      "asset_class": "derived_lexical_index",
+      "safety_classification": "derived_rebuildable",
+      "derived": true,
+      "precious": false,
+      "auto_delete_allowed": false,
+      "safe_to_gc_allowed": false,
+      "allowed_operations": [
+        "read",
+        "backup",
+        "copy",
+        "move_quarantine",
+        "rebuild",
+        "support_bundle"
+      ],
+      "notes": "Live lexical indexes are derived but must be reclassified before pruning."
+    },
+    {
+      "asset_class": "derived_semantic_index",
+      "safety_classification": "derived_rebuildable",
+      "derived": true,
+      "precious": false,
+      "auto_delete_allowed": false,
+      "safe_to_gc_allowed": false,
+      "allowed_operations": [
+        "read",
+        "backup",
+        "copy",
+        "move_quarantine",
+        "rebuild",
+        "support_bundle"
+      ],
+      "notes": "Semantic indexes are derived and rebuildable but can be expensive to recreate."
+    },
+    {
+      "asset_class": "model_cache",
+      "safety_classification": "derived_rebuildable",
+      "derived": true,
+      "precious": false,
+      "auto_delete_allowed": false,
+      "safe_to_gc_allowed": false,
+      "allowed_operations": [
+        "read",
+        "backup",
+        "copy",
+        "move_quarantine",
+        "rebuild",
+        "support_bundle"
+      ],
+      "notes": "Model caches are opt-in downloads; do not silently delete them."
+    },
+    {
+      "asset_class": "memo_cache",
+      "safety_classification": "derived_reclaimable",
+      "derived": true,
+      "precious": false,
+      "auto_delete_allowed": true,
+      "safe_to_gc_allowed": true,
+      "allowed_operations": [
+        "read",
+        "backup",
+        "copy",
+        "move_quarantine",
+        "rebuild",
+        "prune_reclaim",
+        "support_bundle"
+      ],
+      "notes": "Memoization caches are derived and may be reclaimed when a plan proves safety."
+    },
+    {
+      "asset_class": "retained_publish_backup",
+      "safety_classification": "derived_reclaimable",
+      "derived": true,
+      "precious": false,
+      "auto_delete_allowed": true,
+      "safe_to_gc_allowed": true,
+      "allowed_operations": [
+        "read",
+        "backup",
+        "copy",
+        "move_quarantine",
+        "rebuild",
+        "prune_reclaim",
+        "support_bundle"
+      ],
+      "notes": "Bounded old lexical publish backups are derived rollback copies."
+    },
+    {
+      "asset_class": "failed_seed_bundle",
+      "safety_classification": "diagnostic_evidence",
+      "derived": false,
+      "precious": true,
+      "auto_delete_allowed": false,
+      "safe_to_gc_allowed": false,
+      "allowed_operations": [
+        "read",
+        "backup",
+        "copy",
+        "redact",
+        "export",
+        "support_bundle"
+      ],
+      "notes": "Failed seed bundles explain initialization failures and require inspection."
+    },
+    {
+      "asset_class": "quarantined_lexical_generation",
+      "safety_classification": "diagnostic_evidence",
+      "derived": true,
+      "precious": false,
+      "auto_delete_allowed": false,
+      "safe_to_gc_allowed": false,
+      "allowed_operations": [
+        "read",
+        "backup",
+        "copy",
+        "redact",
+        "export",
+        "support_bundle"
+      ],
+      "notes": "Quarantined generations are retained as evidence until inspection clears them."
+    },
+    {
+      "asset_class": "quarantined_lexical_shard",
+      "safety_classification": "diagnostic_evidence",
+      "derived": true,
+      "precious": false,
+      "auto_delete_allowed": false,
+      "safe_to_gc_allowed": false,
+      "allowed_operations": [
+        "read",
+        "backup",
+        "copy",
+        "redact",
+        "export",
+        "support_bundle"
+      ],
+      "notes": "Quarantined shards are retained as validation-failure evidence."
+    },
+    {
+      "asset_class": "reclaimable_derived_cache",
+      "safety_classification": "derived_reclaimable",
+      "derived": true,
+      "precious": false,
+      "auto_delete_allowed": true,
+      "safe_to_gc_allowed": true,
+      "allowed_operations": [
+        "read",
+        "backup",
+        "copy",
+        "move_quarantine",
+        "rebuild",
+        "prune_reclaim",
+        "support_bundle"
+      ],
+      "notes": "A repair planner may use this only after proving the artifact is derived and replaceable."
+    },
+    {
+      "asset_class": "external_upstream_source",
+      "safety_classification": "external_source",
+      "derived": false,
+      "precious": true,
+      "auto_delete_allowed": false,
+      "safe_to_gc_allowed": false,
+      "allowed_operations": [
+        "read",
+        "copy",
+        "support_bundle"
+      ],
+      "notes": "External provider stores are never owned by cass doctor cleanup."
+    },
+    {
+      "asset_class": "unknown",
+      "safety_classification": "unknown",
+      "derived": false,
+      "precious": true,
+      "auto_delete_allowed": false,
+      "safe_to_gc_allowed": false,
+      "allowed_operations": [],
+      "notes": "Unknown assets fail closed until a specific class is added to the taxonomy."
+    }
+  ],
   "checks": [
     {
       "name": "data_directory",

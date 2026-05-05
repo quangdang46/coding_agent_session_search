@@ -155,6 +155,12 @@
     },
     "quarantined_artifacts": [
       {
+        "asset_class": "failed_seed_bundle",
+        "safety_classification": "diagnostic_evidence",
+        "derived": false,
+        "precious": true,
+        "auto_delete_allowed": false,
+        "safe_to_gc_allowed": false,
         "artifact_kind": "failed_seed_bundle_file",
         "path": "[TEST_HOME]/cass-data/backups/agent_search.db.20260423T120000.12345.deadbeef.failed-baseline-seed.bak",
         "generation_id": null,
@@ -168,6 +174,12 @@
         "gc_reason": "failed baseline seed quarantine requires operator inspection"
       },
       {
+        "asset_class": "failed_seed_bundle",
+        "safety_classification": "diagnostic_evidence",
+        "derived": false,
+        "precious": true,
+        "auto_delete_allowed": false,
+        "safe_to_gc_allowed": false,
         "artifact_kind": "failed_seed_bundle_file",
         "path": "[TEST_HOME]/cass-data/backups/agent_search.db.20260423T120000.12345.deadbeef.failed-baseline-seed.bak-wal",
         "generation_id": null,
@@ -181,6 +193,12 @@
         "gc_reason": "failed baseline seed quarantine requires operator inspection"
       },
       {
+        "asset_class": "quarantined_lexical_generation",
+        "safety_classification": "diagnostic_evidence",
+        "derived": true,
+        "precious": false,
+        "auto_delete_allowed": false,
+        "safe_to_gc_allowed": false,
         "artifact_kind": "lexical_generation",
         "path": "[TEST_HOME]/cass-data/index/generation-quarantined",
         "generation_id": "gen-quarantined",
@@ -194,6 +212,12 @@
         "gc_reason": "cleanup dry-run requires inspection before garbage collection"
       },
       {
+        "asset_class": "quarantined_lexical_shard",
+        "safety_classification": "diagnostic_evidence",
+        "derived": true,
+        "precious": false,
+        "auto_delete_allowed": false,
+        "safe_to_gc_allowed": false,
         "artifact_kind": "lexical_shard",
         "path": "[TEST_HOME]/cass-data/index/generation-quarantined",
         "generation_id": "gen-quarantined",
@@ -209,6 +233,12 @@
     ],
     "failed_seed_bundle_files": [
       {
+        "asset_class": "failed_seed_bundle",
+        "safety_classification": "diagnostic_evidence",
+        "derived": false,
+        "precious": true,
+        "auto_delete_allowed": false,
+        "safe_to_gc_allowed": false,
         "path": "[TEST_HOME]/cass-data/backups/agent_search.db.20260423T120000.12345.deadbeef.failed-baseline-seed.bak",
         "size_bytes": 11,
         "age_seconds": "[AGE_SECONDS]",
@@ -217,6 +247,12 @@
         "gc_reason": "failed baseline seed quarantine requires operator inspection"
       },
       {
+        "asset_class": "failed_seed_bundle",
+        "safety_classification": "diagnostic_evidence",
+        "derived": false,
+        "precious": true,
+        "auto_delete_allowed": false,
+        "safe_to_gc_allowed": false,
         "path": "[TEST_HOME]/cass-data/backups/agent_search.db.20260423T120000.12345.deadbeef.failed-baseline-seed.bak-wal",
         "size_bytes": 8,
         "age_seconds": "[AGE_SECONDS]",
@@ -227,6 +263,12 @@
     ],
     "retained_publish_backups": [
       {
+        "asset_class": "retained_publish_backup",
+        "safety_classification": "derived_reclaimable",
+        "derived": true,
+        "precious": false,
+        "auto_delete_allowed": true,
+        "safe_to_gc_allowed": true,
         "path": "[TEST_HOME]/cass-data/index/.lexical-publish-backups/prior-live-newer",
         "size_bytes": 25,
         "age_seconds": "[AGE_SECONDS]",
@@ -235,6 +277,12 @@
         "gc_reason": "retained lexical publish backup is still protected by retention cap (1)"
       },
       {
+        "asset_class": "retained_publish_backup",
+        "safety_classification": "derived_reclaimable",
+        "derived": true,
+        "precious": false,
+        "auto_delete_allowed": true,
+        "safe_to_gc_allowed": true,
         "path": "[TEST_HOME]/cass-data/index/.lexical-publish-backups/prior-live-older",
         "size_bytes": 25,
         "age_seconds": "[AGE_SECONDS]",
@@ -245,6 +293,12 @@
     ],
     "lexical_generations": [
       {
+        "asset_class": "quarantined_lexical_generation",
+        "safety_classification": "diagnostic_evidence",
+        "derived": true,
+        "precious": false,
+        "auto_delete_allowed": false,
+        "safe_to_gc_allowed": false,
         "path": "[TEST_HOME]/cass-data/index/generation-quarantined",
         "generation_id": "gen-quarantined",
         "publish_state": "quarantined",

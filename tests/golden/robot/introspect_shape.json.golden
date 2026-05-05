@@ -558,6 +558,25 @@
                     }
                   }
                 },
+                "asset_taxonomy": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
+                  }
+                },
                 "quarantine": {
                   "type": "object",
                   "properties": {
