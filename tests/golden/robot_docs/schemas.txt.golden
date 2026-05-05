@@ -34,6 +34,7 @@ schemas: (auto-generated from contract)
     - version: string
   doctor:
     - _meta: object
+    - asset_taxonomy: array
     - auto_fix_actions: array
     - auto_fix_applied: boolean
     - checks: array
@@ -46,6 +47,7 @@ schemas: (auto-generated from contract)
     - needs_rebuild: boolean
     - quarantine: object
     - recommended_action: ?
+    - repair_contract: object
     - status: string
     - warnings: integer
   health:
