@@ -12745,6 +12745,7 @@ struct DoctorRepairContractReport {
     default_non_destructive: bool,
     fail_closed: bool,
     plan_receipt_schema: DoctorPlanReceiptSchemaReport,
+    verification_contract: DoctorVerificationContractReport,
     approval_requirements: Vec<DoctorApprovalRequirement>,
     outcome_kinds: Vec<DoctorRepairOutcomeKind>,
     retry_safety_kinds: Vec<DoctorRepairRetrySafety>,
@@ -12836,6 +12837,33 @@ struct DoctorPlanReceiptSchemaReport {
     drift_detection_statuses: Vec<DoctorDriftDetectionStatus>,
     redaction_contract: &'static str,
     tamper_evidence_scope: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorVerificationMatrixEntry {
+    scenario_id: &'static str,
+    feature_area: &'static str,
+    proof_layers: Vec<&'static str>,
+    representative_commands: Vec<&'static str>,
+    required_artifacts: Vec<&'static str>,
+    mutation_audit_required: bool,
+    redaction_required: bool,
+    archive_preservation_assertion: &'static str,
+    notes: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorVerificationContractReport {
+    schema_version: u32,
+    artifact_directory_contract: &'static str,
+    manifest_file: &'static str,
+    per_step_log_contract: &'static str,
+    required_manifest_fields: Vec<&'static str>,
+    required_step_log_fields: Vec<&'static str>,
+    required_inventory_fields: Vec<&'static str>,
+    required_receipt_fields: Vec<&'static str>,
+    required_redaction_guarantees: Vec<&'static str>,
+    matrix: Vec<DoctorVerificationMatrixEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -13072,6 +13100,56 @@ const DOCTOR_RECEIPT_REQUIRED_FIELDS: &[&str] = &[
     "coverage_before",
     "coverage_after",
 ];
+const DOCTOR_VERIFICATION_MANIFEST_FIELDS: &[&str] = &[
+    "schema_version",
+    "scenario_id",
+    "command_line",
+    "env",
+    "binary_version",
+    "started_at_ms",
+    "finished_at_ms",
+    "temp_data_dir_layout",
+    "steps",
+    "file_inventory_before",
+    "file_inventory_after",
+    "inventory_before",
+    "inventory_after",
+    "checksums",
+    "receipts",
+    "coverage_deltas",
+    "redaction_report",
+];
+const DOCTOR_VERIFICATION_STEP_LOG_FIELDS: &[&str] = &[
+    "step_id",
+    "scenario_id",
+    "command_line",
+    "env",
+    "exit_code",
+    "stdout_path",
+    "stderr_path",
+    "parsed_json_path",
+    "receipt_paths",
+    "inventory_before_path",
+    "inventory_after_path",
+    "duration_ms",
+    "redacted_paths",
+];
+const DOCTOR_VERIFICATION_INVENTORY_FIELDS: &[&str] = &[
+    "path",
+    "redacted_path",
+    "asset_class",
+    "size_bytes",
+    "mtime_ms",
+    "descriptor_blake3",
+    "content_blake3",
+    "exists",
+];
+const DOCTOR_VERIFICATION_REDACTION_GUARANTEES: &[&str] = &[
+    "raw session content is never copied into manifests by default",
+    "support-bundle paths include redacted_path alongside exact local path fields",
+    "environment captures must exclude secrets and token-shaped values",
+    "stdout/stderr logs used for artifacts must be scrubbed before export",
+];
 const DOCTOR_REPAIR_READ_ONLY_ABORTS: &[&str] = &["schema_error", "io_error"];
 const DOCTOR_REPAIR_MUTATION_ABORTS: &[&str] = &[
     "active_rebuild_lock",
@@ -13295,12 +13373,184 @@ fn doctor_plan_receipt_schema_report() -> DoctorPlanReceiptSchemaReport {
     }
 }
 
+fn doctor_verification_contract_report() -> DoctorVerificationContractReport {
+    DoctorVerificationContractReport {
+        schema_version: 1,
+        artifact_directory_contract: "each scripted doctor e2e run writes one durable artifact directory named <timestamp>-<scenario_id> with manifest.json at the root and one subdirectory per command step",
+        manifest_file: "manifest.json",
+        per_step_log_contract: "each step captures command/env metadata, stdout, stderr, parsed JSON, before/after inventories, checksums, receipts, timing, and redaction report paths",
+        required_manifest_fields: DOCTOR_VERIFICATION_MANIFEST_FIELDS.to_vec(),
+        required_step_log_fields: DOCTOR_VERIFICATION_STEP_LOG_FIELDS.to_vec(),
+        required_inventory_fields: DOCTOR_VERIFICATION_INVENTORY_FIELDS.to_vec(),
+        required_receipt_fields: DOCTOR_RECEIPT_REQUIRED_FIELDS.to_vec(),
+        required_redaction_guarantees: DOCTOR_VERIFICATION_REDACTION_GUARANTEES.to_vec(),
+        matrix: vec![
+            DoctorVerificationMatrixEntry {
+                scenario_id: "no_delete_default_check",
+                feature_area: "default non-destructive doctor",
+                proof_layers: vec!["unit", "cli", "golden", "scripted_e2e"],
+                representative_commands: vec!["cass doctor --json"],
+                required_artifacts: vec![
+                    "manifest.json",
+                    "step-001/stdout.json",
+                    "step-001/stderr.txt",
+                    "step-001/inventory-before.json",
+                    "step-001/inventory-after.json",
+                ],
+                mutation_audit_required: true,
+                redaction_required: true,
+                archive_preservation_assertion: "inventory_before and inventory_after must prove no archive, source, or user-state path was removed or rewritten",
+                notes: "This is the baseline guardrail: doctor with no repair mode is always read-only.",
+            },
+            DoctorVerificationMatrixEntry {
+                scenario_id: "upstream_pruned_archive_survives",
+                feature_area: "archive preservation after provider log pruning",
+                proof_layers: vec!["integration", "scripted_e2e"],
+                representative_commands: vec![
+                    "cass index --full --json",
+                    "cass doctor --json",
+                    "cass search <known archived text> --json",
+                ],
+                required_artifacts: vec![
+                    "manifest.json",
+                    "provider-inventory-before.json",
+                    "provider-inventory-after-prune.json",
+                    "cass-archive-query.json",
+                ],
+                mutation_audit_required: true,
+                redaction_required: true,
+                archive_preservation_assertion: "cass archive DB remains queryable after upstream session files disappear",
+                notes: "Proves cass is a durable archive and not merely a live provider-log view.",
+            },
+            DoctorVerificationMatrixEntry {
+                scenario_id: "corrupt_db_repair_plan",
+                feature_area: "corruption diagnosis and repair planning",
+                proof_layers: vec!["unit", "fault_injection", "scripted_e2e"],
+                representative_commands: vec!["cass doctor --json", "cass doctor --fix --json"],
+                required_artifacts: vec![
+                    "manifest.json",
+                    "corrupt-db-before.bin",
+                    "doctor-plan.json",
+                    "doctor-receipt.json",
+                    "inventory-after.json",
+                ],
+                mutation_audit_required: true,
+                redaction_required: true,
+                archive_preservation_assertion: "any corrupted archive bundle is backed up or quarantined before derived rebuild work proceeds",
+                notes: "Fault-injection proof must be diagnosable without rerunning against the user's real archive.",
+            },
+            DoctorVerificationMatrixEntry {
+                scenario_id: "stale_lock_and_active_rebuild",
+                feature_area: "lock ownership and interrupted operation handling",
+                proof_layers: vec!["unit", "integration", "scripted_e2e"],
+                representative_commands: vec![
+                    "cass health --json",
+                    "cass doctor --json",
+                    "cass doctor --fix --json",
+                ],
+                required_artifacts: vec![
+                    "manifest.json",
+                    "lock-state-before.json",
+                    "doctor-output.json",
+                    "lock-state-after.json",
+                ],
+                mutation_audit_required: true,
+                redaction_required: true,
+                archive_preservation_assertion: "active rebuild locks block mutating cleanup and repairs; stale-lock handling records the owner and decision",
+                notes: "Prevents two doctor processes from racing repairs or cleanup.",
+            },
+            DoctorVerificationMatrixEntry {
+                scenario_id: "restore_rehearsal_then_apply",
+                feature_area: "backup verification and restore",
+                proof_layers: vec!["unit", "integration", "scripted_e2e"],
+                representative_commands: vec![
+                    "cass doctor restore --dry-run --json",
+                    "cass doctor restore --apply --json",
+                ],
+                required_artifacts: vec![
+                    "manifest.json",
+                    "restore-rehearsal-receipt.json",
+                    "restore-apply-receipt.json",
+                    "archive-query-after-restore.json",
+                ],
+                mutation_audit_required: true,
+                redaction_required: true,
+                archive_preservation_assertion: "restore apply must require a rehearsal receipt and must verify archive readability after replacement",
+                notes: "Restore tests are intentionally separate from cleanup tests because they can touch canonical archive state.",
+            },
+            DoctorVerificationMatrixEntry {
+                scenario_id: "derived_cleanup_fingerprint_apply",
+                feature_area: "derived cleanup dry-run/apply",
+                proof_layers: vec!["unit", "cli", "golden", "scripted_e2e"],
+                representative_commands: vec![
+                    "cass doctor --json",
+                    "cass doctor --fix --json",
+                    "cass diag --json --quarantine",
+                ],
+                required_artifacts: vec![
+                    "manifest.json",
+                    "cleanup-plan.json",
+                    "cleanup-receipt.json",
+                    "inventory-before.json",
+                    "inventory-after.json",
+                ],
+                mutation_audit_required: true,
+                redaction_required: true,
+                archive_preservation_assertion: "only derived reclaimable assets may disappear; source logs, archive DB, receipts, bundles, and quarantined evidence remain",
+                notes: "This scenario owns the before/after filesystem mutation audit contract.",
+            },
+            DoctorVerificationMatrixEntry {
+                scenario_id: "semantic_fallback_no_archive_damage",
+                feature_area: "semantic model and vector readiness",
+                proof_layers: vec!["unit", "integration", "golden"],
+                representative_commands: vec![
+                    "cass models status --json",
+                    "cass health --json",
+                    "cass search <query> --json --robot-meta",
+                ],
+                required_artifacts: vec![
+                    "manifest.json",
+                    "models-status.json",
+                    "health.json",
+                    "search-robot-meta.json",
+                ],
+                mutation_audit_required: false,
+                redaction_required: true,
+                archive_preservation_assertion: "missing semantic assets report lexical fallback and never imply archive corruption",
+                notes: "Semantic fallback is readiness information, not a destructive repair path.",
+            },
+            DoctorVerificationMatrixEntry {
+                scenario_id: "multi_machine_source_sync_coverage",
+                feature_area: "source mirrors and multi-machine archive coverage",
+                proof_layers: vec!["integration", "scripted_e2e"],
+                representative_commands: vec![
+                    "cass sources list --json",
+                    "cass sources sync --all --json",
+                    "cass doctor --json",
+                ],
+                required_artifacts: vec![
+                    "manifest.json",
+                    "sources-before.json",
+                    "sync-output.json",
+                    "coverage-ledger-after.json",
+                    "doctor-output.json",
+                ],
+                mutation_audit_required: true,
+                redaction_required: true,
+                archive_preservation_assertion: "source sync tests prove coverage ledgers update without deleting local archive evidence",
+                notes: "This keeps remote-source health distinct from local archive safety.",
+            },
+        ],
+    }
+}
+
 fn doctor_repair_contract_report() -> DoctorRepairContractReport {
     DoctorRepairContractReport {
         default_mode: DoctorRepairMode::Check,
         default_non_destructive: true,
         fail_closed: true,
         plan_receipt_schema: doctor_plan_receipt_schema_report(),
+        verification_contract: doctor_verification_contract_report(),
         approval_requirements: DOCTOR_REPAIR_APPROVAL_REQUIREMENT_VOCABULARY.to_vec(),
         outcome_kinds: DOCTOR_REPAIR_OUTCOME_KIND_VOCABULARY.to_vec(),
         retry_safety_kinds: DOCTOR_REPAIR_RETRY_SAFETY_VOCABULARY.to_vec(),
@@ -15464,6 +15714,81 @@ mod doctor_asset_taxonomy_tests {
             schema
                 .drift_detection_statuses
                 .contains(&DoctorDriftDetectionStatus::MissingArtifact)
+        );
+    }
+
+    #[test]
+    fn doctor_verification_contract_covers_required_scenarios_and_logs() {
+        let contract = doctor_verification_contract_report();
+        for required_field in [
+            "scenario_id",
+            "command_line",
+            "file_inventory_before",
+            "inventory_before",
+            "inventory_after",
+            "checksums",
+            "stdout",
+            "stderr",
+            "parsed_json",
+            "receipts",
+            "coverage_deltas",
+            "redacted_paths",
+        ] {
+            let found = contract
+                .required_manifest_fields
+                .iter()
+                .chain(contract.required_step_log_fields.iter())
+                .any(|field| field.contains(required_field) || *field == required_field);
+            assert!(found, "verification contract missing {required_field}");
+        }
+
+        for scenario_id in [
+            "no_delete_default_check",
+            "upstream_pruned_archive_survives",
+            "corrupt_db_repair_plan",
+            "stale_lock_and_active_rebuild",
+            "restore_rehearsal_then_apply",
+            "derived_cleanup_fingerprint_apply",
+            "semantic_fallback_no_archive_damage",
+            "multi_machine_source_sync_coverage",
+        ] {
+            let scenario = contract
+                .matrix
+                .iter()
+                .find(|entry| entry.scenario_id == scenario_id)
+                .unwrap_or_else(|| panic!("missing doctor verification scenario {scenario_id}"));
+            assert!(
+                scenario.proof_layers.len() >= 2,
+                "{scenario_id} should not rely on a single proof layer"
+            );
+            assert!(
+                scenario.required_artifacts.contains(&"manifest.json"),
+                "{scenario_id} must emit a durable manifest"
+            );
+        }
+
+        let no_delete = contract
+            .matrix
+            .iter()
+            .find(|entry| entry.scenario_id == "no_delete_default_check")
+            .expect("no-delete scenario");
+        assert!(no_delete.mutation_audit_required);
+        assert!(
+            no_delete
+                .archive_preservation_assertion
+                .contains("no archive")
+        );
+
+        let semantic = contract
+            .matrix
+            .iter()
+            .find(|entry| entry.scenario_id == "semantic_fallback_no_archive_damage")
+            .expect("semantic fallback scenario");
+        assert!(!semantic.mutation_audit_required);
+        assert!(
+            semantic
+                .archive_preservation_assertion
+                .contains("never imply archive corruption")
         );
     }
 }

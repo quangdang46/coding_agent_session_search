@@ -418,6 +418,36 @@ fn doctor_json_surfaces_quarantine_gc_eligibility() {
             .any(|field| field.as_str() == Some("plan_fingerprint")),
         "doctor should publish the stable receipt field contract"
     );
+    let verification_contract = &repair_contract["verification_contract"];
+    assert_eq!(verification_contract["schema_version"].as_u64(), Some(1));
+    assert!(
+        verification_contract["required_step_log_fields"]
+            .as_array()
+            .expect("required step log fields")
+            .iter()
+            .any(|field| field.as_str() == Some("parsed_json_path")),
+        "doctor verification contract should require parsed JSON logs"
+    );
+    let matrix = verification_contract["matrix"]
+        .as_array()
+        .expect("verification matrix");
+    for scenario_id in [
+        "no_delete_default_check",
+        "upstream_pruned_archive_survives",
+        "corrupt_db_repair_plan",
+        "stale_lock_and_active_rebuild",
+        "restore_rehearsal_then_apply",
+        "derived_cleanup_fingerprint_apply",
+        "semantic_fallback_no_archive_damage",
+        "multi_machine_source_sync_coverage",
+    ] {
+        assert!(
+            matrix
+                .iter()
+                .any(|entry| entry["scenario_id"].as_str() == Some(scenario_id)),
+            "doctor verification matrix missing {scenario_id}"
+        );
+    }
     let mode_policies = repair_contract["mode_policies"]
         .as_array()
         .expect("doctor repair mode policy table");

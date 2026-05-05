@@ -472,6 +472,272 @@
       "redaction_contract": "robot receipts may expose existing doctor paths; support bundles must redact before export",
       "tamper_evidence_scope": "plan fingerprints, artifact manifests, event logs, and forensic bundles"
     },
+    "verification_contract": {
+      "schema_version": 1,
+      "artifact_directory_contract": "each scripted doctor e2e run writes one durable artifact directory named <timestamp>-<scenario_id> with manifest.json at the root and one subdirectory per command step",
+      "manifest_file": "manifest.json",
+      "per_step_log_contract": "each step captures command/env metadata, stdout, stderr, parsed JSON, before/after inventories, checksums, receipts, timing, and redaction report paths",
+      "required_manifest_fields": [
+        "schema_version",
+        "scenario_id",
+        "command_line",
+        "env",
+        "binary_version",
+        "started_at_ms",
+        "finished_at_ms",
+        "temp_data_dir_layout",
+        "steps",
+        "file_inventory_before",
+        "file_inventory_after",
+        "inventory_before",
+        "inventory_after",
+        "checksums",
+        "receipts",
+        "coverage_deltas",
+        "redaction_report"
+      ],
+      "required_step_log_fields": [
+        "step_id",
+        "scenario_id",
+        "command_line",
+        "env",
+        "exit_code",
+        "stdout_path",
+        "stderr_path",
+        "parsed_json_path",
+        "receipt_paths",
+        "inventory_before_path",
+        "inventory_after_path",
+        "duration_ms",
+        "redacted_paths"
+      ],
+      "required_inventory_fields": [
+        "path",
+        "redacted_path",
+        "asset_class",
+        "size_bytes",
+        "mtime_ms",
+        "descriptor_blake3",
+        "content_blake3",
+        "exists"
+      ],
+      "required_receipt_fields": [
+        "receipt_kind",
+        "schema_version",
+        "mode",
+        "outcome_kind",
+        "approval_fingerprint",
+        "plan_fingerprint",
+        "started_at_ms",
+        "finished_at_ms",
+        "actions",
+        "action_status_counts",
+        "artifact_manifest",
+        "drift_detection_status",
+        "coverage_before",
+        "coverage_after"
+      ],
+      "required_redaction_guarantees": [
+        "raw session content is never copied into manifests by default",
+        "support-bundle paths include redacted_path alongside exact local path fields",
+        "environment captures must exclude secrets and token-shaped values",
+        "stdout/stderr logs used for artifacts must be scrubbed before export"
+      ],
+      "matrix": [
+        {
+          "scenario_id": "no_delete_default_check",
+          "feature_area": "default non-destructive doctor",
+          "proof_layers": [
+            "unit",
+            "cli",
+            "golden",
+            "scripted_e2e"
+          ],
+          "representative_commands": [
+            "cass doctor --json"
+          ],
+          "required_artifacts": [
+            "manifest.json",
+            "step-001/stdout.json",
+            "step-001/stderr.txt",
+            "step-001/inventory-before.json",
+            "step-001/inventory-after.json"
+          ],
+          "mutation_audit_required": true,
+          "redaction_required": true,
+          "archive_preservation_assertion": "inventory_before and inventory_after must prove no archive, source, or user-state path was removed or rewritten",
+          "notes": "This is the baseline guardrail: doctor with no repair mode is always read-only."
+        },
+        {
+          "scenario_id": "upstream_pruned_archive_survives",
+          "feature_area": "archive preservation after provider log pruning",
+          "proof_layers": [
+            "integration",
+            "scripted_e2e"
+          ],
+          "representative_commands": [
+            "cass index --full --json",
+            "cass doctor --json",
+            "cass search <known archived text> --json"
+          ],
+          "required_artifacts": [
+            "manifest.json",
+            "provider-inventory-before.json",
+            "provider-inventory-after-prune.json",
+            "cass-archive-query.json"
+          ],
+          "mutation_audit_required": true,
+          "redaction_required": true,
+          "archive_preservation_assertion": "cass archive DB remains queryable after upstream session files disappear",
+          "notes": "Proves cass is a durable archive and not merely a live provider-log view."
+        },
+        {
+          "scenario_id": "corrupt_db_repair_plan",
+          "feature_area": "corruption diagnosis and repair planning",
+          "proof_layers": [
+            "unit",
+            "fault_injection",
+            "scripted_e2e"
+          ],
+          "representative_commands": [
+            "cass doctor --json",
+            "cass doctor --fix --json"
+          ],
+          "required_artifacts": [
+            "manifest.json",
+            "corrupt-db-before.bin",
+            "doctor-plan.json",
+            "doctor-receipt.json",
+            "inventory-after.json"
+          ],
+          "mutation_audit_required": true,
+          "redaction_required": true,
+          "archive_preservation_assertion": "any corrupted archive bundle is backed up or quarantined before derived rebuild work proceeds",
+          "notes": "Fault-injection proof must be diagnosable without rerunning against the user's real archive."
+        },
+        {
+          "scenario_id": "stale_lock_and_active_rebuild",
+          "feature_area": "lock ownership and interrupted operation handling",
+          "proof_layers": [
+            "unit",
+            "integration",
+            "scripted_e2e"
+          ],
+          "representative_commands": [
+            "cass health --json",
+            "cass doctor --json",
+            "cass doctor --fix --json"
+          ],
+          "required_artifacts": [
+            "manifest.json",
+            "lock-state-before.json",
+            "doctor-output.json",
+            "lock-state-after.json"
+          ],
+          "mutation_audit_required": true,
+          "redaction_required": true,
+          "archive_preservation_assertion": "active rebuild locks block mutating cleanup and repairs; stale-lock handling records the owner and decision",
+          "notes": "Prevents two doctor processes from racing repairs or cleanup."
+        },
+        {
+          "scenario_id": "restore_rehearsal_then_apply",
+          "feature_area": "backup verification and restore",
+          "proof_layers": [
+            "unit",
+            "integration",
+            "scripted_e2e"
+          ],
+          "representative_commands": [
+            "cass doctor restore --dry-run --json",
+            "cass doctor restore --apply --json"
+          ],
+          "required_artifacts": [
+            "manifest.json",
+            "restore-rehearsal-receipt.json",
+            "restore-apply-receipt.json",
+            "archive-query-after-restore.json"
+          ],
+          "mutation_audit_required": true,
+          "redaction_required": true,
+          "archive_preservation_assertion": "restore apply must require a rehearsal receipt and must verify archive readability after replacement",
+          "notes": "Restore tests are intentionally separate from cleanup tests because they can touch canonical archive state."
+        },
+        {
+          "scenario_id": "derived_cleanup_fingerprint_apply",
+          "feature_area": "derived cleanup dry-run/apply",
+          "proof_layers": [
+            "unit",
+            "cli",
+            "golden",
+            "scripted_e2e"
+          ],
+          "representative_commands": [
+            "cass doctor --json",
+            "cass doctor --fix --json",
+            "cass diag --json --quarantine"
+          ],
+          "required_artifacts": [
+            "manifest.json",
+            "cleanup-plan.json",
+            "cleanup-receipt.json",
+            "inventory-before.json",
+            "inventory-after.json"
+          ],
+          "mutation_audit_required": true,
+          "redaction_required": true,
+          "archive_preservation_assertion": "only derived reclaimable assets may disappear; source logs, archive DB, receipts, bundles, and quarantined evidence remain",
+          "notes": "This scenario owns the before/after filesystem mutation audit contract."
+        },
+        {
+          "scenario_id": "semantic_fallback_no_archive_damage",
+          "feature_area": "semantic model and vector readiness",
+          "proof_layers": [
+            "unit",
+            "integration",
+            "golden"
+          ],
+          "representative_commands": [
+            "cass models status --json",
+            "cass health --json",
+            "cass search <query> --json --robot-meta"
+          ],
+          "required_artifacts": [
+            "manifest.json",
+            "models-status.json",
+            "health.json",
+            "search-robot-meta.json"
+          ],
+          "mutation_audit_required": false,
+          "redaction_required": true,
+          "archive_preservation_assertion": "missing semantic assets report lexical fallback and never imply archive corruption",
+          "notes": "Semantic fallback is readiness information, not a destructive repair path."
+        },
+        {
+          "scenario_id": "multi_machine_source_sync_coverage",
+          "feature_area": "source mirrors and multi-machine archive coverage",
+          "proof_layers": [
+            "integration",
+            "scripted_e2e"
+          ],
+          "representative_commands": [
+            "cass sources list --json",
+            "cass sources sync --all --json",
+            "cass doctor --json"
+          ],
+          "required_artifacts": [
+            "manifest.json",
+            "sources-before.json",
+            "sync-output.json",
+            "coverage-ledger-after.json",
+            "doctor-output.json"
+          ],
+          "mutation_audit_required": true,
+          "redaction_required": true,
+          "archive_preservation_assertion": "source sync tests prove coverage ledgers update without deleting local archive evidence",
+          "notes": "This keeps remote-source health distinct from local archive safety."
+        }
+      ]
+    },
     "approval_requirements": [
       "none",
       "approval_fingerprint",

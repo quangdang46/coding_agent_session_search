@@ -143,6 +143,97 @@
             }
           }
         },
+        "verification_contract": {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "type": "integer"
+            },
+            "artifact_directory_contract": {
+              "type": "string"
+            },
+            "manifest_file": {
+              "type": "string"
+            },
+            "per_step_log_contract": {
+              "type": "string"
+            },
+            "required_manifest_fields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "required_step_log_fields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "required_inventory_fields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "required_receipt_fields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "required_redaction_guarantees": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "matrix": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "scenario_id": {
+                    "type": "string"
+                  },
+                  "feature_area": {
+                    "type": "string"
+                  },
+                  "proof_layers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "representative_commands": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "required_artifacts": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "mutation_audit_required": {
+                    "type": "boolean"
+                  },
+                  "redaction_required": {
+                    "type": "boolean"
+                  },
+                  "archive_preservation_assertion": {
+                    "type": "string"
+                  },
+                  "notes": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
         "approval_requirements": {
           "type": "array",
           "items": {
