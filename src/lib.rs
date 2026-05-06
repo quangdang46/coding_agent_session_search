@@ -65869,9 +65869,9 @@ fn run_export_html(
     use chrono::TimeZone;
     use html_export::{
         ExportOptions as HtmlExportOptions, HtmlExporter, Message, TemplateMetadata,
-        generate_full_filename, get_downloads_dir, is_valid_filename,
+        generate_full_filename, get_downloads_dir, is_valid_filename, unique_filename,
     };
-    use std::fs::File;
+    use std::fs::OpenOptions;
     use std::io::{self, Write};
 
     if let Some(source_id) = source_id {
@@ -66408,7 +66408,7 @@ fn run_export_html(
         return Err(err);
     }
 
-    let output_path = output_directory.join(final_filename);
+    let output_path = unique_filename(&output_directory, &final_filename);
 
     // Estimate file size (rough: 200 bytes per message + overhead)
     let estimated_size = message_count * 200 + 15000;
@@ -66493,12 +66493,12 @@ fn run_export_html(
         })?;
 
     // --- Write file ---
-    std::fs::create_dir_all(output_path.parent().unwrap_or(Path::new("."))).ok();
-    let mut file = File::create(&output_path).map_err(|e| {
+    let output_parent = output_path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(output_parent).map_err(|e| {
         let err = CliError {
             code: 4,
             kind: CliErrorKind::OutputNotWritable.kind_str(),
-            message: format!("Could not create output file: {e}"),
+            message: format!("Could not create output directory: {e}"),
             hint: Some(format!(
                 "Check permissions for {}",
                 output_directory.display()
@@ -66508,6 +66508,24 @@ fn run_export_html(
         emit_structured_error(&err);
         err
     })?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&output_path)
+        .map_err(|e| {
+            let err = CliError {
+                code: 4,
+                kind: CliErrorKind::OutputNotWritable.kind_str(),
+                message: format!("Could not create output file: {e}"),
+                hint: Some(format!(
+                    "Check permissions for {}",
+                    output_directory.display()
+                )),
+                retryable: false,
+            };
+            emit_structured_error(&err);
+            err
+        })?;
     file.write_all(html.as_bytes()).map_err(|e| {
         let err = CliError {
             code: 4,
@@ -67224,6 +67242,58 @@ mod export_timestamp_tests {
             "unexpected error: {}",
             err.message
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn export_html_does_not_follow_existing_output_symlink() {
+        let temp = TempDir::new().expect("temp dir");
+        let session_path = temp.path().join("session.jsonl");
+        fs::write(
+            &session_path,
+            br#"{"role":"user","content":"hello from symlink-safe export"}
+{"role":"assistant","content":"safe exported response"}
+"#,
+        )
+        .expect("write session");
+
+        let protected_target = temp.path().join("protected.html");
+        fs::write(&protected_target, "do not overwrite").expect("write protected target");
+        let requested_output = temp.path().join("out.html");
+        std::os::unix::fs::symlink(&protected_target, &requested_output)
+            .expect("create output symlink");
+
+        run_export_html(
+            &session_path,
+            None,
+            None,
+            Some(temp.path()),
+            Some("out.html"),
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            "system",
+            false,
+            false,
+            false,
+            None,
+        )
+        .expect("export should choose a fresh filename instead of following symlink");
+
+        assert_eq!(
+            fs::read_to_string(&protected_target).expect("read protected target"),
+            "do not overwrite"
+        );
+        assert_eq!(
+            fs::read_link(&requested_output).expect("requested output remains a symlink"),
+            protected_target
+        );
+        let actual_output = temp.path().join("out_1.html");
+        let html = fs::read_to_string(&actual_output).expect("read suffixed export");
+        assert!(html.contains("safe exported response"));
     }
 
     #[test]
