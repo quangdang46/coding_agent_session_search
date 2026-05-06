@@ -286,11 +286,11 @@ impl GitHubDeployer {
         // Step 4: Clone to temp directory
         progress("clone", "Cloning repository...");
         let temp_dir = create_temp_dir()?;
-        clone_repo(&repo_url, &temp_dir)?;
+        clone_repo(&repo_url, temp_dir.path())?;
 
         // Step 5: Copy bundle contents
         progress("copy", "Copying bundle files...");
-        let work_dir = temp_dir.join(&self.repo_name);
+        let work_dir = temp_dir.path().join(&self.repo_name);
         copy_bundle_to_repo(&bundle_dir, &work_dir)?;
         configure_git_identity(&work_dir, username)?;
 
@@ -356,8 +356,26 @@ impl GitHubDeployer {
 
 // Helper functions
 
+struct TempDeployDir {
+    path: PathBuf,
+}
+
+impl TempDeployDir {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDeployDir {
+    fn drop(&mut self) {
+        if deploy_staging_path_is_real_dir(&self.path).unwrap_or(false) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
 /// Create a temporary directory
-fn create_temp_dir() -> Result<PathBuf> {
+fn create_temp_dir() -> Result<TempDeployDir> {
     let temp_base = std::env::temp_dir();
     let pid = std::process::id();
     for attempt in 0..100 {
@@ -368,7 +386,7 @@ fn create_temp_dir() -> Result<PathBuf> {
         let dir_name = format!("cass-deploy-{pid}-{timestamp}-{attempt}");
         let temp_dir = temp_base.join(dir_name);
         match std::fs::create_dir(&temp_dir) {
-            Ok(()) => return Ok(temp_dir),
+            Ok(()) => return Ok(TempDeployDir { path: temp_dir }),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(err) => {
                 return Err(err).with_context(|| {
@@ -384,6 +402,22 @@ fn create_temp_dir() -> Result<PathBuf> {
         "failed to allocate unique GitHub deploy staging directory under {}",
         temp_base.display()
     )
+}
+
+fn deploy_staging_path_is_real_dir(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            let file_type = metadata.file_type();
+            Ok(file_type.is_dir() && !file_type.is_symlink())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err).with_context(|| {
+            format!(
+                "Failed inspecting GitHub deploy staging directory before cleanup: {}",
+                path.display()
+            )
+        }),
+    }
 }
 
 /// Get gh CLI version
@@ -1099,6 +1133,47 @@ mod tests {
         assert!(repo_dir.path().join(".nojekyll").exists());
         assert!(!repo_dir.path().join("private").exists());
         assert!(!repo_dir.path().join("site").exists());
+    }
+
+    #[test]
+    fn test_temp_deploy_dir_removes_real_staging_dir_on_drop() {
+        let temp = create_temp_dir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        std::fs::write(temp_path.join("marker.txt"), "temporary clone").unwrap();
+
+        drop(temp);
+
+        assert!(
+            !temp_path.exists(),
+            "GitHub deploy temp clone directory should be removed on drop"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_temp_deploy_dir_drop_skips_symlinked_staging_path() {
+        use std::os::unix::fs::symlink;
+        use tempfile::TempDir;
+
+        let parent = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let temp_path = parent.path().join("cass-deploy-link");
+        let sentinel = outside.path().join("sentinel.txt");
+        std::fs::write(&sentinel, "keep").unwrap();
+        symlink(outside.path(), &temp_path).unwrap();
+
+        drop(TempDeployDir {
+            path: temp_path.clone(),
+        });
+
+        assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "keep");
+        assert!(
+            std::fs::symlink_metadata(&temp_path)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "drop must leave symlinked staging paths untouched"
+        );
     }
 
     #[test]

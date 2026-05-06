@@ -72,6 +72,7 @@ fn decoded_cursor_offset(cursor: &str) -> u64 {
 fn hold_active_lexical_rebuild_lock(
     data_dir: &Path,
     db_path: &Path,
+    completed: bool,
     runtime: Option<Value>,
 ) -> fs::File {
     let index_path = coding_agent_search::search::tantivy::expected_index_dir(data_dir);
@@ -93,7 +94,7 @@ fn hold_active_lexical_rebuild_lock(
         "indexed_docs": 8,
         "committed_meta_fingerprint": null,
         "pending": null,
-        "completed": false,
+        "completed": completed,
         "updated_at_ms": 1_733_000_123_000_i64
     });
     if let Some(runtime) = runtime {
@@ -385,7 +386,7 @@ fn state_hides_empty_active_rebuild_pipeline_runtime_before_first_heartbeat() {
     let fixture = isolated_search_demo_data();
     let data_dir = fixture.path();
     let db_path = data_dir.join("agent_search.db");
-    let _lock_file = hold_active_lexical_rebuild_lock(data_dir, &db_path, None);
+    let _lock_file = hold_active_lexical_rebuild_lock(data_dir, &db_path, false, None);
 
     let mut cmd = base_cmd();
     cmd.args([
@@ -440,7 +441,8 @@ fn state_and_status_report_active_rebuild_pipeline_runtime() {
         "staged_shard_build_controller_reason": "reserving_1_slots_for_staged_merge_active_jobs_1_ready_groups_1",
         "updated_at_ms": 1_733_000_124_000_i64
     });
-    let _lock_file = hold_active_lexical_rebuild_lock(data_dir, &db_path, Some(expected_runtime));
+    let _lock_file =
+        hold_active_lexical_rebuild_lock(data_dir, &db_path, false, Some(expected_runtime));
 
     let run = |subcommand: &str| -> Value {
         let mut cmd = base_cmd();
@@ -1551,7 +1553,7 @@ fn search_robot_meta_includes_fallback_and_cache_stats() {
 fn search_cursor_manifest_marks_rebuilding_generation_best_effort() {
     let data_dir = isolated_search_demo_data();
     let db_path = data_dir.path().join("agent_search.db");
-    let _lock = hold_active_lexical_rebuild_lock(data_dir.path(), &db_path, None);
+    let _lock = hold_active_lexical_rebuild_lock(data_dir.path(), &db_path, true, None);
 
     let mut cmd = base_cmd();
     cmd.args([
