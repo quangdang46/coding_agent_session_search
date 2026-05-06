@@ -794,7 +794,7 @@ fn is_allowed_cloudflare_api_base_url(url: &str) -> bool {
     };
     match parsed.scheme() {
         "https" => host == "api.cloudflare.com" && parsed.port().is_none_or(|port| port == 443),
-        "http" => matches!(host, "127.0.0.1" | "localhost" | "::1"),
+        "http" => matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]"),
         _ => false,
     }
 }
