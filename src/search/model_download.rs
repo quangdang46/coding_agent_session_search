@@ -1875,18 +1875,10 @@ fn ensure_real_model_directory_metadata(
 ) -> Result<(), DownloadError> {
     let file_type = metadata.file_type();
     if file_type.is_symlink() {
-        return Err(std::io::Error::other(format!(
-            "{symlink_message}: {}",
-            path.display()
-        ))
-        .into());
+        return Err(std::io::Error::other(format!("{symlink_message}: {}", path.display())).into());
     }
     if !file_type.is_dir() {
-        return Err(std::io::Error::other(format!(
-            "{non_dir_message}: {}",
-            path.display()
-        ))
-        .into());
+        return Err(std::io::Error::other(format!("{non_dir_message}: {}", path.display())).into());
     }
     Ok(())
 }
@@ -3080,10 +3072,7 @@ mod tests {
             err.to_string().contains("temp dir through symlink"),
             "unexpected symlink-temp-dir error: {err}"
         );
-        assert_eq!(
-            fs::read(outside.join("stale.bin")).unwrap(),
-            b"must remain"
-        );
+        assert_eq!(fs::read(outside.join("stale.bin")).unwrap(), b"must remain");
         assert!(
             fs::symlink_metadata(&downloader.temp_dir)
                 .unwrap()
