@@ -77,21 +77,34 @@ fn hold_active_lexical_rebuild_lock(
 ) -> fs::File {
     let index_path = coding_agent_search::search::tantivy::expected_index_dir(data_dir);
     fs::create_dir_all(&index_path).expect("create index dir");
+    let (
+        total_conversations,
+        total_messages,
+        storage_fingerprint,
+        committed_offset,
+        committed_conversation_id,
+        processed_conversations,
+        indexed_docs,
+    ) = if completed {
+        (2, 6, "content-v1:2:2:6", 2, 2, 2, 6)
+    } else {
+        (10, 20, "10:20:0:0", 4, 4, 4, 8)
+    };
 
     let mut rebuild_state = serde_json::json!({
         "version": 2,
         "schema_hash": coding_agent_search::search::tantivy::SCHEMA_HASH,
         "db": {
             "db_path": db_path.display().to_string(),
-            "total_conversations": 10,
-            "total_messages": 20,
-            "storage_fingerprint": "10:20:0:0"
+            "total_conversations": total_conversations,
+            "total_messages": total_messages,
+            "storage_fingerprint": storage_fingerprint
         },
         "page_size": 1024,
-        "committed_offset": 4,
-        "committed_conversation_id": 4,
-        "processed_conversations": 4,
-        "indexed_docs": 8,
+        "committed_offset": committed_offset,
+        "committed_conversation_id": committed_conversation_id,
+        "processed_conversations": processed_conversations,
+        "indexed_docs": indexed_docs,
         "committed_meta_fingerprint": null,
         "pending": null,
         "completed": completed,
