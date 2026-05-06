@@ -8683,6 +8683,12 @@ fn run_streaming_consumer(
     let mut last_commit = std::time::Instant::now();
     let index_start = std::time::Instant::now();
     let mut canonical_mutations = CanonicalMutationCounts::default();
+    // Streaming ingest intentionally defers connection-local WAL
+    // auto-checkpoints until the enclosing index/watch close path restores
+    // steady-state policy and runs the final checkpoint. Keep incidental
+    // progress writes on the same policy so slow startup batches do not flip
+    // the long-lived handle back to steady-state mid-ingest.
+    let defer_streaming_checkpoints = true;
 
     // Per-connector stats tracking (T7.4)
     let mut connector_stats: HashMap<String, ConnectorStats> = HashMap::new();
@@ -8830,7 +8836,7 @@ fn run_streaming_consumer(
                     &combined_conversations,
                     progress,
                     lexical_strategy,
-                    true,
+                    defer_streaming_checkpoints,
                 );
                 flow_limiter.release(combined_byte_reservation);
                 canonical_mutations = canonical_mutations.accumulate(ingest_result?);
@@ -8860,7 +8866,7 @@ fn run_streaming_consumer(
                     if let Some(ts) = scan_start_ts
                         && let Err(e) = persist::with_ephemeral_writer(
                             storage,
-                            false,
+                            defer_streaming_checkpoints,
                             "updating streaming incremental last_scan_ts",
                             |writer| writer.set_last_scan_ts(ts),
                         )

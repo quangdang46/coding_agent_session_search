@@ -8639,6 +8639,10 @@ impl SearchLexicalSelfHealDiagnosis {
             checkpoint_refresh_allowed: true,
         }
     }
+
+    fn permits_existing_index_during_active_rebuild(&self) -> bool {
+        self.checkpoint_refresh_allowed || self.reason == "lexical rebuild checkpoint missing"
+    }
 }
 
 fn search_lexical_self_heal_diagnosis(
@@ -8790,14 +8794,18 @@ fn ensure_lexical_assets_for_search(
     let initial_index_exists = crate::search::tantivy::searchable_index_exists(index_path);
     let initial_rebuild_active = probe_index_run_lock(data_dir, db_path).active;
     if initial_rebuild_active {
-        if initial_index_exists
-            && search_lexical_self_heal_diagnosis(index_path, db_path)?.is_none()
-        {
-            return Ok(SearchLexicalSelfHeal {
-                action: "active-rebuild-searching-existing-index",
-                reason: Some("lexical repair is already running".to_string()),
-                indexed_docs: None,
-            });
+        if initial_index_exists {
+            let diagnosis = search_lexical_self_heal_diagnosis(index_path, db_path)?;
+            if diagnosis
+                .as_ref()
+                .is_none_or(|diagnosis| diagnosis.permits_existing_index_during_active_rebuild())
+            {
+                return Ok(SearchLexicalSelfHeal {
+                    action: "active-rebuild-searching-existing-index",
+                    reason: Some("lexical repair is already running".to_string()),
+                    indexed_docs: None,
+                });
+            }
         }
 
         let waited = wait_for_searchable_index_after_active_rebuild(
