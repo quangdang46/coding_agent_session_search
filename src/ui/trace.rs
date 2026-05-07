@@ -366,7 +366,7 @@ impl TraceOptions {
     /// render and event paths default to files inside the bundle dir.
     pub fn into_writer(&self) -> std::io::Result<TraceWriter> {
         let (render_path, events_path) = if let Some(ref dir) = self.bundle_dir {
-            std::fs::create_dir_all(dir)?;
+            ensure_trace_bundle_dir(dir)?;
             (
                 self.render_path
                     .clone()
@@ -616,6 +616,45 @@ mod tests {
                 .file_type()
                 .is_symlink(),
             "rejected trace bundle symlink should remain untouched"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn trace_options_rejects_symlinked_bundle_dir() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let outside_dir = tmp.path().join("outside");
+        let bundle_dir = tmp.path().join("bundle");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        symlink(&outside_dir, &bundle_dir).unwrap();
+
+        let options = TraceOptions {
+            bundle_dir: Some(bundle_dir.clone()),
+            ..TraceOptions::default()
+        };
+
+        let err = match options.into_writer() {
+            Ok(_) => panic!("expected symlinked trace bundle option to be rejected"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(
+            !outside_dir.join("render.trace.jsonl").exists(),
+            "trace options must not follow a symlinked bundle dir for render output"
+        );
+        assert!(
+            !outside_dir.join("events.jsonl").exists(),
+            "trace options must not follow a symlinked bundle dir for event output"
+        );
+        assert!(
+            std::fs::symlink_metadata(&bundle_dir)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "rejected trace options symlink should remain untouched"
         );
     }
 
