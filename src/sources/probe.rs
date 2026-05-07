@@ -199,6 +199,30 @@ impl ResourceInfo {
     pub const MIN_MEMORY_MB: u64 = 2048; // 2 GB
 }
 
+fn shell_single_quote_arg(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r#"'\''"#))
+}
+
+fn collect_probe_dirs(probe_paths: Vec<(&'static str, Vec<String>)>) -> Vec<String> {
+    let mut dir_list = Vec::new();
+    for (_slug, paths) in probe_paths {
+        for path in paths {
+            dir_list.push(path);
+        }
+    }
+    dir_list.sort();
+    dir_list.dedup();
+    dir_list
+}
+
+fn probe_dir_array_entries(dir_list: &[String]) -> String {
+    dir_list
+        .iter()
+        .map(|path| format!("    {}", shell_single_quote_arg(path)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Build the bash probe script that gathers all information in one SSH call.
 ///
 /// Agent detection paths are sourced dynamically from `franken_agent_detection`
@@ -206,20 +230,12 @@ impl ResourceInfo {
 ///
 /// Output format is key=value pairs, with special markers for sections.
 fn build_probe_script() -> String {
-    // Build the `for dir in ...` path list from franken_agent_detection
-    let probe_paths = franken_agent_detection::default_probe_paths_tilde();
-    let mut dir_list = Vec::new();
-    for (_slug, paths) in &probe_paths {
-        for path in paths {
-            // Escape spaces for bash word splitting in `for dir in ...`
-            dir_list.push(path.replace(' ', "\\ "));
-        }
-    }
-    // Deduplicate (some connectors may share paths)
-    dir_list.sort();
-    dir_list.dedup();
+    let dir_list = collect_probe_dirs(franken_agent_detection::default_probe_paths_tilde());
+    build_probe_script_for_dirs(&dir_list)
+}
 
-    let dirs_str = dir_list.join(" \\\n           ");
+fn build_probe_script_for_dirs(dir_list: &[String]) -> String {
+    let dirs_str = probe_dir_array_entries(dir_list);
 
     format!(
         r#"#!/bin/bash
@@ -322,9 +338,17 @@ else
 fi
 
 # Agent data detection (with sizes and file counts)
-for dir in {dirs}; do
-    # Expand the path
-    expanded_dir=$(eval echo "$dir" 2>/dev/null)
+PROBE_DIRS=(
+{dirs}
+)
+for dir in "${{PROBE_DIRS[@]}}"; do
+    # Expand only the leading tilde marker from our static probe list. Do not
+    # eval paths: connector-owned paths can contain shell metacharacters.
+    case "$dir" in
+        "~") expanded_dir="$HOME" ;;
+        "~/"*) expanded_dir="$HOME/${{dir#\~/}}" ;;
+        *) expanded_dir="$dir" ;;
+    esac
     if [ -e "$expanded_dir" ]; then
         SIZE=$(du -sm "$expanded_dir" 2>/dev/null | cut -f1)
         # Count JSONL files for session estimate
@@ -1105,24 +1129,26 @@ CASS_VERSION=0.4.2
     // Real system probe tests — run PROBE_SCRIPT locally without SSH
     // =========================================================================
 
-    /// Execute PROBE_SCRIPT on the local system via bash, returning stdout.
-    fn run_probe_script_locally() -> String {
+    /// Execute a probe script on the local system via bash, returning stdout.
+    fn run_probe_script_with_home(script: &str, home: Option<&std::path::Path>) -> String {
         use std::io::Write;
         let mut cmd = Command::new("bash");
         cmd.arg("-s")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // Ensure HOME is set for the probe script (may not be set in some test environments)
-        if dotenvy::var("HOME").is_err()
+        if let Some(home) = home {
+            cmd.env("HOME", home);
+        } else if dotenvy::var("HOME").is_err()
             && let Some(dirs) = directories::BaseDirs::new()
         {
+            // Ensure HOME is set for the probe script (may not be set in some test environments).
             cmd.env("HOME", dirs.home_dir());
         }
         let mut child = cmd.spawn().expect("bash should be available");
         if let Some(mut stdin) = child.stdin.take() {
             stdin
-                .write_all(build_probe_script().as_bytes())
+                .write_all(script.as_bytes())
                 .expect("write probe script");
         }
         let output = child
@@ -1134,6 +1160,63 @@ CASS_VERSION=0.4.2
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8_lossy(&output.stdout).to_string()
+    }
+
+    /// Execute PROBE_SCRIPT on the local system via bash, returning stdout.
+    fn run_probe_script_locally() -> String {
+        run_probe_script_with_home(&build_probe_script(), None)
+    }
+
+    #[test]
+    fn shell_single_quote_arg_quotes_shell_metacharacters() {
+        assert_eq!(shell_single_quote_arg("plain/path"), "'plain/path'");
+        assert_eq!(shell_single_quote_arg("can't"), "'can'\\''t'");
+        assert_eq!(
+            shell_single_quote_arg("$(touch /tmp/nope); `whoami`"),
+            "'$(touch /tmp/nope); `whoami`'"
+        );
+    }
+
+    #[test]
+    fn probe_script_uses_literal_array_without_eval() {
+        let script = build_probe_script();
+        assert!(script.contains("PROBE_DIRS=("));
+        assert!(script.contains("for dir in \"${PROBE_DIRS[@]}\""));
+        assert!(script.contains("expanded_dir=\"$HOME/${dir#\\~/}\""));
+        assert!(
+            !script.contains("eval echo"),
+            "probe paths must not be expanded through eval"
+        );
+    }
+
+    #[test]
+    fn probe_script_treats_special_probe_paths_as_literals() {
+        let home = tempfile::tempdir().expect("temp home");
+        let relative_path =
+            "Library/Application Support/Codex$(touch \"$HOME/SHOULD_NOT_EXIST\");can't";
+        std::fs::create_dir_all(home.path().join(relative_path)).expect("create special path");
+
+        let probe_path = format!("~/{relative_path}");
+        let script = build_probe_script_for_dirs(std::slice::from_ref(&probe_path));
+        let output = run_probe_script_with_home(&script, Some(home.path()));
+
+        assert!(
+            output.contains(&format!("AGENT_DATA={probe_path}|")),
+            "special probe path should be reported literally: {output}"
+        );
+        assert!(
+            !home.path().join("SHOULD_NOT_EXIST").exists(),
+            "probe path interpolation must not execute command substitutions"
+        );
+
+        let result = parse_probe_output("localhost", &output, 0);
+        assert!(
+            result
+                .detected_agents
+                .iter()
+                .any(|agent| agent.path == probe_path),
+            "parsed agent data should preserve literal path"
+        );
     }
 
     #[test]
@@ -1291,7 +1374,7 @@ CASS_VERSION=0.4.2
         // Verify script structure
         assert!(script.contains("===PROBE_START==="));
         assert!(script.contains("===PROBE_END==="));
-        assert!(script.contains("for dir in"));
+        assert!(script.contains("for dir in \"${PROBE_DIRS[@]}\""));
     }
 
     #[test]
