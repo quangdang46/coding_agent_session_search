@@ -196,16 +196,19 @@ fn open_asciicast_recorder_no_overwrite(
     rows: u16,
 ) -> Result<AsciicastRecorder<BufWriter<File>>> {
     ensure_asciicast_output_available(recording_path)?;
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(recording_path)
-        .with_context(|| {
-            format!(
-                "create asciicast output file without overwrite at {}",
-                recording_path.display()
-            )
-        })?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(recording_path).with_context(|| {
+        format!(
+            "create asciicast output file without overwrite at {}",
+            recording_path.display()
+        )
+    })?;
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|err| anyhow!("system clock is before Unix epoch: {err}"))?
@@ -522,6 +525,30 @@ mod tests {
         assert!(
             contents.starts_with("{\"version\":2"),
             "unexpected asciicast header: {contents:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn creates_asciicast_output_with_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let output_path = tmp.path().join("demo.cast");
+
+        let recorder =
+            open_asciicast_recorder_no_overwrite(&output_path, 80, 24).expect("open recorder");
+        let mut writer = recorder.finish().expect("finish recorder");
+        writer.flush().expect("flush recorder");
+
+        let mode = std::fs::metadata(&output_path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "asciicast recordings should not gain group/other permissions"
         );
     }
 
