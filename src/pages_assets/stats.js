@@ -382,6 +382,11 @@ function renderDashboard(data) {
     if (!container) return;
 
     const { statistics = {}, timeline = {}, agentSummary, workspaceSummary, topTerms } = data || {};
+    const statisticsAgents = isPlainObject(statistics.agents) ? statistics.agents : {};
+    const statisticsRoles = isPlainObject(statistics.roles) ? statistics.roles : {};
+    const agents = Array.isArray(agentSummary?.agents) ? agentSummary.agents : [];
+    const workspaces = Array.isArray(workspaceSummary?.workspaces) ? workspaceSummary.workspaces : [];
+    const terms = Array.isArray(topTerms?.terms) ? topTerms.terms : [];
     const availableTimelineViews = getAvailableTimelineViews(timeline);
     const selectedTimelineView = getSelectedTimelineView(timeline);
     currentTimelineView = selectedTimelineView;
@@ -400,7 +405,7 @@ function renderDashboard(data) {
                         ${renderOverviewCard('Conversations', statistics.total_conversations, 'conversation-count')}
                         ${renderOverviewCard('Messages', statistics.total_messages, 'message-count')}
                         ${renderOverviewCard('Characters', formatNumber(statistics.total_characters), 'character-count')}
-                        ${renderOverviewCard('Agents', Object.keys(statistics.agents || {}).length, 'agent-count')}
+                        ${renderOverviewCard('Agents', Object.keys(statisticsAgents).length, 'agent-count')}
                     </div>
                 </section>
 
@@ -442,7 +447,7 @@ function renderDashboard(data) {
                 ` : ''}
 
                 <!-- Agent Breakdown -->
-                ${agentSummary?.agents?.length > 0 ? `
+                ${agents.length > 0 ? `
                     <section class="stats-section stats-agents" aria-labelledby="agents-heading">
                         <h3 id="agents-heading">Agents</h3>
                         <div class="stats-table-wrapper">
@@ -456,7 +461,7 @@ function renderDashboard(data) {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    ${agentSummary.agents.map(agent => `
+                                    ${agents.map(agent => `
                                         <tr>
                                             <td>
                                                 <span class="agent-badge agent-${toCssSlug(agent.name)}">
@@ -475,7 +480,7 @@ function renderDashboard(data) {
                 ` : ''}
 
                 <!-- Workspace Breakdown -->
-                ${workspaceSummary?.workspaces?.length > 0 ? `
+                ${workspaces.length > 0 ? `
                     <section class="stats-section stats-workspaces" aria-labelledby="workspaces-heading">
                         <h3 id="workspaces-heading">Top Workspaces</h3>
                         <div class="stats-table-wrapper">
@@ -488,7 +493,7 @@ function renderDashboard(data) {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    ${workspaceSummary.workspaces.slice(0, 10).map(ws => `
+                                    ${workspaces.slice(0, 10).map(ws => `
                                         <tr>
                                             <td>
                                                 <span class="workspace-name" title="${escapeAttribute(ws.path)}">
@@ -501,29 +506,29 @@ function renderDashboard(data) {
                                     `).join('')}
                                 </tbody>
                             </table>
-                            ${workspaceSummary.workspaces.length > 10 ? `
-                                <p class="stats-more">... and ${workspaceSummary.workspaces.length - 10} more workspaces</p>
+                            ${workspaces.length > 10 ? `
+                                <p class="stats-more">... and ${workspaces.length - 10} more workspaces</p>
                             ` : ''}
                         </div>
                     </section>
                 ` : ''}
 
                 <!-- Top Terms -->
-                ${topTerms?.terms?.length > 0 ? `
+                ${terms.length > 0 ? `
                     <section class="stats-section stats-terms" aria-labelledby="terms-heading">
                         <h3 id="terms-heading">Top Topics</h3>
                         <div class="terms-cloud" role="list" aria-label="Topic frequency">
-                            ${renderTermsCloud(topTerms.terms)}
+                            ${renderTermsCloud(terms)}
                         </div>
                     </section>
                 ` : ''}
 
                 <!-- Role Distribution -->
-                ${statistics.roles && Object.keys(statistics.roles).length > 0 ? `
+                ${Object.keys(statisticsRoles).length > 0 ? `
                     <section class="stats-section stats-roles" aria-labelledby="roles-heading">
                         <h3 id="roles-heading">Message Roles</h3>
                         <div class="role-bars">
-                            ${renderRoleBars(statistics.roles)}
+                            ${renderRoleBars(statisticsRoles)}
                         </div>
                     </section>
                 ` : ''}
@@ -905,6 +910,10 @@ function toFiniteNumber(value, fallback = 0) {
 
 function toNonNegativeNumber(value, fallback = 0) {
     return Math.max(0, toFiniteNumber(value, fallback));
+}
+
+function isPlainObject(value) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function parseValidDate(timestamp) {

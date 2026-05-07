@@ -1662,6 +1662,114 @@ mod tests {
     }
 
     #[test]
+    fn test_stats_dashboard_skips_non_array_collection_shapes() -> Result<()> {
+        run_node_module_assertions(
+            r#"
+                class FixtureElement {
+                    constructor() {
+                        this._innerHTML = '';
+                    }
+
+                    set innerHTML(value) {
+                        this._innerHTML = String(value);
+                    }
+
+                    get innerHTML() {
+                        return this._innerHTML;
+                    }
+
+                    querySelectorAll() {
+                        return [];
+                    }
+
+                    querySelector() {
+                        return null;
+                    }
+                }
+
+                const originalDocument = globalThis.document;
+                const originalFetch = globalThis.fetch;
+                const container = new FixtureElement();
+
+                globalThis.document = {
+                    createElement() {
+                        const element = { _text: '' };
+                        Object.defineProperty(element, 'textContent', {
+                            set(value) {
+                                element._text = value === undefined || value === null ? '' : String(value);
+                            },
+                            get() {
+                                return element._text;
+                            },
+                        });
+                        Object.defineProperty(element, 'innerHTML', {
+                            get() {
+                                return String(element._text)
+                                    .replace(/&/g, '&amp;')
+                                    .replace(/</g, '&lt;')
+                                    .replace(/>/g, '&gt;');
+                            },
+                        });
+                        return element;
+                    },
+                    getElementById() {
+                        return null;
+                    },
+                };
+
+                const fixtures = new Map([
+                    ['statistics.json', {
+                        total_conversations: 1,
+                        total_messages: 2,
+                        total_characters: 3,
+                        agents: ['not-an-agent-map'],
+                        roles: ['not-a-role-map'],
+                    }],
+                    ['timeline.json', { daily: [{ date: '2026-01-01', messages: 1, conversations: 1 }] }],
+                    ['agent_summary.json', { agents: { length: 1, 0: { name: 'codex' } } }],
+                    ['workspace_summary.json', { workspaces: { length: 1, 0: { path: '/tmp/work' } } }],
+                    ['top_terms.json', { terms: { length: 1, 0: ['term', 1] } }],
+                ]);
+
+                globalThis.fetch = async (url) => {
+                    const key = String(url).split('/').pop();
+                    if (!fixtures.has(key)) {
+                        throw new Error(`unexpected fetch: ${url}`);
+                    }
+                    return {
+                        ok: true,
+                        status: 200,
+                        json: async () => fixtures.get(key),
+                    };
+                };
+
+                try {
+                    const { initStats, renderStatsDashboard, clearStatsCache } = await import('./src/pages_assets/stats.js');
+
+                    clearStatsCache();
+                    initStats(container);
+                    await renderStatsDashboard();
+
+                    const html = container.innerHTML;
+                    for (const needle of ['agent-badge', 'workspace-name', 'term-tag', 'role-bar-item']) {
+                        if (html.includes(needle)) {
+                            throw new Error(`expected non-array/non-object analytics collection to be skipped (${needle}), got: ${html}`);
+                        }
+                    }
+                    if (!html.includes('conversation-count')) {
+                        throw new Error(`expected dashboard overview to render despite malformed collection shapes, got: ${html}`);
+                    }
+
+                    clearStatsCache();
+                } finally {
+                    globalThis.document = originalDocument;
+                    globalThis.fetch = originalFetch;
+                }
+            "#,
+        )
+    }
+
+    #[test]
     fn test_attachment_manifest_failures_only_cache_true_absence() {
         let attachments_js = include_str!("../src/pages_assets/attachments.js");
         assert!(
