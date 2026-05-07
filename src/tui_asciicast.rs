@@ -1,15 +1,16 @@
 use anyhow::{Context, Result, anyhow, bail};
 use ftui::runtime::{AsciicastRecorder, AsciicastWriter};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-use std::io::{self, IsTerminal, Read, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{self, BufWriter, IsTerminal, Read, Write};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // Inline POSIX constants and FFI for fcntl / EIO — avoids a direct `libc` dependency.
 #[cfg(unix)]
@@ -51,7 +52,7 @@ mod posix {
 /// not captured to reduce accidental secret leakage (passwords/tokens typed in
 /// the terminal are not serialized into the recording stream).
 pub fn run_tui_with_asciicast(recording_path: &Path, interactive: bool) -> Result<()> {
-    ensure_parent_dir(recording_path)?;
+    ensure_asciicast_output_available(recording_path)?;
 
     let (child_args, removed_flag) = strip_asciicast_args(std::env::args().skip(1));
     if !removed_flag {
@@ -125,7 +126,7 @@ pub fn run_tui_with_asciicast(recording_path: &Path, interactive: bool) -> Resul
     }
 
     let run_result: Result<_> = (|| {
-        let recorder = AsciicastRecorder::new(recording_path, cols, rows)
+        let recorder = open_asciicast_recorder_no_overwrite(recording_path, cols, rows)
             .with_context(|| format!("create asciicast file at {}", recording_path.display()))?;
         let mut mirror = AsciicastWriter::new(io::stdout(), recorder);
 
@@ -189,14 +190,96 @@ pub fn run_tui_with_asciicast(recording_path: &Path, interactive: bool) -> Resul
     Ok(())
 }
 
-fn ensure_parent_dir(path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        if parent.as_os_str().is_empty() {
-            return Ok(());
-        }
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create parent directory {}", parent.display()))?;
+fn open_asciicast_recorder_no_overwrite(
+    recording_path: &Path,
+    cols: u16,
+    rows: u16,
+) -> Result<AsciicastRecorder<BufWriter<File>>> {
+    ensure_asciicast_output_available(recording_path)?;
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(recording_path)
+        .with_context(|| {
+            format!(
+                "create asciicast output file without overwrite at {}",
+                recording_path.display()
+            )
+        })?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| anyhow!("system clock is before Unix epoch: {err}"))?
+        .as_secs()
+        .try_into()
+        .context("asciicast timestamp exceeds i64 range")?;
+    AsciicastRecorder::with_writer(BufWriter::new(file), cols, rows, timestamp)
+        .with_context(|| format!("write asciicast header to {}", recording_path.display()))
+}
+
+fn ensure_asciicast_output_available(path: &Path) -> Result<()> {
+    if path.file_name().filter(|name| !name.is_empty()).is_none() {
+        bail!(
+            "asciicast output path must include a filename: {}",
+            path.display()
+        );
     }
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    ensure_asciicast_parent(parent)?;
+
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => bail!("asciicast output already exists: {}", path.display()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => {
+            Err(err).with_context(|| format!("inspect asciicast output {}", path.display()))
+        }
+    }
+}
+
+fn ensure_asciicast_parent(parent: &Path) -> Result<()> {
+    ensure_parent_chain_has_no_symlinks(parent)?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("create asciicast parent directory {}", parent.display()))?;
+    ensure_parent_chain_has_no_symlinks(parent)
+}
+
+fn ensure_parent_chain_has_no_symlinks(path: &Path) -> Result<()> {
+    let mut ancestors: Vec<PathBuf> = path
+        .ancestors()
+        .filter(|ancestor| !ancestor.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .collect();
+    ancestors.reverse();
+
+    for ancestor in ancestors {
+        match std::fs::symlink_metadata(&ancestor) {
+            Ok(metadata) => {
+                let file_type = metadata.file_type();
+                if file_type.is_symlink() {
+                    bail!(
+                        "asciicast output parent must not contain symlinks: {}",
+                        ancestor.display()
+                    );
+                }
+                if !file_type.is_dir() {
+                    bail!(
+                        "asciicast output parent is not a directory: {}",
+                        ancestor.display()
+                    );
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("inspect asciicast parent directory {}", ancestor.display())
+                });
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -375,8 +458,12 @@ impl Drop for StdinNonBlockingGuard {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_pty_eof_error, strip_asciicast_args};
+    use super::{
+        ensure_asciicast_output_available, is_pty_eof_error, open_asciicast_recorder_no_overwrite,
+        strip_asciicast_args,
+    };
     use std::io;
+    use std::io::Write as _;
 
     #[test]
     fn strips_split_asciicast_flag_and_value() {
@@ -419,5 +506,94 @@ mod tests {
 
         let pipe = io::Error::new(io::ErrorKind::BrokenPipe, "broken");
         assert!(is_pty_eof_error(&pipe));
+    }
+
+    #[test]
+    fn creates_asciicast_parent_and_new_output() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let output_path = tmp.path().join("nested").join("demo.cast");
+
+        let recorder =
+            open_asciicast_recorder_no_overwrite(&output_path, 80, 24).expect("open recorder");
+        let mut writer = recorder.finish().expect("finish recorder");
+        writer.flush().expect("flush recorder");
+
+        let contents = std::fs::read_to_string(&output_path).expect("read asciicast");
+        assert!(
+            contents.starts_with("{\"version\":2"),
+            "unexpected asciicast header: {contents:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_existing_asciicast_output_without_clobbering() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let output_path = tmp.path().join("demo.cast");
+        std::fs::write(&output_path, "existing cast").expect("seed existing output");
+
+        let err = open_asciicast_recorder_no_overwrite(&output_path, 80, 24)
+            .expect_err("existing output should be rejected");
+
+        assert!(
+            err.to_string().contains("already exists"),
+            "unexpected error: {err:#}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&output_path).expect("read existing output"),
+            "existing cast"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rejects_existing_asciicast_output_symlink_without_following() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let protected_target = tmp.path().join("protected.cast");
+        let output_path = tmp.path().join("demo.cast");
+        std::fs::write(&protected_target, "protected").expect("seed protected target");
+        symlink(&protected_target, &output_path).expect("create output symlink");
+
+        let err = open_asciicast_recorder_no_overwrite(&output_path, 80, 24)
+            .expect_err("symlink output should be rejected");
+
+        assert!(
+            err.to_string().contains("already exists"),
+            "unexpected error: {err:#}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&protected_target).expect("read protected target"),
+            "protected"
+        );
+        assert_eq!(
+            std::fs::read_link(&output_path).expect("output path remains symlink"),
+            protected_target
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rejects_symlinked_asciicast_parent_before_creating_output() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let outside_dir = tmp.path().join("outside");
+        let linked_dir = tmp.path().join("linked");
+        std::fs::create_dir_all(&outside_dir).expect("create outside dir");
+        symlink(&outside_dir, &linked_dir).expect("create parent symlink");
+        let output_path = linked_dir.join("demo.cast");
+
+        let err = ensure_asciicast_output_available(&output_path)
+            .expect_err("symlinked parent should be rejected");
+
+        assert!(
+            err.to_string().contains("must not contain symlinks"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            !outside_dir.join("demo.cast").exists(),
+            "preflight should not write through symlinked parent"
+        );
     }
 }
