@@ -21882,15 +21882,24 @@ fn write_screenshot_file_sync(format: ScreenshotFormat, content: String) -> Cass
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Downloads")
     });
-    if let Err(e) = std::fs::create_dir_all(&downloads) {
-        return CassMsg::ScreenshotFailed(format!("Cannot create dir: {e}"));
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+    write_screenshot_file_to_dir(format, content.as_bytes(), &downloads, &timestamp)
+}
+
+fn write_screenshot_file_to_dir(
+    format: ScreenshotFormat,
+    content: &[u8],
+    output_dir: &std::path::Path,
+    timestamp: &str,
+) -> CassMsg {
+    if let Err(err) = std::fs::create_dir_all(output_dir) {
+        return CassMsg::ScreenshotFailed(format!("Cannot create dir: {err}"));
     }
-    let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
-    let filename = format!("cass_screenshot_{ts}.{}", format.extension());
-    let path = downloads.join(&filename);
-    match std::fs::write(&path, content.as_bytes()) {
-        Ok(()) => CassMsg::ScreenshotCompleted(path),
-        Err(e) => CassMsg::ScreenshotFailed(format!("Write failed: {e}")),
+    let filename = format!("cass_screenshot_{timestamp}.{}", format.extension());
+    let output_path = output_dir.join(filename);
+    match write_export_bytes_no_overwrite(&output_path, content) {
+        Ok(final_path) => CassMsg::ScreenshotCompleted(final_path),
+        Err(err) => CassMsg::ScreenshotFailed(err),
     }
 }
 
@@ -29601,6 +29610,79 @@ mod tests {
             std::fs::read_to_string(&existing_path).expect("read original markdown"),
             "existing",
             "original markdown export should remain untouched"
+        );
+    }
+
+    #[test]
+    fn write_screenshot_file_to_dir_preserves_existing_same_second_capture() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let timestamp = "20260506_123456";
+        let existing_path = tmp.path().join(format!("cass_screenshot_{timestamp}.txt"));
+        std::fs::write(&existing_path, "existing").expect("seed existing screenshot");
+
+        let msg = write_screenshot_file_to_dir(
+            ScreenshotFormat::Text,
+            b"new capture",
+            tmp.path(),
+            timestamp,
+        );
+        let exported_path = match msg {
+            CassMsg::ScreenshotCompleted(path) => path,
+            other => panic!("expected ScreenshotCompleted, got: {other:?}"),
+        };
+
+        assert_ne!(
+            exported_path, existing_path,
+            "same-second screenshot should not clobber an existing capture"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&existing_path).expect("read existing screenshot"),
+            "existing"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&exported_path).expect("read new screenshot"),
+            "new capture"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_screenshot_file_to_dir_does_not_follow_existing_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let timestamp = "20260506_123456";
+        let protected_target = tmp.path().join("protected.txt");
+        let requested_path = tmp.path().join(format!("cass_screenshot_{timestamp}.txt"));
+        std::fs::write(&protected_target, "do not overwrite").expect("write protected target");
+        symlink(&protected_target, &requested_path).expect("create screenshot symlink");
+
+        let msg = write_screenshot_file_to_dir(
+            ScreenshotFormat::Text,
+            b"safe capture",
+            tmp.path(),
+            timestamp,
+        );
+        let exported_path = match msg {
+            CassMsg::ScreenshotCompleted(path) => path,
+            other => panic!("expected ScreenshotCompleted, got: {other:?}"),
+        };
+
+        assert_ne!(
+            exported_path, requested_path,
+            "screenshot export should choose a fresh path when the requested name is a symlink"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&protected_target).expect("read protected target"),
+            "do not overwrite"
+        );
+        assert_eq!(
+            std::fs::read_link(&requested_path).expect("requested screenshot remains a symlink"),
+            protected_target
+        );
+        assert_eq!(
+            std::fs::read_to_string(&exported_path).expect("read safe screenshot"),
+            "safe capture"
         );
     }
 
