@@ -6,7 +6,8 @@
 //!
 //! # Installation Methods (Priority Order)
 //!
-//! 1. **Cargo Binstall** (fastest if available) - downloads pre-built binary via cargo
+//! 1. **Cargo Binstall** (fastest if available) - downloads pre-built binary via
+//!    cargo, may fall back to a source build
 //! 2. **Pre-built Binary** - direct binary download from GitHub releases
 //! 3. **Cargo Install** - compile from source (most reliable fallback)
 //! 4. **Full Bootstrap** - install rustup first, then compile
@@ -45,10 +46,10 @@ use super::{
 pub const DEFAULT_INSTALL_TIMEOUT_SECS: u64 = 600; // 10 minutes for cargo install
 
 /// Minimum disk space required for installation (MB).
-pub const MIN_DISK_MB: u64 = 2048; // 2 GB
+pub const MIN_DISK_MB: u64 = ResourceInfo::MIN_DISK_MB;
 
 /// Minimum memory recommended for compilation (MB).
-pub const MIN_MEMORY_MB: u64 = 1024; // 1 GB
+pub const MIN_MEMORY_MB: u64 = ResourceInfo::MIN_MEMORY_MB;
 
 /// Current cass version for installation.
 pub const CASS_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -105,7 +106,7 @@ pub enum InstallError {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum InstallMethod {
-    /// Install via cargo-binstall (fastest, downloads pre-built binary).
+    /// Install via cargo-binstall (fastest, may fall back to a source build).
     CargoBinstall,
 
     /// Download pre-built binary directly from GitHub releases.
@@ -142,11 +143,13 @@ impl InstallMethod {
         }
     }
 
-    /// Whether this method requires compilation.
+    /// Whether this method requires compile-safe resources before cass attempts it.
     pub fn requires_compilation(&self) -> bool {
         matches!(
             self,
-            InstallMethod::CargoInstall | InstallMethod::FullBootstrap
+            InstallMethod::CargoBinstall
+                | InstallMethod::CargoInstall
+                | InstallMethod::FullBootstrap
         )
     }
 }
@@ -339,8 +342,10 @@ impl RemoteInstaller {
     ///
     /// Returns `None` if no viable installation method is available.
     pub fn choose_method(&self) -> Option<InstallMethod> {
-        // 1. Try cargo-binstall first (fastest)
-        if self.system_info.has_cargo_binstall {
+        // 1. Try cargo-binstall first when source fallback is safe. Binstall's
+        // default strategy chain can end in `cargo install`, so it needs the
+        // same compile pre-flight as explicit source installs.
+        if self.system_info.has_cargo_binstall && self.can_compile().is_ok() {
             return Some(InstallMethod::CargoBinstall);
         }
 
@@ -520,6 +525,8 @@ impl RemoteInstaller {
     where
         F: Fn(InstallProgress),
     {
+        self.can_compile()?;
+
         on_progress(InstallProgress {
             stage: InstallStage::Downloading,
             message: "Running cargo binstall...".into(),
@@ -1085,7 +1092,7 @@ mod tests {
 
     #[test]
     fn test_install_method_requires_compilation() {
-        assert!(!InstallMethod::CargoBinstall.requires_compilation());
+        assert!(InstallMethod::CargoBinstall.requires_compilation());
         assert!(
             !InstallMethod::PrebuiltBinary {
                 url: "".into(),
@@ -1095,6 +1102,12 @@ mod tests {
         );
         assert!(InstallMethod::CargoInstall.requires_compilation());
         assert!(InstallMethod::FullBootstrap.requires_compilation());
+    }
+
+    #[test]
+    fn test_install_resource_thresholds_match_probe_thresholds() {
+        assert_eq!(MIN_DISK_MB, ResourceInfo::MIN_DISK_MB);
+        assert_eq!(MIN_MEMORY_MB, ResourceInfo::MIN_MEMORY_MB);
     }
 
     #[test]
@@ -1192,6 +1205,47 @@ mod tests {
                 Some(InstallMethod::PrebuiltBinary { .. })
             ),
             "low-memory hosts should still use non-compiling prebuilt installs when available"
+        );
+    }
+
+    #[test]
+    fn test_choose_method_skips_binstall_when_compile_resources_are_insufficient() {
+        let mut system = fixture_system_info();
+        system.has_cargo = true;
+        system.has_cargo_binstall = true;
+        system.has_curl = false;
+        system.has_wget = false;
+        system.arch = "armv7".into();
+        let mut resources = fixture_resources();
+        resources.memory_total_mb = MIN_MEMORY_MB - 1;
+
+        let installer = RemoteInstaller::new("test", system, resources);
+
+        assert_eq!(
+            installer.choose_method(),
+            None,
+            "cargo-binstall may fall back to cargo install, so it must not be selected when source builds are unsafe"
+        );
+    }
+
+    #[test]
+    fn test_choose_method_prefers_prebuilt_over_low_memory_binstall() {
+        let mut system = fixture_system_info();
+        system.has_cargo = true;
+        system.has_cargo_binstall = true;
+        system.has_curl = true;
+        system.has_wget = false;
+        let mut resources = fixture_resources();
+        resources.memory_total_mb = MIN_MEMORY_MB - 1;
+
+        let installer = RemoteInstaller::new("test", system, resources);
+
+        assert!(
+            matches!(
+                installer.choose_method(),
+                Some(InstallMethod::PrebuiltBinary { .. })
+            ),
+            "low-memory hosts with direct release assets should bypass cargo-binstall's source fallback"
         );
     }
 
