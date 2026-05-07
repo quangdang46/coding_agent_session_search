@@ -1231,7 +1231,7 @@ fn refresh_private_artifacts(
     recovery_secret: Option<&[u8]>,
     remove_recovery_artifacts: bool,
 ) -> Result<()> {
-    let Some(private_dir) = private_dir_for_archive(archive_dir) else {
+    let Some(private_dir) = private_dir_for_archive(archive_dir)? else {
         return Ok(());
     };
 
@@ -1254,20 +1254,42 @@ fn refresh_private_artifacts(
     Ok(())
 }
 
-fn private_dir_for_archive(archive_dir: &Path) -> Option<std::path::PathBuf> {
+fn private_dir_for_archive(archive_dir: &Path) -> Result<Option<std::path::PathBuf>> {
     if archive_dir
         .file_name()
         .map(|name| name == "site")
         .unwrap_or(false)
     {
-        let parent = archive_dir.parent()?;
+        let Some(parent) = archive_dir.parent() else {
+            return Ok(None);
+        };
         let private_dir = parent.join("private");
-        if private_dir.is_dir() {
-            return Some(private_dir);
+        match std::fs::symlink_metadata(&private_dir) {
+            Ok(metadata) => {
+                let file_type = metadata.file_type();
+                if file_type.is_symlink() {
+                    bail!(
+                        "private artifact directory must not be a symlink: {}",
+                        private_dir.display()
+                    );
+                }
+                if file_type.is_dir() {
+                    return Ok(Some(private_dir));
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "Failed to inspect private artifact directory {}",
+                        private_dir.display()
+                    )
+                });
+            }
         }
     }
 
-    None
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -1372,6 +1394,33 @@ mod tests {
         assert!(
             rendered.contains("supports only deflate") && rendered.contains(compression),
             "unexpected unsupported-format error: {err:#}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_private_dir_for_archive_rejects_symlinked_private_dir() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path().join("bundle/site");
+        let outside_private = temp.path().join("outside-private");
+        std::fs::create_dir_all(&site_dir).unwrap();
+        std::fs::create_dir_all(&outside_private).unwrap();
+        symlink(&outside_private, temp.path().join("bundle/private")).unwrap();
+
+        let err = private_dir_for_archive(&site_dir).unwrap_err();
+
+        assert!(
+            err.to_string().contains("must not be a symlink"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            std::fs::symlink_metadata(temp.path().join("bundle/private"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "rejected private directory symlink should remain untouched"
         );
     }
 

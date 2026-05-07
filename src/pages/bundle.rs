@@ -10,8 +10,8 @@ use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use super::archive_config::{ArchiveConfig, UnencryptedConfig};
@@ -897,10 +897,125 @@ pub(crate) fn write_private_fingerprint(private_dir: &Path, fingerprint: &str) -
         fingerprint,
         Utc::now().to_rfc3339()
     );
-    fs::write(
-        private_dir.join("integrity-fingerprint.txt"),
-        fingerprint_content,
+    write_private_artifact_file(
+        private_dir,
+        "integrity-fingerprint.txt",
+        fingerprint_content.as_bytes(),
     )?;
+    Ok(())
+}
+
+fn ensure_private_artifact_dir(private_dir: &Path) -> Result<()> {
+    match fs::symlink_metadata(private_dir) {
+        Ok(metadata) => {
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                bail!(
+                    "private artifact directory must not be a symlink: {}",
+                    private_dir.display()
+                );
+            }
+            if !file_type.is_dir() {
+                bail!(
+                    "private artifact path must be a directory: {}",
+                    private_dir.display()
+                );
+            }
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(private_dir).with_context(|| {
+                format!(
+                    "Failed to create private artifact directory {}",
+                    private_dir.display()
+                )
+            })?;
+            ensure_private_artifact_dir(private_dir)
+        }
+        Err(err) => Err(err).with_context(|| {
+            format!(
+                "Failed to inspect private artifact directory {}",
+                private_dir.display()
+            )
+        }),
+    }
+}
+
+fn reject_symlinked_private_artifact(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                bail!(
+                    "private artifact file must not be a symlink: {}",
+                    path.display()
+                );
+            }
+            if file_type.is_dir() {
+                bail!(
+                    "private artifact path must be a regular file, not a directory: {}",
+                    path.display()
+                );
+            }
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err)
+            .with_context(|| format!("Failed to inspect private artifact {}", path.display())),
+    }
+}
+
+fn write_private_artifact_file(private_dir: &Path, filename: &str, contents: &[u8]) -> Result<()> {
+    if filename.contains(['/', '\\']) {
+        bail!("private artifact filename must not contain path separators: {filename}");
+    }
+
+    ensure_private_artifact_dir(private_dir)?;
+    let final_path = private_dir.join(filename);
+    reject_symlinked_private_artifact(&final_path)?;
+    let temp_path = unique_bundle_sidecar_path(&final_path, "tmp", "private_artifact")?;
+
+    let write_result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .with_context(|| {
+                format!(
+                    "Failed to create temporary private artifact {}",
+                    temp_path.display()
+                )
+            })?;
+        file.write_all(contents).with_context(|| {
+            format!(
+                "Failed to write temporary private artifact {}",
+                temp_path.display()
+            )
+        })?;
+        file.sync_all().with_context(|| {
+            format!(
+                "Failed to sync temporary private artifact {}",
+                temp_path.display()
+            )
+        })?;
+        Ok(())
+    })();
+
+    if let Err(err) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err);
+    }
+
+    if let Err(err) = fs::rename(&temp_path, &final_path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err).with_context(|| {
+            format!(
+                "Failed to install private artifact {}",
+                final_path.display()
+            )
+        });
+    }
+    sync_parent_directory(&final_path)?;
     Ok(())
 }
 
@@ -933,7 +1048,11 @@ pub(crate) fn write_private_artifacts_encrypted(
             enc_config.export_id,
             Utc::now().to_rfc3339()
         );
-        fs::write(&recovery_secret_path, recovery_content)?;
+        write_private_artifact_file(
+            private_dir,
+            "recovery-secret.txt",
+            recovery_content.as_bytes(),
+        )?;
 
         // Generate QR code if requested
         if generate_qr {
@@ -950,9 +1069,8 @@ pub(crate) fn write_private_artifacts_encrypted(
 
     // Write master key backup (encrypted DEK wrapped with KEK)
     let master_key_backup = master_key_backup_json(enc_config, Utc::now().to_rfc3339());
-    let master_key_path = private_dir.join("master-key.json");
-    let master_key_file = File::create(&master_key_path)?;
-    serde_json::to_writer_pretty(BufWriter::new(master_key_file), &master_key_backup)?;
+    let master_key_json = serde_json::to_vec_pretty(&master_key_backup)?;
+    write_private_artifact_file(private_dir, "master-key.json", &master_key_json)?;
 
     Ok(())
 }
@@ -986,7 +1104,7 @@ fn write_private_unencrypted_notice(private_dir: &Path) -> Result<()> {
         Generated: {}\n",
         Utc::now().to_rfc3339()
     );
-    fs::write(private_dir.join("unencrypted-warning.txt"), content)?;
+    write_private_artifact_file(private_dir, "unencrypted-warning.txt", content.as_bytes())?;
     Ok(())
 }
 
@@ -994,11 +1112,11 @@ fn write_private_unencrypted_notice(private_dir: &Path) -> Result<()> {
 fn generate_qr_codes(private_dir: &Path, recovery_b64: &str) -> Result<()> {
     // Use the qr module from pages if available
     if let Ok(qr_png) = super::qr::generate_qr_png(recovery_b64) {
-        fs::write(private_dir.join("qr-code.png"), qr_png)?;
+        write_private_artifact_file(private_dir, "qr-code.png", &qr_png)?;
     }
 
     if let Ok(qr_svg) = super::qr::generate_qr_svg(recovery_b64) {
-        fs::write(private_dir.join("qr-code.svg"), qr_svg)?;
+        write_private_artifact_file(private_dir, "qr-code.svg", qr_svg.as_bytes())?;
     }
 
     Ok(())
@@ -1226,6 +1344,47 @@ mod tests {
         assert_eq!(backup["key_slots"], serde_json::json!([]));
         assert_eq!(backup["note"], MASTER_KEY_BACKUP_NOTE);
         assert_eq!(backup["generated_at"], "2026-04-25T19:08:00Z");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_private_artifacts_reject_symlinked_secret_file() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let private_dir = temp.path().join("private");
+        let outside_dir = temp.path().join("outside");
+        fs::create_dir_all(&private_dir).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+        let protected_secret = outside_dir.join("protected-secret.txt");
+        fs::write(&protected_secret, "do not overwrite").unwrap();
+        symlink(&protected_secret, private_dir.join("recovery-secret.txt")).unwrap();
+
+        let config = encrypted_config_for_files(Vec::new());
+        let err = write_private_artifacts_encrypted(
+            &private_dir,
+            &config,
+            Some(&[7u8; 32]),
+            false,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("must not be a symlink"),
+            "unexpected error: {err:#}"
+        );
+        assert_eq!(
+            fs::read_to_string(&protected_secret).unwrap(),
+            "do not overwrite"
+        );
+        assert!(
+            fs::symlink_metadata(private_dir.join("recovery-secret.txt"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "rejected private artifact symlink should be left intact"
+        );
     }
 
     #[test]

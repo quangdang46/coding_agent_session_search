@@ -26,7 +26,9 @@ use anyhow::{Context, Result, bail};
 use base64::prelude::*;
 use chrono::Utc;
 use rand::Rng;
-use std::path::Path;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use tracing::info;
 use zeroize::Zeroize;
 
@@ -197,20 +199,21 @@ IMPORTANT:
     ///
     /// Creates the directory if it doesn't exist.
     pub fn write_to_dir(&self, dir: &Path) -> Result<()> {
-        std::fs::create_dir_all(dir).context("Failed to create private directory")?;
+        ensure_recovery_artifact_dir(dir)?;
 
         // Write recovery-secret.txt
         let secret_path = dir.join("recovery-secret.txt");
-        std::fs::write(&secret_path, &self.secret_text)
+        write_recovery_artifact(&secret_path, self.secret_text.as_bytes())
             .context("Failed to write recovery-secret.txt")?;
 
         // Write qr-code.png
         let png_path = dir.join("qr-code.png");
-        std::fs::write(&png_path, &self.qr_png).context("Failed to write qr-code.png")?;
+        write_recovery_artifact(&png_path, &self.qr_png).context("Failed to write qr-code.png")?;
 
         // Write qr-code.svg
         let svg_path = dir.join("qr-code.svg");
-        std::fs::write(&svg_path, &self.qr_svg).context("Failed to write qr-code.svg")?;
+        write_recovery_artifact(&svg_path, self.qr_svg.as_bytes())
+            .context("Failed to write qr-code.svg")?;
 
         info!(
             dir = %dir.display(),
@@ -219,6 +222,137 @@ IMPORTANT:
 
         Ok(())
     }
+}
+
+fn ensure_recovery_artifact_dir(dir: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(metadata) => {
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                bail!(
+                    "Recovery artifact directory must not be a symlink: {}",
+                    dir.display()
+                );
+            }
+            if !file_type.is_dir() {
+                bail!(
+                    "Recovery artifact path must be a directory: {}",
+                    dir.display()
+                );
+            }
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(dir).context("Failed to create private directory")?;
+            ensure_recovery_artifact_dir(dir)
+        }
+        Err(err) => Err(err)
+            .with_context(|| format!("Failed to inspect recovery artifact dir {}", dir.display())),
+    }
+}
+
+fn reject_recovery_artifact_symlink(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                bail!(
+                    "Recovery artifact file must not be a symlink: {}",
+                    path.display()
+                );
+            }
+            if file_type.is_dir() {
+                bail!(
+                    "Recovery artifact path must be a regular file, not a directory: {}",
+                    path.display()
+                );
+            }
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err)
+            .with_context(|| format!("Failed to inspect recovery artifact {}", path.display())),
+    }
+}
+
+fn recovery_artifact_temp_path(path: &Path, attempt: usize) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("artifact");
+    path.with_file_name(format!(
+        ".{file_name}.tmp.{}.{}",
+        std::process::id(),
+        attempt
+    ))
+}
+
+fn write_recovery_artifact(path: &Path, contents: &[u8]) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    ensure_recovery_artifact_dir(parent)?;
+    reject_recovery_artifact_symlink(path)?;
+
+    let mut temp_path = None;
+    let mut file = None;
+    for attempt in 0..100 {
+        let candidate = recovery_artifact_temp_path(path, attempt);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(opened) => {
+                temp_path = Some(candidate);
+                file = Some(opened);
+                break;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "Failed to create temporary recovery artifact {}",
+                        candidate.display()
+                    )
+                });
+            }
+        }
+    }
+
+    let temp_path = temp_path.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Failed to allocate a temporary recovery artifact path for {}",
+            path.display()
+        )
+    })?;
+    let mut file = file.expect("temp_path is set only with an open file");
+    let write_result = (|| -> Result<()> {
+        file.write_all(contents).with_context(|| {
+            format!(
+                "Failed to write temporary recovery artifact {}",
+                temp_path.display()
+            )
+        })?;
+        file.sync_all().with_context(|| {
+            format!(
+                "Failed to sync temporary recovery artifact {}",
+                temp_path.display()
+            )
+        })?;
+        Ok(())
+    })();
+
+    if let Err(err) = write_result {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(err);
+    }
+    drop(file);
+
+    if let Err(err) = std::fs::rename(&temp_path, path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(err)
+            .with_context(|| format!("Failed to install recovery artifact {}", path.display()));
+    }
+    Ok(())
 }
 
 /// Generate a QR code as PNG bytes.
@@ -294,7 +428,7 @@ impl QrGenerator {
 
     pub fn generate(&self, data: &str, output_path: &Path) -> Result<()> {
         let png_data = generate_qr_png(data)?;
-        std::fs::write(output_path, png_data)?;
+        write_recovery_artifact(output_path, &png_data)?;
         Ok(())
     }
 }
@@ -345,6 +479,48 @@ mod tests {
         let secret1 = RecoverySecret::from_bytes(bytes.clone()).unwrap();
         let secret2 = RecoverySecret::from_bytes(bytes).unwrap();
         assert_eq!(secret1.encoded(), secret2.encoded());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_recovery_artifacts_write_to_dir_rejects_symlinked_secret_file() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().expect("create temp dir");
+        let private_dir = tmp.path().join("private");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&private_dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let protected = outside.join("protected-secret.txt");
+        std::fs::write(&protected, "do not overwrite").unwrap();
+        symlink(&protected, private_dir.join("recovery-secret.txt")).unwrap();
+
+        let secret = RecoverySecret::from_bytes(vec![1u8; 32]).unwrap();
+        let artifacts = RecoveryArtifacts {
+            secret,
+            secret_text: "safe secret text".to_string(),
+            qr_png: b"png".to_vec(),
+            qr_svg: "<svg></svg>".to_string(),
+        };
+
+        let err = artifacts.write_to_dir(&private_dir).unwrap_err();
+        let rendered = format!("{err:#}");
+
+        assert!(
+            rendered.contains("must not be a symlink"),
+            "unexpected error: {err:#}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&protected).unwrap(),
+            "do not overwrite"
+        );
+        assert!(
+            std::fs::symlink_metadata(private_dir.join("recovery-secret.txt"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "rejected recovery secret symlink should be left intact"
+        );
     }
 
     #[test]
