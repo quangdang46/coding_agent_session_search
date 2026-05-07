@@ -326,7 +326,32 @@ fn validate_ssh_host(host: &str) -> Result<(), ConfigError> {
         ));
     }
 
+    if !ssh_host_has_safe_token_chars(host) {
+        return Err(ConfigError::Validation(
+            "SSH host may only contain ASCII letters, digits, '.', '-', '_', and '@'".into(),
+        ));
+    }
+
+    validate_optional_user_host_shape(host).map_err(ConfigError::Validation)?;
+
     Ok(())
+}
+
+pub(crate) fn ssh_host_has_safe_token_chars(host: &str) -> bool {
+    host.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '@'))
+}
+
+pub(crate) fn validate_optional_user_host_shape(host: &str) -> Result<(), String> {
+    match host.split_once('@') {
+        Some((user, hostname)) if user.is_empty() || hostname.is_empty() => {
+            Err("SSH host must not have an empty user or hostname around '@'".into())
+        }
+        Some((_, hostname)) if hostname.contains('@') => {
+            Err("SSH host must contain at most one '@' separator".into())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Sync schedule for remote sources.
@@ -1419,11 +1444,35 @@ mod tests {
 
     #[test]
     fn test_source_validation_ssh_host_hardening() {
+        let source = SourceDefinition::ssh("test", "user-name_1@host-name.example");
+        assert!(source.validate().is_ok());
+
+        let source = SourceDefinition::ssh("test", "ssh-config-alias");
+        assert!(source.validate().is_ok());
+
         let source = SourceDefinition::ssh("test", "-oProxyCommand=evil");
         assert!(source.validate().is_err());
 
         let source = SourceDefinition::ssh("test", "user@host withspace");
         assert!(source.validate().is_err());
+
+        for host in [
+            "user@host;touch /tmp/cass-owned",
+            "user@host`hostname`",
+            "user@host$(hostname)",
+            "user@host/../../secret",
+            "user@host:2222",
+            "üser@host",
+            "@host",
+            "user@",
+            "user@host@extra",
+        ] {
+            let source = SourceDefinition::ssh("test", host);
+            assert!(
+                source.validate().is_err(),
+                "host should be rejected: {host:?}"
+            );
+        }
     }
 
     #[test]

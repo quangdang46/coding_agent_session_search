@@ -71734,12 +71734,13 @@ fn parse_source_url(url: &str, name: Option<&str>) -> Result<(String, String), C
     if host.trim().is_empty()
         || host.starts_with('-')
         || host.chars().any(|c| c.is_whitespace() || c.is_control())
+        || !crate::sources::config::ssh_host_has_safe_token_chars(host)
+        || crate::sources::config::validate_optional_user_host_shape(host).is_err()
     {
         return Err(CliError {
             code: 10,
             kind: CliErrorKind::Config.kind_str(),
-            message: "Invalid host: contains whitespace/control characters or starts with '-'"
-                .into(),
+            message: "Invalid host: contains unsafe characters or starts with '-'".into(),
             hint: Some("Use format: user@hostname (e.g., user@laptop.local)".into()),
             retryable: false,
         });
@@ -71770,6 +71771,38 @@ fn parse_source_url(url: &str, name: Option<&str>) -> Result<(String, String), C
     };
 
     Ok((host.to_string(), source_id))
+}
+
+#[cfg(test)]
+mod source_url_tests {
+    use super::*;
+
+    #[test]
+    fn parse_source_url_accepts_safe_user_host_tokens() {
+        let (host, source_id) =
+            parse_source_url("ssh://user-name_1@host-name.example", None).expect("parse");
+
+        assert_eq!(host, "user-name_1@host-name.example");
+        assert_eq!(source_id, "host-name");
+    }
+
+    #[test]
+    fn parse_source_url_rejects_shell_metacharacters_before_ssh_probe() {
+        for url in [
+            "user@host;touch /tmp/cass-owned",
+            "user@host`hostname`",
+            "user@host$(hostname)",
+            "user@host/../../secret",
+            "@host",
+            "user@",
+            "user@host@extra",
+        ] {
+            let err = parse_source_url(url, None).expect_err("must reject unsafe host");
+            assert_eq!(err.code, 10);
+            assert_eq!(err.kind, CliErrorKind::Config.kind_str());
+            assert!(err.message.contains("unsafe characters"), "{err:?}");
+        }
+    }
 }
 
 /// Test SSH connectivity to a host.

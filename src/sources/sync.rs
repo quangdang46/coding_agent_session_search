@@ -32,7 +32,10 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use super::{
-    config::{SourceDefinition, SyncSchedule, discover_ssh_hosts},
+    config::{
+        SourceDefinition, SyncSchedule, discover_ssh_hosts, ssh_host_has_safe_token_chars,
+        validate_optional_user_host_shape,
+    },
     host_key_verification_error, is_host_key_verification_failure, strict_ssh_cli_tokens,
     strict_ssh_command_for_rsync, wait_for_child_output_with_timeout,
 };
@@ -483,9 +486,10 @@ impl SyncEngine {
     /// This is called once per source sync to avoid repeated SSH calls for each path.
     fn get_remote_home(&self, host: &str) -> Result<String, SyncError> {
         // Validate host doesn't contain shell metacharacters to prevent injection
-        if host
-            .chars()
-            .any(|c| !c.is_alphanumeric() && c != '.' && c != '-' && c != '_' && c != '@')
+        if host.trim().is_empty()
+            || host.starts_with('-')
+            || !ssh_host_has_safe_token_chars(host)
+            || validate_optional_user_host_shape(host).is_err()
         {
             return Err(SyncError::SshFailed(format!(
                 "Invalid characters in host: {}",
@@ -2745,6 +2749,11 @@ mod tests {
             "work-mac\nhostname",
             "work-mac`hostname`",
             "work-mac/../../secret",
+            "-oProxyCommand=evil",
+            "",
+            "@host",
+            "user@",
+            "user@host@extra",
         ] {
             let err = engine.get_remote_home(host).unwrap_err();
             assert!(
