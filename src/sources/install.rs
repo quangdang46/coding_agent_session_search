@@ -448,8 +448,20 @@ impl RemoteInstaller {
         };
         let distro = raw_distro.to_ascii_lowercase();
 
-        if distro.contains("ubuntu") {
+        if distro.contains("alpine") || distro.contains("void linux") {
+            return false;
+        }
+        if distro.contains("ubuntu") || distro.contains("pop!_os") || distro.contains("pop os") {
             return first_version_components(&distro).is_none_or(|version| version >= (24, 4));
+        }
+        if distro.contains("linux mint") {
+            return first_version_components(&distro).is_none_or(|version| version.0 >= 22);
+        }
+        if distro.contains("elementary os") {
+            return first_version_components(&distro).is_none_or(|version| version.0 >= 8);
+        }
+        if distro.contains("zorin os") {
+            return first_version_components(&distro).is_none_or(|version| version.0 >= 18);
         }
         if distro.contains("debian") {
             return first_version_components(&distro).is_none_or(|version| version.0 >= 13);
@@ -1423,6 +1435,11 @@ mod tests {
             "Fedora Linux 38 (Workstation Edition)",
             "CentOS Linux 7 (Core)",
             "Amazon Linux 2023",
+            "Alpine Linux v3.20",
+            "Pop!_OS 22.04 LTS",
+            "Linux Mint 21.3 Virginia",
+            "elementary OS 7.1 Horus",
+            "Zorin OS 17.2 Core",
         ] {
             let mut system = fixture_system_info();
             system.distro = Some(distro.into());
@@ -1444,6 +1461,10 @@ mod tests {
             "Debian GNU/Linux 13 (trixie)",
             "Fedora Linux 39 (Workstation Edition)",
             "Red Hat Enterprise Linux 10.0",
+            "Pop!_OS 24.04 LTS",
+            "Linux Mint 22 Wilma",
+            "elementary OS 8 Circe",
+            "Zorin OS 18 Core",
             "Arch Linux",
         ] {
             let mut system = fixture_system_info();
