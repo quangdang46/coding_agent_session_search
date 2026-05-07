@@ -35,6 +35,34 @@ pub const DEFAULT_CHUNK_SIZE: usize = 8 * 1024 * 1024;
 /// Maximum chunk size (32 MiB)
 pub const MAX_CHUNK_SIZE: usize = 32 * 1024 * 1024;
 
+const MAX_ARCHIVE_CHUNKS: u64 = u32::MAX as u64;
+
+fn max_encryptable_plaintext_bytes(chunk_size: usize) -> u64 {
+    MAX_ARCHIVE_CHUNKS.saturating_mul(chunk_size as u64)
+}
+
+fn ensure_archive_chunk_count_fits_nonce_space(chunk_count: u64, chunk_size: usize) -> Result<()> {
+    if chunk_count > MAX_ARCHIVE_CHUNKS {
+        bail!(
+            "File too large: exceeds maximum of {} chunks ({} bytes with current chunk size)",
+            u32::MAX,
+            max_encryptable_plaintext_bytes(chunk_size)
+        );
+    }
+    Ok(())
+}
+
+fn ensure_can_write_archive_chunk(chunk_index: u32, chunk_size: usize) -> Result<()> {
+    if chunk_index == u32::MAX {
+        bail!(
+            "File too large: exceeds maximum of {} chunks ({} bytes with current chunk size)",
+            u32::MAX,
+            max_encryptable_plaintext_bytes(chunk_size)
+        );
+    }
+    Ok(())
+}
+
 /// Argon2id parameters (from Phase 2 spec)
 #[cfg(not(test))]
 const ARGON2_MEMORY_KB: u32 = 65536; // 64 MB
@@ -337,6 +365,10 @@ impl EncryptionEngine {
 
         // Read input file size for progress
         let input_size = std::fs::metadata(input_path)?.len();
+        ensure_archive_chunk_count_fits_nonce_space(
+            input_size.div_ceil(self.chunk_size as u64),
+            self.chunk_size,
+        )?;
 
         // Open input file
         let input_file = File::open(input_path).context("Failed to open input file")?;
@@ -370,6 +402,7 @@ impl EncryptionEngine {
             if total_read == 0 {
                 break; // No more data
             }
+            ensure_can_write_archive_chunk(chunk_index, self.chunk_size)?;
 
             plaintext.truncate(total_read);
 
@@ -1364,6 +1397,32 @@ mod tests {
 
         // Verify
         assert_file_bytes(&decrypted_path, test_data);
+    }
+
+    #[test]
+    fn encrypt_file_rejects_chunk_count_beyond_nonce_space_before_writing_payload() {
+        let temp_dir = TempDir::new().unwrap();
+        let input_path = temp_dir.path().join("too-large.bin");
+        let output_dir = temp_dir.path().join("encrypted");
+
+        let input = File::create(&input_path).unwrap();
+        input.set_len(u64::from(u32::MAX) + 1).unwrap();
+
+        let mut engine = EncryptionEngine::new(1).unwrap();
+        engine.add_password_slot("password").unwrap();
+
+        let err = engine
+            .encrypt_file(&input_path, &output_dir, |_, _| {})
+            .expect_err("archive must reject more than u32::MAX chunks");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("exceeds maximum") && rendered.contains(&u32::MAX.to_string()),
+            "unexpected chunk-count error: {rendered}"
+        );
+        assert!(
+            !output_dir.join("payload/chunk-00000.bin").exists(),
+            "oversized sparse input must fail before writing any ciphertext chunk"
+        );
     }
 
     #[test]

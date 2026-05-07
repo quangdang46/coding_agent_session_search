@@ -53,6 +53,33 @@ const ARGON2_PARALLELISM: u32 = 1;
 
 /// Schema version for encryption
 const SCHEMA_VERSION: u8 = 2;
+const MAX_ARCHIVE_CHUNKS: u64 = u32::MAX as u64;
+
+fn max_encryptable_plaintext_bytes(chunk_size: usize) -> u64 {
+    MAX_ARCHIVE_CHUNKS.saturating_mul(chunk_size as u64)
+}
+
+fn ensure_archive_chunk_count_fits_nonce_space(chunk_count: u64, chunk_size: usize) -> Result<()> {
+    if chunk_count > MAX_ARCHIVE_CHUNKS {
+        bail!(
+            "File too large: exceeds maximum of {} chunks ({} bytes with current chunk size)",
+            u32::MAX,
+            max_encryptable_plaintext_bytes(chunk_size)
+        );
+    }
+    Ok(())
+}
+
+fn ensure_can_write_archive_chunk(chunk_index: u32, chunk_size: usize) -> Result<()> {
+    if chunk_index == u32::MAX {
+        bail!(
+            "File too large: exceeds maximum of {} chunks ({} bytes with current chunk size)",
+            u32::MAX,
+            max_encryptable_plaintext_bytes(chunk_size)
+        );
+    }
+    Ok(())
+}
 
 /// Result of listing key slots
 #[derive(Debug, Clone, Serialize)]
@@ -801,10 +828,12 @@ fn encrypt_all_chunks(
         anyhow::bail!("chunk_size must be > 0");
     }
     let total_chunks = plaintext.len().div_ceil(chunk_size);
+    ensure_archive_chunk_count_fits_nonce_space(total_chunks as u64, chunk_size)?;
     let mut chunk_index = 0u32;
 
     for (i, chunk) in plaintext.chunks(chunk_size).enumerate() {
         progress(i as f32 / total_chunks as f32);
+        ensure_can_write_archive_chunk(chunk_index, chunk_size)?;
 
         // Compress
         let mut compressed = Vec::new();
@@ -1539,6 +1568,19 @@ mod tests {
         let config = load_config(&archive_dir).unwrap();
         assert!(unwrap_dek_with_password(&config, "test-password").is_ok());
         assert!(unwrap_dek_with_password(&config, "new-password").is_err());
+    }
+
+    #[test]
+    fn test_key_rotate_chunk_count_preflight_preserves_nonce_space_limit() {
+        ensure_archive_chunk_count_fits_nonce_space(u64::from(u32::MAX), 1).unwrap();
+
+        let err =
+            ensure_archive_chunk_count_fits_nonce_space(u64::from(u32::MAX) + 1, 1).unwrap_err();
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("exceeds maximum") && rendered.contains(&u32::MAX.to_string()),
+            "unexpected chunk-count error: {rendered}"
+        );
     }
 
     #[test]
