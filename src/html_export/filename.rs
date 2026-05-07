@@ -412,6 +412,7 @@ fn filename_path_is_occupied(path: &Path) -> bool {
 }
 
 fn unique_candidate_filename(stem: &str, ext: &str, suffix: &str) -> String {
+    let ext = bounded_extension_for_collision_candidate(ext, suffix.len());
     let reserved_len = suffix.len().saturating_add(ext.len());
     let max_stem_len = MAX_FILENAME_LEN.saturating_sub(reserved_len).max(1);
     let mut candidate_stem = if stem.len() > max_stem_len {
@@ -421,9 +422,37 @@ fn unique_candidate_filename(stem: &str, ext: &str, suffix: &str) -> String {
         trim_separators(stem)
     };
     if candidate_stem.is_empty() {
-        candidate_stem = "session".to_string();
+        let safe_end = truncate_to_char_boundary("session", max_stem_len);
+        candidate_stem = "session"[..safe_end].to_string();
     }
     format!("{candidate_stem}{suffix}{ext}")
+}
+
+fn bounded_extension_for_collision_candidate(ext: &str, suffix_len: usize) -> String {
+    if ext.is_empty() {
+        return String::new();
+    }
+
+    // Keep at least one byte for the stem. If the extension alone would crowd
+    // out the collision suffix, truncate it rather than returning a filename
+    // component longer than platform limits.
+    let max_ext_len = MAX_FILENAME_LEN
+        .saturating_sub(suffix_len)
+        .saturating_sub(1);
+    if max_ext_len < 2 {
+        return String::new();
+    }
+    if ext.len() <= max_ext_len {
+        return ext.to_string();
+    }
+
+    let safe_end = truncate_to_char_boundary(ext, max_ext_len);
+    let truncated = &ext[..safe_end];
+    if truncated.len() < 2 {
+        String::new()
+    } else {
+        truncated.trim_end_matches('.').to_string()
+    }
 }
 
 fn safe_unique_base_filename(base_filename: &str) -> String {
@@ -1091,6 +1120,26 @@ mod tests {
         assert_ne!(filename.as_ref(), base_filename);
         assert!(filename.ends_with("_1.html"), "{filename}");
         assert!(filename.len() <= MAX_FILENAME_LEN, "{filename}");
+    }
+
+    #[test]
+    fn test_unique_filename_collision_with_long_extension_keeps_platform_length_limit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let base_filename = format!("a.{}", "b".repeat(MAX_FILENAME_LEN - "a.".len()));
+        assert_eq!(base_filename.len(), MAX_FILENAME_LEN);
+        assert!(is_valid_filename(&base_filename));
+        std::fs::write(temp.path().join(&base_filename), b"existing").expect("write existing");
+
+        let path = unique_filename(temp.path(), &base_filename);
+        let filename = path.file_name().unwrap().to_string_lossy();
+
+        assert_ne!(filename.as_ref(), base_filename);
+        assert!(filename.starts_with("a_1."), "{filename}");
+        assert!(filename.len() <= MAX_FILENAME_LEN, "{filename}");
+        assert!(
+            is_valid_filename(&filename),
+            "collision candidate should remain platform-safe: {filename}"
+        );
     }
 
     #[cfg(unix)]
