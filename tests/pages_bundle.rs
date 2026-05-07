@@ -859,6 +859,23 @@ mod tests {
     }
 
     #[test]
+    fn test_auth_password_unlock_preserves_exact_input() {
+        let auth_js = include_str!("../src/pages_assets/auth.js");
+        assert!(
+            auth_js.contains("const password = elements.passwordInput.value;"),
+            "browser unlock must pass the exact password string to Argon2id"
+        );
+        assert!(
+            auth_js.contains("if (password.length === 0)"),
+            "empty-password validation should not trim away intentional leading/trailing spaces"
+        );
+        assert!(
+            !auth_js.contains("const password = elements.passwordInput.value.trim();"),
+            "trimming the browser password makes archives with leading/trailing-space passwords impossible to unlock"
+        );
+    }
+
+    #[test]
     fn test_search_cleanup_paths_reset_virtual_results_presentation() {
         let search_js = include_str!("../src/pages_assets/search.js");
         assert!(

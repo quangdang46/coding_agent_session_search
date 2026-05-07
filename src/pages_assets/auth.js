@@ -595,9 +595,9 @@ async function handleUnlockClick(event) {
         return;
     }
 
-    const password = elements.passwordInput.value.trim();
+    const password = elements.passwordInput.value;
 
-    if (!password) {
+    if (password.length === 0) {
         showError('Please enter a password');
         elements.passwordInput.focus();
         return;
