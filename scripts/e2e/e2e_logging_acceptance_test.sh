@@ -38,6 +38,7 @@ echo ""
 TOTAL_CHECKS=0
 PASSED_CHECKS=0
 FAILED_CHECKS=0
+TEST_OUTPUT_FILE=""
 
 ensure_rch() {
     if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
@@ -74,7 +75,7 @@ archive_prior_logs() {
         moved=$((moved + 1))
     done < <(
         find "$results_dir" \
-            -type f \( -name "*.jsonl" -o -name "cass.log" \) \
+            -type f \( -name "*.jsonl" -o -name "cass.log" -o -name "acceptance_test_output_*.txt" \) \
             ! -name "trace.jsonl" \
             ! -name "combined.jsonl" \
             ! -path "$results_dir/.previous/*" \
@@ -124,7 +125,8 @@ echo "  Running through rch: E2E_LOG=1 cargo test --test 'e2e_*' -- --test-threa
 
 TEST_EXIT=0
 ensure_rch
-E2E_LOG=1 run_cargo test --test 'e2e_*' -- --test-threads=1 2>&1 | tee /tmp/e2e_test_output.txt || TEST_EXIT=$?
+TEST_OUTPUT_FILE="$PROJECT_ROOT/test-results/e2e/acceptance_test_output_$(e2e_run_id).txt"
+E2E_LOG=1 run_cargo test --test 'e2e_*' -- --test-threads=1 2>&1 | tee "$TEST_OUTPUT_FILE" || TEST_EXIT=$?
 
 if [ "$TEST_EXIT" -eq 0 ]; then
     echo "  All E2E tests passed"
@@ -306,6 +308,7 @@ Run ID: $(e2e_run_id)
 Test Execution
 --------------
 Exit code: $TEST_EXIT
+Test output: ${TEST_OUTPUT_FILE:-n/a}
 JSONL files: $JSONL_COUNT
 Total events: $TOTAL_EVENTS
 
