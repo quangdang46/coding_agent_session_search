@@ -333,10 +333,22 @@ surface must not recommend destructive commands.
 | `redaction_policy` | string | `strict` for the first version. |
 | `redaction_applied` | boolean | Whether any provider content was reduced. |
 | `sensitive_paths_scrubbed` | integer | Count of path-like fields scrubbed in fixture/golden output. |
+| `command_arguments_scrubbed` | integer | Count of command arguments reduced because they carried private paths, secrets, or host/user material. |
+| `env_values_scrubbed` | integer | Count of environment values replaced before serialization. Environment names may remain when useful; values do not. |
+| `mailbox_snippets_omitted` | integer | Count of mail body snippets omitted because the caller did not explicitly opt in. |
+| `evidence_references_scrubbed` | integer | Count of pack/search/evidence references reduced before output. |
+| `opt_in_boundary` | string | Human-readable boundary for evidence opt-ins. For v1, mail body snippets require `--include-evidence`; raw session content is unsupported. |
 
 Golden tests must scrub host paths, timestamps, UUIDs, commit hashes where needed,
 and any content-like mail fields. Provider fixtures should include hostile
 private-looking input to prove it does not leak.
+
+All swarm status and evidence-broker output should route through the shared
+strict swarm-evidence redaction path before JSON serialization. Partial provider
+failures do not bypass this rule: degraded providers may omit fields, but any
+field they do emit must already be redacted. `--include-evidence` may allow
+redacted mail body snippets in a future implementation; it must not enable raw
+private session text for `cass.swarm.status.v1`.
 
 ## Threat Model
 

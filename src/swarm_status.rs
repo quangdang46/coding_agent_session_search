@@ -5,10 +5,9 @@
 //! aggregator can consume without knowing whether data came from fixtures or a
 //! live source.
 
-use crate::pages::redact::{CustomPattern, RedactionConfig, RedactionEngine};
-use regex::Regex;
+use crate::pages::redact::{redact_swarm_json_value, redact_swarm_text};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
@@ -68,6 +67,20 @@ pub const REQUIRED_SWARM_SOURCE_PROVIDERS: &[SwarmProviderName] = &[
     SwarmProviderName::Process,
 ];
 
+/// Optional source providers available to richer status/evidence projections.
+pub const OPTIONAL_SWARM_SOURCE_PROVIDERS: &[SwarmProviderName] = &[SwarmProviderName::Evidence];
+
+/// Every fixtureable provider named by the swarm status contract.
+pub const ALL_SWARM_SOURCE_PROVIDERS: &[SwarmProviderName] = &[
+    SwarmProviderName::AgentMail,
+    SwarmProviderName::Beads,
+    SwarmProviderName::CassHealth,
+    SwarmProviderName::CassStatus,
+    SwarmProviderName::Git,
+    SwarmProviderName::Process,
+    SwarmProviderName::Evidence,
+];
+
 /// Provider availability normalized for robot output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -119,7 +132,32 @@ impl SwarmSourceSnapshot {
             error_kind: None,
             warning: None,
             diagnostics: Vec::new(),
-            payload: redact_swarm_value(&payload),
+            payload: redact_swarm_json_value(&payload),
+        }
+    }
+
+    #[must_use]
+    pub fn partial(
+        name: SwarmProviderName,
+        source: impl Into<String>,
+        warning: impl Into<String>,
+        payload: Value,
+    ) -> Self {
+        let warning = warning.into();
+        let warning = redact_swarm_text(&warning);
+        Self {
+            name,
+            source: source.into(),
+            status: SwarmProviderStatus::Partial,
+            freshness_ms: Some(0),
+            elapsed_ms: 0,
+            error_kind: None,
+            warning: Some(warning.clone()),
+            diagnostics: vec![SwarmProviderDiagnostic {
+                stream: SwarmDiagnosticStream::Internal,
+                message: warning,
+            }],
+            payload: redact_swarm_json_value(&payload),
         }
     }
 
@@ -147,59 +185,30 @@ impl SwarmSourceSnapshot {
             payload: Value::Null,
         }
     }
-}
 
-fn redact_swarm_text(input: &str) -> String {
-    let engine = RedactionEngine::new(swarm_status_redaction_config());
-    engine.redact_text(input).output
-}
-
-fn redact_swarm_value(value: &Value) -> Value {
-    match value {
-        Value::String(text) => Value::String(redact_swarm_text(text)),
-        Value::Array(items) => Value::Array(items.iter().map(redact_swarm_value).collect()),
-        Value::Object(object) => Value::Object(
-            object
-                .iter()
-                .map(|(key, value)| (key.clone(), redact_swarm_value(value)))
-                .collect::<Map<_, _>>(),
-        ),
-        Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
+    #[must_use]
+    pub fn skipped(
+        name: SwarmProviderName,
+        source: impl Into<String>,
+        warning: impl Into<String>,
+    ) -> Self {
+        let warning = warning.into();
+        let warning = redact_swarm_text(&warning);
+        Self {
+            name,
+            source: source.into(),
+            status: SwarmProviderStatus::Skipped,
+            freshness_ms: None,
+            elapsed_ms: 0,
+            error_kind: None,
+            warning: Some(warning.clone()),
+            diagnostics: vec![SwarmProviderDiagnostic {
+                stream: SwarmDiagnosticStream::Internal,
+                message: warning,
+            }],
+            payload: Value::Null,
+        }
     }
-}
-
-fn swarm_status_redaction_config() -> RedactionConfig {
-    let mut config = RedactionConfig {
-        anonymize_project_names: true,
-        redact_hostnames: true,
-        ..Default::default()
-    };
-    config.custom_patterns.push(CustomPattern {
-        name: "absolute_path".to_string(),
-        pattern: Regex::new(
-            r#"(?i)(?:/home/|/Users/|[A-Z]:\\Users\\|/data/projects/)[^\s"'<>;,)#]+"#,
-        )
-        .expect("swarm absolute path redaction regex must compile"),
-        replacement: "[REDACTED_PATH]".to_string(),
-        enabled: true,
-    });
-    config.custom_patterns.push(CustomPattern {
-        name: "secret_env_assignment".to_string(),
-        pattern: Regex::new(
-            r"(?i)\b(?:TOKEN|SECRET|KEY|PASSWORD|PASS|CREDENTIAL|AUTH|[A-Z_][A-Z0-9_]*(?:_TOKEN|_SECRET|_KEY|_PASSWORD|_PASS|_CREDENTIAL|_AUTH)[A-Z0-9_]*)=[^\s]+",
-        )
-        .expect("swarm secret env redaction regex must compile"),
-        replacement: "[SECRET_ENV_REDACTED]".to_string(),
-        enabled: true,
-    });
-    config.custom_patterns.push(CustomPattern {
-        name: "bearer_secret".to_string(),
-        pattern: Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
-            .expect("swarm bearer redaction regex must compile"),
-        replacement: "Bearer [SECRET_REDACTED]".to_string(),
-        enabled: true,
-    });
-    config
 }
 
 /// Common interface for live and fixture-backed swarm status providers.
@@ -392,8 +401,27 @@ impl FixtureSwarmAdapterSet {
     }
 
     #[must_use]
+    pub fn all_adapters(&self) -> Vec<FixtureSwarmSourceAdapter> {
+        ALL_SWARM_SOURCE_PROVIDERS
+            .iter()
+            .copied()
+            .map(|provider| FixtureSwarmSourceAdapter::new(Arc::clone(&self.input), provider))
+            .collect()
+    }
+
+    #[must_use]
     pub fn collect_required(&self) -> SwarmSourceCollection {
         let adapters = self.required_adapters();
+        collect_swarm_sources(
+            adapters
+                .iter()
+                .map(|adapter| adapter as &dyn SwarmSourceAdapter),
+        )
+    }
+
+    #[must_use]
+    pub fn collect_all(&self) -> SwarmSourceCollection {
+        let adapters = self.all_adapters();
         collect_swarm_sources(
             adapters
                 .iter()
@@ -554,6 +582,123 @@ mod tests {
     }
 
     #[test]
+    fn status_variants_serialize_to_contract_values() {
+        assert_eq!(
+            serde_json::to_string(&SwarmProviderStatus::Ok).unwrap(),
+            r#""ok""#
+        );
+        assert_eq!(
+            serde_json::to_string(&SwarmProviderStatus::Partial).unwrap(),
+            r#""partial""#
+        );
+        assert_eq!(
+            serde_json::to_string(&SwarmProviderStatus::Unavailable).unwrap(),
+            r#""unavailable""#
+        );
+        assert_eq!(
+            serde_json::to_string(&SwarmProviderStatus::Skipped).unwrap(),
+            r#""skipped""#
+        );
+    }
+
+    #[test]
+    fn partial_and_skipped_snapshots_are_degraded_and_redacted() {
+        let partial = SwarmSourceSnapshot::partial(
+            SwarmProviderName::Git,
+            "fixture:git",
+            "partial fixture read at /home/alice/private-client with TOKEN=SECRET_VALUE",
+            json!({
+                "path": "/home/alice/private-client/src/lib.rs",
+                "dirty_by_path": {
+                    "/home/alice/private-client/src/lib.rs": "modified"
+                },
+                "command": "env TOKEN=SECRET_VALUE cargo test",
+                "evidence_ref": "pack:///data/projects/private-client/session.jsonl#L44"
+            }),
+        );
+        let skipped = SwarmSourceSnapshot::skipped(
+            SwarmProviderName::Evidence,
+            "fixture:evidence",
+            "skipped optional evidence probe for /home/alice/private-client",
+        );
+        let collection = SwarmSourceCollection {
+            snapshots: vec![partial, skipped],
+        };
+
+        assert!(collection.partial());
+        let git = collection
+            .snapshot(SwarmProviderName::Git)
+            .expect("git snapshot should exist");
+        let evidence = collection
+            .snapshot(SwarmProviderName::Evidence)
+            .expect("evidence snapshot should exist");
+
+        assert_eq!(git.status, SwarmProviderStatus::Partial);
+        assert_eq!(evidence.status, SwarmProviderStatus::Skipped);
+        assert_eq!(git.diagnostics[0].stream, SwarmDiagnosticStream::Internal);
+        assert_eq!(
+            evidence.diagnostics[0].stream,
+            SwarmDiagnosticStream::Internal
+        );
+        assert_eq!(git.payload["evidence_ref"], "pack://[REDACTED_PATH]#L44");
+        assert!(
+            git.payload["dirty_by_path"]
+                .as_object()
+                .is_some_and(|paths| paths.contains_key("[REDACTED_PATH]"))
+        );
+
+        let serialized =
+            serde_json::to_string(&collection.snapshots).expect("snapshots should serialize");
+        assert!(!serialized.contains("/home/alice"));
+        assert!(!serialized.contains("/data/projects/private-client"));
+        assert!(!serialized.contains("SECRET_VALUE"));
+        assert!(serialized.contains("[REDACTED_PATH]"));
+        assert!(serialized.contains("[SECRET_ENV_REDACTED]"));
+    }
+
+    #[test]
+    fn all_adapters_collects_optional_evidence_provider() {
+        let input = SwarmFixtureInput::from_value(
+            "inline-evidence.json",
+            json!({
+                "fixture_id": "evidence-provider",
+                "sources": {
+                    "agent_mail": {"messages": []},
+                    "beads": {"ready": []},
+                    "cass_health": {"healthy": true},
+                    "cass_status": {"search_ready": true},
+                    "git": {"dirty": false},
+                    "processes": {"active_rch_jobs": 0},
+                    "evidence": {
+                        "recent_proofs": [
+                            {
+                                "ref": "pack:///data/projects/private-client/session.jsonl#L44",
+                                "status": "redacted"
+                            }
+                        ]
+                    }
+                }
+            }),
+        )
+        .expect("inline fixture should parse");
+        let set = FixtureSwarmAdapterSet::from_input(input);
+
+        let collection = set.collect_all();
+        let evidence = collection
+            .snapshot(SwarmProviderName::Evidence)
+            .expect("evidence snapshot should exist");
+
+        assert_eq!(collection.snapshots.len(), ALL_SWARM_SOURCE_PROVIDERS.len());
+        assert!(!collection.partial());
+        assert_eq!(evidence.status, SwarmProviderStatus::Ok);
+        assert_eq!(evidence.source, "fixture:evidence");
+        assert_eq!(
+            evidence.payload["recent_proofs"][0]["ref"],
+            "pack://[REDACTED_PATH]#L44"
+        );
+    }
+
+    #[test]
     fn fixture_payload_strings_pass_through_redaction_layer() {
         let input = SwarmFixtureInput::from_value(
             "inline-redaction.json",
@@ -564,6 +709,9 @@ mod tests {
                         "dirty_paths": [
                             {"path": "/home/alice/private-client/src/lib.rs"}
                         ],
+                        "dirty_by_path": {
+                            "/home/alice/private-client/src/lib.rs": "modified"
+                        },
                         "last_author": "alice@example.com",
                         "command": "env TOKEN=SECRET_VALUE CARGO_TARGET_DIR=/home/alice/cass-target cargo test",
                         "evidence_ref": "pack:///data/projects/private-client/session.jsonl#L44"
@@ -583,6 +731,11 @@ mod tests {
         assert_eq!(
             snapshot.payload["evidence_ref"],
             "pack://[REDACTED_PATH]#L44"
+        );
+        assert!(
+            snapshot.payload["dirty_by_path"]
+                .as_object()
+                .is_some_and(|paths| paths.contains_key("[REDACTED_PATH]"))
         );
         assert!(serialized.contains("[REDACTED_PATH]"));
         assert!(serialized.contains("[EMAIL_REDACTED]"));

@@ -1,4 +1,5 @@
 use regex::Regex;
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -113,6 +114,150 @@ pub struct RedactionEngine {
     username_patterns: Vec<(Regex, String)>,
     project_map: Mutex<HashMap<String, String>>,
     project_counter: AtomicUsize,
+}
+
+pub const SWARM_REDACTION_POLICY: &str = "strict";
+pub const SWARM_MAIL_BODY_OMITTED: &str = "[MAIL_BODY_OMITTED]";
+pub const SWARM_ENV_VALUE_REDACTED: &str = "[ENV_VALUE_REDACTED]";
+pub const SWARM_SECRET_ENV_ASSIGNMENT_REDACTED: &str = "[SECRET_ENV_REDACTED]";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwarmEvidenceField {
+    SensitivePath,
+    CommandArgument,
+    EnvironmentValue,
+    MailboxSnippet,
+    EvidenceReference,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SwarmEvidenceRedactionConfig {
+    pub include_mail_body_snippets: bool,
+    pub include_raw_session_content: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwarmEvidenceRedactionReport {
+    pub redaction_policy: &'static str,
+    pub raw_session_content_included: bool,
+    pub mail_body_snippets_included: bool,
+    pub redaction_applied: bool,
+    pub sensitive_paths_scrubbed: usize,
+    pub command_arguments_scrubbed: usize,
+    pub env_values_scrubbed: usize,
+    pub mailbox_snippets_omitted: usize,
+    pub evidence_references_scrubbed: usize,
+    pub opt_in_boundary: &'static str,
+}
+
+impl Default for SwarmEvidenceRedactionReport {
+    fn default() -> Self {
+        Self {
+            redaction_policy: SWARM_REDACTION_POLICY,
+            raw_session_content_included: false,
+            mail_body_snippets_included: false,
+            redaction_applied: false,
+            sensitive_paths_scrubbed: 0,
+            command_arguments_scrubbed: 0,
+            env_values_scrubbed: 0,
+            mailbox_snippets_omitted: 0,
+            evidence_references_scrubbed: 0,
+            opt_in_boundary: "mail body snippets require --include-evidence; raw session content is unsupported in cass.swarm.status.v1",
+        }
+    }
+}
+
+pub struct SwarmEvidenceRedactor {
+    engine: RedactionEngine,
+    report: SwarmEvidenceRedactionReport,
+}
+
+impl SwarmEvidenceRedactor {
+    pub fn strict_default() -> Self {
+        Self::new(SwarmEvidenceRedactionConfig::default())
+    }
+
+    pub fn new(config: SwarmEvidenceRedactionConfig) -> Self {
+        let engine = RedactionEngine::new(swarm_evidence_redaction_config());
+        let report = SwarmEvidenceRedactionReport {
+            raw_session_content_included: false,
+            mail_body_snippets_included: config.include_mail_body_snippets,
+            ..Default::default()
+        };
+        Self { engine, report }
+    }
+
+    pub fn redact_sensitive_path(&mut self, value: &str) -> String {
+        let redacted = self.engine.redact_path(value);
+        self.record(
+            SwarmEvidenceField::SensitivePath,
+            redacted.changes.len(),
+            value != redacted.output,
+        );
+        redacted.output
+    }
+
+    pub fn redact_command_argument(&mut self, value: &str) -> String {
+        let redacted = self.engine.redact_text(value);
+        self.record(
+            SwarmEvidenceField::CommandArgument,
+            redacted.changes.len(),
+            value != redacted.output,
+        );
+        redacted.output
+    }
+
+    pub fn redact_environment_value(&mut self, value: &str) -> String {
+        if value.is_empty() {
+            return String::new();
+        }
+        self.record(SwarmEvidenceField::EnvironmentValue, 1, true);
+        SWARM_ENV_VALUE_REDACTED.to_string()
+    }
+
+    pub fn redact_mail_body_snippet(&mut self, value: &str) -> String {
+        if !self.report.mail_body_snippets_included {
+            self.record(SwarmEvidenceField::MailboxSnippet, 1, true);
+            return SWARM_MAIL_BODY_OMITTED.to_string();
+        }
+
+        let redacted = self.engine.redact_text(value);
+        if !redacted.changes.is_empty() || value != redacted.output {
+            self.report.redaction_applied = true;
+        }
+        redacted.output
+    }
+
+    pub fn redact_evidence_reference(&mut self, value: &str) -> String {
+        let redacted = self.engine.redact_text(value);
+        self.record(
+            SwarmEvidenceField::EvidenceReference,
+            redacted.changes.len(),
+            value != redacted.output,
+        );
+        redacted.output
+    }
+
+    pub fn report(&self) -> SwarmEvidenceRedactionReport {
+        self.report.clone()
+    }
+
+    fn record(&mut self, field: SwarmEvidenceField, change_count: usize, changed: bool) {
+        if change_count == 0 && !changed {
+            return;
+        }
+        self.report.redaction_applied = true;
+        let count = change_count.max(1);
+        match field {
+            SwarmEvidenceField::SensitivePath => self.report.sensitive_paths_scrubbed += count,
+            SwarmEvidenceField::CommandArgument => self.report.command_arguments_scrubbed += count,
+            SwarmEvidenceField::EnvironmentValue => self.report.env_values_scrubbed += count,
+            SwarmEvidenceField::MailboxSnippet => self.report.mailbox_snippets_omitted += count,
+            SwarmEvidenceField::EvidenceReference => {
+                self.report.evidence_references_scrubbed += count;
+            }
+        }
+    }
 }
 
 impl RedactionEngine {
@@ -265,6 +410,74 @@ impl RedactionEngine {
         let anonymized = format!("project-{}", next);
         map.insert(name.to_string(), anonymized.clone());
         anonymized
+    }
+}
+
+pub fn swarm_evidence_redaction_config() -> RedactionConfig {
+    let mut config = RedactionConfig {
+        anonymize_project_names: true,
+        redact_hostnames: true,
+        ..Default::default()
+    };
+    config.custom_patterns.push(CustomPattern {
+        name: "absolute_path".to_string(),
+        pattern: Regex::new(
+            r#"(?i)(?:/home/|/Users/|[A-Z]:\\Users\\|/data/projects/)[^\s"'<>;,)#]+"#,
+        )
+        .expect("swarm absolute path redaction regex must compile"),
+        replacement: "[REDACTED_PATH]".to_string(),
+        enabled: true,
+    });
+    config.custom_patterns.push(CustomPattern {
+        name: "secret_env_assignment".to_string(),
+        pattern: Regex::new(
+            r"(?i)\b((?:TOKEN|SECRET|KEY|PASSWORD|PASS|CREDENTIAL|AUTH|[A-Z_][A-Z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD|PASS|CREDENTIAL|AUTH)[A-Z0-9_]*)=)[^\s]+",
+        )
+        .expect("swarm secret env redaction regex must compile"),
+        replacement: SWARM_SECRET_ENV_ASSIGNMENT_REDACTED.to_string(),
+        enabled: true,
+    });
+    config.custom_patterns.push(CustomPattern {
+        name: "bearer_secret".to_string(),
+        pattern: Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
+            .expect("swarm bearer redaction regex must compile"),
+        replacement: "Bearer [SECRET_REDACTED]".to_string(),
+        enabled: true,
+    });
+    config
+}
+
+pub fn redact_swarm_text(input: &str) -> String {
+    let engine = RedactionEngine::new(swarm_evidence_redaction_config());
+    engine.redact_text(input).output
+}
+
+pub fn redact_swarm_json_value(value: &Value) -> Value {
+    let engine = RedactionEngine::new(swarm_evidence_redaction_config());
+    redact_swarm_json_value_with_engine(&engine, value)
+}
+
+fn redact_swarm_json_value_with_engine(engine: &RedactionEngine, value: &Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(engine.redact_text(text).output),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| redact_swarm_json_value_with_engine(engine, item))
+                .collect(),
+        ),
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        engine.redact_text(key).output,
+                        redact_swarm_json_value_with_engine(engine, value),
+                    )
+                })
+                .collect::<Map<_, _>>(),
+        ),
+        Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
     }
 }
 
@@ -587,6 +800,86 @@ mod tests {
         let input = "/home/alice/project/main.rs";
         let result = engine.redact_text(input);
         assert_eq!(result.output, input);
+    }
+
+    #[test]
+    fn swarm_evidence_redactor_scrubs_paths_secrets_and_omits_mail_by_default() {
+        let mut redactor = SwarmEvidenceRedactor::strict_default();
+
+        let path = redactor.redact_sensitive_path("/home/alice/private-client/src/lib.rs");
+        assert_eq!(path, "[REDACTED_PATH]");
+
+        let command = redactor.redact_command_argument(
+            "rch exec -- env TOKEN=SECRET_VALUE CARGO_TARGET_DIR=/home/alice/build cargo test",
+        );
+        assert!(!command.contains("SECRET_VALUE"));
+        assert!(!command.contains("/home/alice"));
+        assert!(!command.contains("TOKEN="));
+        assert!(command.contains(SWARM_SECRET_ENV_ASSIGNMENT_REDACTED));
+        assert!(command.contains("CARGO_TARGET_DIR=[REDACTED_PATH]"));
+
+        let env_value = redactor.redact_environment_value("sk-live-secret");
+        assert_eq!(env_value, SWARM_ENV_VALUE_REDACTED);
+
+        let snippet = redactor.redact_mail_body_snippet(
+            "Please inspect /Users/alice/acme and email alice@example.com",
+        );
+        assert_eq!(snippet, SWARM_MAIL_BODY_OMITTED);
+
+        let evidence_ref = redactor
+            .redact_evidence_reference("pack:///data/projects/private-client/session.jsonl#L44");
+        assert_eq!(evidence_ref, "pack://[REDACTED_PATH]#L44");
+        assert!(!evidence_ref.contains("/data/projects/private-client"));
+
+        let report = redactor.report();
+        assert_eq!(report.redaction_policy, SWARM_REDACTION_POLICY);
+        assert!(!report.raw_session_content_included);
+        assert!(!report.mail_body_snippets_included);
+        assert!(report.redaction_applied);
+        assert!(report.sensitive_paths_scrubbed >= 1);
+        assert!(report.command_arguments_scrubbed >= 2);
+        assert_eq!(report.env_values_scrubbed, 1);
+        assert_eq!(report.mailbox_snippets_omitted, 1);
+        assert!(report.evidence_references_scrubbed >= 1);
+    }
+
+    #[test]
+    fn swarm_evidence_mail_snippet_opt_in_still_redacts_content() {
+        let mut redactor = SwarmEvidenceRedactor::new(SwarmEvidenceRedactionConfig {
+            include_mail_body_snippets: true,
+            include_raw_session_content: false,
+        });
+
+        let snippet =
+            redactor.redact_mail_body_snippet("Contact alice@example.com about /home/alice/secret");
+
+        assert!(redactor.report().mail_body_snippets_included);
+        assert!(snippet.contains("[EMAIL_REDACTED]"));
+        assert!(snippet.contains("[REDACTED_PATH]"));
+        assert!(!snippet.contains("alice@example.com"));
+        assert!(!snippet.contains("/home/alice"));
+    }
+
+    #[test]
+    fn swarm_json_redaction_scrubs_object_keys_and_values() {
+        let input = serde_json::json!({
+            "/home/alice/private-client/src/lib.rs": {
+                "TOKEN=SECRET_VALUE": "pack:///data/projects/private-client/session.jsonl#L44",
+                "owner": "alice@example.com"
+            }
+        });
+
+        let output = redact_swarm_json_value(&input);
+        let serialized = output.to_string();
+
+        assert!(!serialized.contains("/home/alice"));
+        assert!(!serialized.contains("/data/projects/private-client"));
+        assert!(!serialized.contains("SECRET_VALUE"));
+        assert!(!serialized.contains("TOKEN="));
+        assert!(!serialized.contains("alice@example.com"));
+        assert!(serialized.contains("[REDACTED_PATH]"));
+        assert!(serialized.contains("[SECRET_ENV_REDACTED]"));
+        assert!(serialized.contains("pack://[REDACTED_PATH]#L44"));
     }
 
     #[test]

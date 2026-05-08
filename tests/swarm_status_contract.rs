@@ -30,6 +30,7 @@ const REQUIRED_SCENARIOS: &[&str] = &[
     "reservation_conflict",
     "build_pressure",
     "no_ready_work",
+    "privacy_guardrails",
 ];
 
 const REQUIRED_TOP_LEVEL_KEYS: &[&str] = &[
@@ -260,6 +261,26 @@ fn swarm_status_scenario_invariants_are_pinned() {
                 assert_eq!(output["summary"]["recommended_action"], "no-ready-work");
                 assert_eq!(output["recommendations"][0]["kind"], "no-ready-work");
             }
+            "privacy_guardrails" => {
+                assert_eq!(output["privacy"]["redaction_applied"], true);
+                assert_eq!(output["privacy"]["sensitive_paths_scrubbed"], 4);
+                assert_eq!(output["privacy"]["command_arguments_scrubbed"], 2);
+                assert_eq!(output["privacy"]["env_values_scrubbed"], 1);
+                assert_eq!(output["privacy"]["mailbox_snippets_omitted"], 1);
+                assert_eq!(output["privacy"]["evidence_references_scrubbed"], 1);
+                assert_eq!(
+                    output["privacy"]["opt_in_boundary"],
+                    "mail body snippets require --include-evidence; raw session content is unsupported in cass.swarm.status.v1"
+                );
+                assert_eq!(
+                    output["evidence"]["recent_threads"][0]["body_snippet"],
+                    "[MAIL_BODY_OMITTED]"
+                );
+                assert_eq!(
+                    output["evidence"]["recent_proofs"][0]["redaction_status"],
+                    "redacted"
+                );
+            }
             other => panic!("unexpected scenario {other}"),
         }
     }
@@ -305,6 +326,10 @@ fn assert_no_forbidden_fixture_leaks(fixture_id: &str, value: &Value) {
         "SECRET_VALUE",
         "TOKEN=",
         "raw_session_text",
+        "/Users/",
+        "alice@example.com",
+        "api.example.corp",
+        "PRIVATE_SESSION_DO_NOT_LEAK",
     ] {
         assert!(
             !text.contains(needle),
