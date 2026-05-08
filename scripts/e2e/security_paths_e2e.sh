@@ -6,14 +6,21 @@
 #
 # Usage: ./scripts/e2e/security_paths_e2e.sh
 #
+# Environment:
+#   RCH_BIN         rch executable (default: rch)
+#   RCH_TARGET_DIR  cargo target dir for offloaded cass build
+#
 # Part of br-2v0a: Create security_paths_e2e.sh E2E Script
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_TARGET_DIR="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_cass_security_paths_e2e}"
 
 # Source the E2E logging library
+# shellcheck disable=SC1091
 source "${PROJECT_ROOT}/scripts/lib/e2e_log.sh"
 
 # Initialize logging
@@ -31,10 +38,25 @@ SUITE="security_paths"
 
 CASS_BIN="${PROJECT_ROOT}/target/debug/cass"
 
+ensure_rch() {
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        e2e_error "rch binary not found; security paths E2E cass build must be offloaded"
+        exit 1
+    fi
+}
+
+run_cargo() {
+    "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_TARGET_DIR" cargo "$@"
+}
+
 ensure_cass_binary() {
     if [[ ! -x "$CASS_BIN" ]]; then
-        e2e_info "Building cass binary..."
-        (cd "$PROJECT_ROOT" && cargo build --quiet 2>/dev/null)
+        CASS_BIN="${RCH_TARGET_DIR}/debug/cass"
+    fi
+    if [[ ! -x "$CASS_BIN" ]]; then
+        e2e_info "Building cass binary through rch..."
+        ensure_rch
+        (cd "$PROJECT_ROOT" && run_cargo build --quiet --bin cass 2>/dev/null)
     fi
     if [[ ! -x "$CASS_BIN" ]]; then
         e2e_error "cass binary not found at $CASS_BIN"
@@ -96,6 +118,8 @@ test_path_attack() {
 
     local site_dir
     site_dir=$(mktemp -d)
+    # site_dir is fixed once here, so expanding at trap registration is intentional.
+    # shellcheck disable=SC2064
     trap "rm -rf '$site_dir'" RETURN
 
     create_site_bundle "$site_dir"
@@ -271,6 +295,8 @@ phase_start=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
 
 # For symlink tests, we create a real symlink and check if verify catches it
 symlink_test_dir=$(mktemp -d)
+# symlink_test_dir is fixed once here, so expanding at trap registration is intentional.
+# shellcheck disable=SC2064
 trap "rm -rf '$symlink_test_dir'" EXIT
 
 create_site_bundle "$symlink_test_dir"
