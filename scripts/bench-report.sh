@@ -16,6 +16,11 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_TARGET_DIR="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_cass_bench_report}"
+
 QUICK_MODE=false
 SAVE_BASELINE=false
 COMPARE_BASELINE=false
@@ -60,10 +65,29 @@ for arg in "$@"; do
             echo "  $0 --save=v1.0        # Save baseline named 'v1.0'"
             echo "  $0 --compare=v1.0     # Compare against 'v1.0' baseline"
             echo ""
+            echo "Environment:"
+            echo "  RCH_BIN         rch executable (default: rch)"
+            echo "  RCH_TARGET_DIR  cargo target dir for offloaded benchmarks (default: \${TMPDIR:-/tmp}/rch_target_cass_bench_report)"
+            echo ""
             exit 0
             ;;
     esac
 done
+
+cd "$PROJECT_ROOT"
+
+ensure_rch() {
+    if ! command -v "$RCH_BIN" &> /dev/null; then
+        echo "Error: rch binary not found; benchmark cargo work must be offloaded"
+        exit 1
+    fi
+}
+
+run_cargo() {
+    "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_TARGET_DIR" cargo "$@"
+}
+
+ensure_rch
 
 echo "==================================="
 echo "  cass Performance Benchmarks"
@@ -72,25 +96,25 @@ echo ""
 
 # Build in release mode first
 echo "Building release binary..."
-cargo build --release --quiet
+run_cargo build --release --quiet
 
 # Determine which benchmarks to run
 if [ "$QUICK_MODE" = true ]; then
-    BENCH_TARGETS="--bench runtime_perf"
+    BENCH_TARGET_ARGS=(--bench runtime_perf)
     echo "Running: runtime_perf (quick mode)"
 else
-    BENCH_TARGETS="--bench runtime_perf --bench search_perf --bench index_perf --bench cache_micro"
+    BENCH_TARGET_ARGS=(--bench runtime_perf --bench search_perf --bench index_perf --bench cache_micro)
     echo "Running: runtime_perf, search_perf, index_perf, cache_micro"
 fi
 echo ""
 
 # Build benchmark args
-BENCH_ARGS=""
+BENCH_ARGS=()
 if [ "$SAVE_BASELINE" = true ]; then
-    BENCH_ARGS="-- --save-baseline $BASELINE_NAME"
+    BENCH_ARGS=(-- --save-baseline "$BASELINE_NAME")
     echo "Saving results as baseline: $BASELINE_NAME"
 elif [ "$COMPARE_BASELINE" = true ]; then
-    BENCH_ARGS="-- --baseline $BASELINE_NAME"
+    BENCH_ARGS=(-- --baseline "$BASELINE_NAME")
     echo "Comparing against baseline: $BASELINE_NAME"
 fi
 
@@ -99,8 +123,7 @@ echo ""
 echo "Running benchmarks..."
 echo "-----------------------------------"
 
-# shellcheck disable=SC2086
-cargo bench $BENCH_TARGETS $BENCH_ARGS 2>&1 | tee /tmp/bench-output.txt
+run_cargo bench "${BENCH_TARGET_ARGS[@]}" "${BENCH_ARGS[@]}" 2>&1 | tee /tmp/bench-output.txt
 
 echo ""
 echo "-----------------------------------"
@@ -117,15 +140,15 @@ fi
 # Show report location
 echo ""
 echo "-----------------------------------"
-echo "Reports generated in: target/criterion/"
+echo "Reports generated in: $RCH_TARGET_DIR/criterion/"
 echo ""
 echo "Key reports:"
-echo "  - target/criterion/report/index.html (summary)"
-echo "  - target/criterion/*/report/index.html (per-benchmark)"
+echo "  - $RCH_TARGET_DIR/criterion/report/index.html (summary)"
+echo "  - $RCH_TARGET_DIR/criterion/*/report/index.html (per-benchmark)"
 
 # Open report if requested
 if [ "$OPEN_REPORT" = true ]; then
-    REPORT_PATH="target/criterion/report/index.html"
+    REPORT_PATH="$RCH_TARGET_DIR/criterion/report/index.html"
     if [ -f "$REPORT_PATH" ]; then
         echo ""
         echo "Opening report in browser..."
