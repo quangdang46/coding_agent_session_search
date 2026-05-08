@@ -572,7 +572,7 @@
           "name": "timeout",
           "description": "Timeout in milliseconds. Returns partial results and error if exceeded",
           "arg_type": "option",
-          "value_type": "string",
+          "value_type": "integer",
           "required": false
         },
         {
@@ -712,6 +712,280 @@
             "true",
             "false"
           ]
+        },
+        {
+          "name": "robot-format",
+          "description": "Output format for robot mode (overrides --json when specified)",
+          "arg_type": "option",
+          "value_type": "enum",
+          "required": false,
+          "enum_values": [
+            "json",
+            "jsonl",
+            "compact",
+            "sessions",
+            "toon"
+          ]
+        }
+      ],
+      "has_json_output": true
+    },
+    {
+      "name": "pack",
+      "description": "Build a deterministic answer pack for agent handoffs",
+      "arguments": [
+        {
+          "name": "query",
+          "description": "The query string",
+          "arg_type": "positional",
+          "value_type": "string",
+          "required": true
+        },
+        {
+          "name": "agent",
+          "description": "Filter by agent slug (can be specified multiple times)",
+          "arg_type": "option",
+          "value_type": "string",
+          "required": false,
+          "repeatable": true
+        },
+        {
+          "name": "workspace",
+          "description": "Filter by workspace path (can be specified multiple times)",
+          "arg_type": "option",
+          "value_type": "string",
+          "required": false,
+          "repeatable": true
+        },
+        {
+          "name": "limit",
+          "description": "Max candidate hits to fetch before answer-pack planning. 0 uses the planner default",
+          "arg_type": "option",
+          "value_type": "integer",
+          "required": false,
+          "default": "0"
+        },
+        {
+          "name": "json",
+          "description": "Output as JSON (--robot also works). Equivalent to --robot-format json",
+          "arg_type": "flag",
+          "required": false,
+          "enum_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "name": "fields",
+          "description": "Select answer-pack top-level fields. Presets: minimal, summary, all",
+          "arg_type": "option",
+          "value_type": "string",
+          "required": false,
+          "repeatable": true
+        },
+        {
+          "name": "max-tokens",
+          "description": "Soft pack token budget",
+          "arg_type": "option",
+          "value_type": "integer",
+          "required": false,
+          "default": "12000"
+        },
+        {
+          "name": "max-sessions",
+          "description": "Maximum distinct sessions represented in the pack",
+          "arg_type": "option",
+          "value_type": "integer",
+          "required": false,
+          "default": "8"
+        },
+        {
+          "name": "max-evidence",
+          "description": "Maximum evidence items selected into the pack",
+          "arg_type": "option",
+          "value_type": "integer",
+          "required": false,
+          "default": "24"
+        },
+        {
+          "name": "context-lines",
+          "description": "Context lines requested around evidence hits",
+          "arg_type": "option",
+          "value_type": "integer",
+          "required": false,
+          "default": "3"
+        },
+        {
+          "name": "max-excerpt-chars",
+          "description": "Maximum excerpt characters per evidence item",
+          "arg_type": "option",
+          "value_type": "integer",
+          "required": false,
+          "default": "1600"
+        },
+        {
+          "name": "request-id",
+          "description": "Request ID to echo in pack metadata",
+          "arg_type": "option",
+          "value_type": "string",
+          "required": false
+        },
+        {
+          "name": "display",
+          "description": "Human-readable display format. Only markdown is supported for pack",
+          "arg_type": "option",
+          "value_type": "enum",
+          "required": false,
+          "enum_values": [
+            "table",
+            "lines",
+            "markdown"
+          ]
+        },
+        {
+          "name": "data-dir",
+          "description": "Override data dir",
+          "arg_type": "option",
+          "value_type": "path",
+          "required": false
+        },
+        {
+          "name": "days",
+          "description": "Filter to last N days",
+          "arg_type": "option",
+          "value_type": "integer",
+          "required": false
+        },
+        {
+          "name": "today",
+          "description": "Filter to today only",
+          "arg_type": "flag",
+          "required": false,
+          "enum_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "name": "yesterday",
+          "description": "Filter to yesterday only",
+          "arg_type": "flag",
+          "required": false,
+          "enum_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "name": "week",
+          "description": "Filter to last 7 days",
+          "arg_type": "flag",
+          "required": false,
+          "enum_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "name": "since",
+          "description": "Filter to entries since ISO date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)",
+          "arg_type": "option",
+          "value_type": "string",
+          "required": false
+        },
+        {
+          "name": "until",
+          "description": "Filter to entries until ISO date / keyword / relative offset",
+          "arg_type": "option",
+          "value_type": "string",
+          "required": false
+        },
+        {
+          "name": "source",
+          "description": "Filter by source: 'local', 'remote', 'all', or a specific source hostname",
+          "arg_type": "option",
+          "value_type": "string",
+          "required": false
+        },
+        {
+          "name": "sessions-from",
+          "description": "Filter to sessions from file (one path per line). Use '-' for stdin",
+          "arg_type": "option",
+          "value_type": "string",
+          "required": false
+        },
+        {
+          "name": "mode",
+          "description": "Search mode: hybrid-preferred (default), lexical, or semantic",
+          "arg_type": "option",
+          "value_type": "enum",
+          "required": false,
+          "enum_values": [
+            "lexical",
+            "semantic",
+            "hybrid"
+          ]
+        },
+        {
+          "name": "freshness-policy",
+          "description": "Freshness policy for evidence selection",
+          "arg_type": "option",
+          "value_type": "enum",
+          "required": false,
+          "default": "prefer-recent",
+          "enum_values": [
+            "prefer-recent",
+            "strict",
+            "allow-stale"
+          ]
+        },
+        {
+          "name": "freshness-window-seconds",
+          "description": "Evidence freshness window in seconds",
+          "arg_type": "option",
+          "value_type": "integer",
+          "required": false,
+          "default": "2592000"
+        },
+        {
+          "name": "require-evidence",
+          "description": "Return an error instead of an empty successful pack",
+          "arg_type": "flag",
+          "required": false,
+          "default": "false",
+          "enum_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "name": "explain-selection",
+          "description": "Include selection score component details in evidence",
+          "arg_type": "flag",
+          "required": false,
+          "default": "false",
+          "enum_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "name": "refresh",
+          "description": "Run an incremental `cass index` pass before packing",
+          "arg_type": "flag",
+          "required": false,
+          "default": "false",
+          "enum_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "name": "timeout",
+          "description": "Timeout in milliseconds",
+          "arg_type": "option",
+          "value_type": "integer",
+          "required": false
         },
         {
           "name": "robot-format",
@@ -27555,6 +27829,63 @@
         "all_valid",
         "lexical_fail_open"
       ]
+    },
+    "pack": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "query": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "_meta": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "realized": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "health": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "freshness": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "pack": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "omitted": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "privacy": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
     },
     "search": {
       "type": "object",

@@ -4,6 +4,9 @@ examples:
   cass search "your query" --robot
   # Default is hybrid-preferred; add --robot-meta to see realized mode and lexical fallback reasons.
   cass search "your query" --robot --robot-meta
+# Deterministic handoff pack for another agent
+  cass pack "why did checkout fail" --robot --max-tokens 12000 --limit 40
+  cass search "checkout" --robot-format sessions | cass pack "checkout failure" --robot --sessions-from -
 # Token-budgeted search with cursor + request-id
   cass search "error" --robot --max-tokens 200 --request-id run-1 --limit 2 --robot-meta
   cass search "error" --robot --cursor <_meta.next_cursor> --request-id run-1b --robot-meta

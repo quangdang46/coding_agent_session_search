@@ -3,6 +3,7 @@ guide:
   Output: --robot/--json; formats via --robot-format json|jsonl|compact|toon
   Logging: INFO auto-suppressed in robot mode; add -v to re-enable
   Search contract: SQLite is source of truth; lexical is the required self-healing fast path; semantic is opportunistic enrichment.
+  Pack contract: `cass pack "query" --robot` returns extractive, cited handoff evidence selected from search results; it does not call an external model or mutate source logs.
   Default search: hybrid-preferred. With --robot-meta, inspect requested_search_mode, search_mode, semantic_refinement, fallback_tier, and fallback_reason.
   Readiness: cass health/status JSON recommended_action is authoritative; lexical-only fallback can be normal while semantic assets catch up.
   Doctor outcomes: branch on doctor.operation_outcome.kind (kebab-case) before prose; exit_code_kind says whether the outcome is success, health-failure, usage-error, lock-busy, or repair-failure.

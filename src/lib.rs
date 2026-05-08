@@ -50,6 +50,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 const CONTRACT_VERSION: &str = "1";
 const DEFAULT_STALE_THRESHOLD_SECS: u64 = 1800;
+const DEFAULT_PACK_FRESHNESS_WINDOW_SECONDS: i64 = 30 * 24 * 60 * 60;
 
 #[cfg(test)]
 fn read_watch_once_paths_env() -> Option<Vec<std::path::PathBuf>> {
@@ -505,6 +506,95 @@ pub enum Commands {
         /// and the search runs against the existing index (non-fatal).
         #[arg(long, visible_alias = "catch-up", default_value_t = false)]
         refresh: bool,
+    },
+    /// Build a deterministic answer pack for agent handoffs
+    Pack {
+        /// The query string
+        query: String,
+        /// Filter by agent slug (can be specified multiple times)
+        #[arg(long)]
+        agent: Vec<String>,
+        /// Filter by workspace path (can be specified multiple times)
+        #[arg(long)]
+        workspace: Vec<String>,
+        /// Max candidate hits to fetch before answer-pack planning. 0 uses the planner default.
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+        /// Output as JSON (--robot also works). Equivalent to --robot-format json.
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
+        /// Select answer-pack top-level fields. Presets: minimal, summary, all.
+        #[arg(long, value_delimiter = ',')]
+        fields: Option<Vec<String>>,
+        /// Soft pack token budget.
+        #[arg(long, default_value_t = 12_000)]
+        max_tokens: usize,
+        /// Maximum distinct sessions represented in the pack.
+        #[arg(long, default_value_t = 8)]
+        max_sessions: usize,
+        /// Maximum evidence items selected into the pack.
+        #[arg(long, default_value_t = 24)]
+        max_evidence: usize,
+        /// Context lines requested around evidence hits.
+        #[arg(long, default_value_t = 3)]
+        context_lines: usize,
+        /// Maximum excerpt characters per evidence item.
+        #[arg(long, default_value_t = 1_600)]
+        max_excerpt_chars: usize,
+        /// Request ID to echo in pack metadata.
+        #[arg(long)]
+        request_id: Option<String>,
+        /// Human-readable display format. Only markdown is supported for pack.
+        #[arg(long, value_enum)]
+        display: Option<DisplayFormat>,
+        /// Override data dir
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        /// Filter to last N days
+        #[arg(long)]
+        days: Option<u32>,
+        /// Filter to today only
+        #[arg(long)]
+        today: bool,
+        /// Filter to yesterday only
+        #[arg(long)]
+        yesterday: bool,
+        /// Filter to last 7 days
+        #[arg(long)]
+        week: bool,
+        /// Filter to entries since ISO date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS).
+        #[arg(long, allow_hyphen_values = true)]
+        since: Option<String>,
+        /// Filter to entries until ISO date / keyword / relative offset.
+        #[arg(long, allow_hyphen_values = true)]
+        until: Option<String>,
+        /// Filter by source: 'local', 'remote', 'all', or a specific source hostname.
+        #[arg(long)]
+        source: Option<String>,
+        /// Filter to sessions from file (one path per line). Use '-' for stdin.
+        #[arg(long)]
+        sessions_from: Option<String>,
+        /// Search mode: hybrid-preferred (default), lexical, or semantic.
+        #[arg(long, value_enum)]
+        mode: Option<crate::search::query::SearchMode>,
+        /// Freshness policy for evidence selection.
+        #[arg(long, value_parser = ["prefer-recent", "strict", "allow-stale"], default_value = "prefer-recent")]
+        freshness_policy: String,
+        /// Evidence freshness window in seconds.
+        #[arg(long, default_value_t = DEFAULT_PACK_FRESHNESS_WINDOW_SECONDS)]
+        freshness_window_seconds: i64,
+        /// Return an error instead of an empty successful pack.
+        #[arg(long, default_value_t = false)]
+        require_evidence: bool,
+        /// Include selection score component details in evidence.
+        #[arg(long, default_value_t = false)]
+        explain_selection: bool,
+        /// Run an incremental `cass index` pass before packing.
+        #[arg(long, visible_alias = "catch-up", default_value_t = false)]
+        refresh: bool,
+        /// Timeout in milliseconds.
+        #[arg(long)]
+        timeout: Option<u64>,
     },
     /// Show statistics about indexed data
     Stats {
@@ -2908,6 +2998,7 @@ fn heuristic_parse_recovery(
         "capabilities",
         "introspect",
         "robot-docs",
+        "pack",
         "tui",
         "help",
         "--help",
@@ -2962,6 +3053,15 @@ fn heuristic_parse_recovery(
                 "--workspace",
                 "--fields",
                 "--max-tokens",
+                "--max-sessions",
+                "--max-evidence",
+                "--context-lines",
+                "--max-excerpt-chars",
+                "--sessions-from",
+                "--freshness-policy",
+                "--freshness-window-seconds",
+                "--require-evidence",
+                "--explain-selection",
                 "--request-id",
                 "--cursor",
                 "--since",
@@ -3025,6 +3125,14 @@ fn heuristic_parse_recovery(
                 "--timeout",
                 "--fields",
                 "--max-tokens",
+                "--max-sessions",
+                "--max-evidence",
+                "--context-lines",
+                "--max-excerpt-chars",
+                "--sessions-from",
+                "--freshness-policy",
+                "--freshness-window-seconds",
+                "--request-id",
             ];
             if known_flags.contains(&flag_candidate.as_str()) {
                 final_args.push(flag_candidate);
@@ -3460,6 +3568,7 @@ async fn execute_cli(
         }
         Commands::Index { .. }
         | Commands::Search { .. }
+        | Commands::Pack { .. }
         | Commands::Stats { .. }
         | Commands::Diag { .. }
         | Commands::Status { .. }
@@ -3655,6 +3764,74 @@ async fn execute_cli(
                         sessions_from,
                         mode,
                         semantic_opts,
+                    )?;
+                }
+                Commands::Pack {
+                    query,
+                    agent,
+                    workspace,
+                    limit,
+                    json,
+                    fields,
+                    max_tokens,
+                    max_sessions,
+                    max_evidence,
+                    context_lines,
+                    max_excerpt_chars,
+                    request_id,
+                    display,
+                    data_dir,
+                    days,
+                    today,
+                    yesterday,
+                    week,
+                    since,
+                    until,
+                    source,
+                    sessions_from,
+                    mode,
+                    freshness_policy,
+                    freshness_window_seconds,
+                    require_evidence,
+                    explain_selection,
+                    refresh,
+                    timeout,
+                } => {
+                    let structured_format = resolve_subcommand_structured_format(cli, json);
+                    run_cli_pack(
+                        &query,
+                        &agent,
+                        &workspace,
+                        limit,
+                        structured_format,
+                        fields,
+                        max_tokens,
+                        max_sessions,
+                        max_evidence,
+                        context_lines,
+                        max_excerpt_chars,
+                        request_id.clone(),
+                        display,
+                        &data_dir,
+                        cli.db.clone(),
+                        TimeFilter::new(
+                            days,
+                            today,
+                            yesterday,
+                            week,
+                            since.as_deref(),
+                            until.as_deref(),
+                        ),
+                        source,
+                        sessions_from,
+                        mode,
+                        &freshness_policy,
+                        freshness_window_seconds,
+                        require_evidence,
+                        explain_selection,
+                        refresh,
+                        timeout,
+                        wrap,
                     )?;
                 }
                 Commands::Stats {
@@ -7372,6 +7549,7 @@ fn describe_command(cli: &Cli) -> String {
         Some(Commands::Tui { .. }) => "tui".to_string(),
         Some(Commands::Index { .. }) => "index".to_string(),
         Some(Commands::Search { .. }) => "search".to_string(),
+        Some(Commands::Pack { .. }) => "pack".to_string(),
         Some(Commands::Stats { .. }) => "stats".to_string(),
         Some(Commands::Diag { .. }) => "diag".to_string(),
         Some(Commands::Status { .. }) => "status".to_string(),
@@ -7433,6 +7611,7 @@ fn is_robot_mode(command: &Commands, cli: &Cli) -> bool {
         Commands::Search {
             json, robot_meta, ..
         } => resolve_subcommand_structured_format(cli, *json).is_some() || *robot_meta,
+        Commands::Pack { json, .. } => resolve_subcommand_structured_format(cli, *json).is_some(),
         Commands::Index { json, .. } => resolve_subcommand_structured_format(cli, *json).is_some(),
         Commands::Health { json, .. } => resolve_subcommand_structured_format(cli, *json).is_some(),
         Commands::Pages { json, .. } => resolve_subcommand_structured_format(cli, *json).is_some(),
@@ -7717,6 +7896,7 @@ fn print_robot_help(wrap: WrapConfig) -> CliResult<()> {
         "",
         "QUICKSTART (for AI agents):",
         "  cass search \"your query\" --robot     # Search with JSON output",
+        "  cass pack \"your query\" --robot --max-tokens 12000  # Cited handoff pack",
         "  cass search \"bug fix\" --today        # Search today's sessions only",
         "  cass search \"api\" --week --agent codex  # Last 7 days, codex only",
         "  cass stats --json                    # Get index statistics",
@@ -7739,7 +7919,7 @@ fn print_robot_help(wrap: WrapConfig) -> CliResult<()> {
         "  stdout=data only; stderr=warnings/errors only (INFO auto-suppressed)",
         "  Use -v/--verbose with --json to enable INFO logs if needed",
         "",
-        "Subcommands: search | sessions | stats | view | index | tui | robot-docs <topic>",
+        "Subcommands: search | pack | sessions | stats | view | index | tui | robot-docs <topic>",
         "Topics: commands | env | paths | schemas | guide | exit-codes | examples | contracts | wrap | sources",
         "Exit codes: 0 ok; 2 usage; 3 missing index/db; 9 unknown",
         "More: cass robot-docs examples | cass robot-docs commands",
@@ -7776,6 +7956,12 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "                      Returns buckets with counts. Reduces tokens by ~99% for overview queries".to_string(),
             "    --mode lexical|semantic|hybrid  Search mode (default: hybrid; hybrid fails open to lexical when semantic assets are unavailable)".to_string(),
             "    --robot-meta     Include readiness, requested/realized mode, semantic refinement, fallback tier/reason, cursor, and timing metadata".to_string(),
+            "  cass pack <query> [--robot] [--max-tokens N] [--limit N]".to_string(),
+            "    Build a deterministic, cited answer pack for agent handoffs without external summarization.".to_string(),
+            "    --sessions-from FILE|-  Restrict evidence to newline-delimited session paths; '-' reads stdin.".to_string(),
+            "    --fields minimal|summary|all,F1,F2  Select top-level pack fields for JSON/TOON output.".to_string(),
+            "    --freshness-policy prefer-recent|strict|allow-stale  Evidence freshness policy.".to_string(),
+            "    --require-evidence  Return a JSON error envelope instead of an empty successful pack.".to_string(),
             "  cass stats [--json] [--data-dir DIR]".to_string(),
             "  cass status [--json] [--stale-threshold N] [--data-dir DIR]".to_string(),
             "  cass diag [--json] [--verbose] [--data-dir DIR]".to_string(),
@@ -7897,6 +8083,7 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "  Output: --robot/--json; formats via --robot-format json|jsonl|compact|toon".to_string(),
             "  Logging: INFO auto-suppressed in robot mode; add -v to re-enable".to_string(),
             "  Search contract: SQLite is source of truth; lexical is the required self-healing fast path; semantic is opportunistic enrichment.".to_string(),
+            "  Pack contract: `cass pack \"query\" --robot` returns extractive, cited handoff evidence selected from search results; it does not call an external model or mutate source logs.".to_string(),
             "  Default search: hybrid-preferred. With --robot-meta, inspect requested_search_mode, search_mode, semantic_refinement, fallback_tier, and fallback_reason.".to_string(),
             "  Readiness: cass health/status JSON recommended_action is authoritative; lexical-only fallback can be normal while semantic assets catch up.".to_string(),
             "  Doctor outcomes: branch on doctor.operation_outcome.kind (kebab-case) before prose; exit_code_kind says whether the outcome is success, health-failure, usage-error, lock-busy, or repair-failure.".to_string(),
@@ -7931,6 +8118,9 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "  cass search \"your query\" --robot".to_string(),
             "  # Default is hybrid-preferred; add --robot-meta to see realized mode and lexical fallback reasons.".to_string(),
             "  cass search \"your query\" --robot --robot-meta".to_string(),
+            "# Deterministic handoff pack for another agent".to_string(),
+            "  cass pack \"why did checkout fail\" --robot --max-tokens 12000 --limit 40".to_string(),
+            "  cass search \"checkout\" --robot-format sessions | cass pack \"checkout failure\" --robot --sessions-from -".to_string(),
             "# Token-budgeted search with cursor + request-id".to_string(),
             "  cass search \"error\" --robot --max-tokens 200 --request-id run-1 --limit 2 --robot-meta".to_string(),
             "  cass search \"error\" --robot --cursor <_meta.next_cursor> --request-id run-1b --robot-meta".to_string(),
@@ -8297,6 +8487,7 @@ fn render_schema_docs() -> Vec<String> {
 fn extract_request_id(cli: &Cli) -> Option<String> {
     match &cli.command {
         Some(Commands::Search { request_id, .. }) => request_id.clone(),
+        Some(Commands::Pack { request_id, .. }) => request_id.clone(),
         _ => None,
     }
 }
@@ -10468,6 +10659,586 @@ fn run_cli_search(
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_cli_pack(
+    query: &str,
+    agents: &[String],
+    workspaces: &[String],
+    limit: usize,
+    robot_format: Option<RobotFormat>,
+    fields: Option<Vec<String>>,
+    max_tokens: usize,
+    max_sessions: usize,
+    max_evidence: usize,
+    context_lines: usize,
+    max_excerpt_chars: usize,
+    request_id: Option<String>,
+    display_format: Option<DisplayFormat>,
+    data_dir_override: &Option<PathBuf>,
+    db_override: Option<PathBuf>,
+    time_filter: TimeFilter,
+    source: Option<String>,
+    sessions_from: Option<String>,
+    mode: Option<crate::search::query::SearchMode>,
+    freshness_policy: &str,
+    freshness_window_seconds: i64,
+    require_evidence: bool,
+    explain_selection: bool,
+    refresh: bool,
+    timeout_ms: Option<u64>,
+    _wrap: WrapConfig,
+) -> CliResult<()> {
+    use crate::search::pack_planner::{
+        PackLexicalReadiness, PackPlanRequest, PackPlannerLimits, PackReadinessSnapshot,
+        PackRenderFormat, PackRenderRequest, PackSemanticReadiness, pack_candidate_fetch_limit,
+        plan_answer_pack, render_answer_pack, render_answer_pack_value,
+    };
+    use crate::search::query::{FieldMask, SearchClient, SearchClientOptions, SearchFilters};
+    use crate::sources::provenance::SourceFilter;
+
+    let start_time = Instant::now();
+    let query = query.trim();
+    if query.is_empty() {
+        return Err(CliError {
+            code: 2,
+            kind: CliErrorKind::PackEmptyQuery.kind_str(),
+            message: "pack query is empty after trimming whitespace".to_string(),
+            hint: Some(
+                "Provide a non-empty query, for example `cass pack \"checkout failure\" --robot`."
+                    .to_string(),
+            ),
+            retryable: false,
+        });
+    }
+    let render_format = resolve_pack_render_format(robot_format, display_format)?;
+    let freshness_policy = parse_pack_freshness_policy(freshness_policy)?;
+    if freshness_window_seconds <= 0 {
+        return Err(CliError {
+            code: 2,
+            kind: CliErrorKind::PackInvalidLimit.kind_str(),
+            message: format!(
+                "invalid pack limit freshness_window_seconds={freshness_window_seconds} (must be positive)"
+            ),
+            hint: Some(
+                "Set --freshness-window-seconds to a positive number of seconds.".to_string(),
+            ),
+            retryable: false,
+        });
+    }
+    let limits = PackPlannerLimits {
+        max_tokens,
+        max_sessions,
+        max_evidence,
+        context_lines,
+        max_excerpt_chars,
+    };
+    limits.validate().map_err(pack_invalid_limit_error)?;
+
+    let data_dir = data_dir_override.clone().unwrap_or_else(default_data_dir);
+    let index_path = crate::search::tantivy::expected_index_dir(&data_dir);
+    let db_path = db_override
+        .clone()
+        .unwrap_or_else(|| data_dir.join("agent_search.db"));
+    let db_exists = db_path.exists();
+
+    let mut filters = SearchFilters::default();
+    if !agents.is_empty() {
+        filters.agents = HashSet::from_iter(agents.iter().cloned());
+    }
+    if !workspaces.is_empty() {
+        filters.workspaces = HashSet::from_iter(workspaces.iter().cloned());
+    }
+    filters.created_from = time_filter.since;
+    filters.created_to = time_filter.until;
+    if let Some(ref source_str) = source {
+        filters.source_filter = SourceFilter::parse(source_str);
+    }
+    if let Some(ref sessions_from_arg) = sessions_from {
+        filters.session_paths = read_session_paths(sessions_from_arg).map_err(|e| CliError {
+            code: 2,
+            kind: CliErrorKind::SessionsFrom.kind_str(),
+            message: format!("failed to read session paths: {e}"),
+            hint: Some("Provide a file path or '-' for stdin".to_string()),
+            retryable: false,
+        })?;
+    }
+    validate_pack_fields(fields.as_ref())?;
+
+    if refresh {
+        refresh_index_inline(db_override.clone(), data_dir_override.clone());
+    }
+
+    let search_self_heal = ensure_lexical_assets_for_search(
+        &data_dir,
+        &db_path,
+        &index_path,
+        timeout_ms,
+        start_time,
+        false,
+    )?;
+    if search_self_heal.action != "skipped" {
+        tracing::info!(
+            action = search_self_heal.action,
+            reason = search_self_heal.reason.as_deref(),
+            indexed_docs = search_self_heal.indexed_docs,
+            "pack lexical self-heal completed"
+        );
+    }
+
+    let tantivy_index_initialized = crate::search::tantivy::searchable_index_exists(&index_path);
+    let rebuild_active = probe_index_run_lock(&data_dir, &db_path).active;
+    let client = SearchClient::open_with_options(
+        &index_path,
+        Some(&db_path),
+        SearchClientOptions {
+            enable_reload: false,
+            enable_warm: false,
+        },
+    )
+    .map_err(|e| CliError {
+        code: 9,
+        kind: CliErrorKind::OpenIndex.kind_str(),
+        message: format!("failed to open index: {e}"),
+        hint: Some("try cass index --full".to_string()),
+        retryable: true,
+    })?
+    .ok_or_else(|| {
+        pack_missing_index_error(
+            &data_dir,
+            &db_path,
+            &index_path,
+            db_exists,
+            tantivy_index_initialized,
+            rebuild_active,
+        )
+    })?;
+
+    let requested_mode = mode.unwrap_or_default();
+    let mut mode_meta = SearchModeMeta::new(requested_mode, mode.is_none());
+    if matches!(requested_mode, crate::search::query::SearchMode::Semantic) {
+        return Err(CliError {
+            code: 15,
+            kind: CliErrorKind::SemanticUnavailable.kind_str(),
+            message: "cass pack cannot currently run semantic-only evidence selection".to_string(),
+            hint: Some("Use --mode lexical or the default hybrid-preferred mode, which fails open to lexical evidence.".to_string()),
+            retryable: true,
+        });
+    }
+    if matches!(requested_mode, crate::search::query::SearchMode::Hybrid) {
+        mode_meta
+            .fall_back_to_lexical("pack semantic enrichment unavailable; using lexical evidence");
+    }
+
+    let timeout_duration = timeout_ms.map(Duration::from_millis);
+    if let Some(timeout) = timeout_duration
+        && start_time.elapsed() >= timeout
+    {
+        return Err(CliError {
+            code: 10,
+            kind: CliErrorKind::Timeout.kind_str(),
+            message: format!(
+                "Operation timed out after {}ms (before pack search started)",
+                timeout.as_millis()
+            ),
+            hint: Some("Increase --timeout value or simplify query".to_string()),
+            retryable: true,
+        });
+    }
+
+    let candidate_limit = if limit == 0 {
+        pack_candidate_fetch_limit(&limits).map_err(pack_invalid_limit_error)?
+    } else {
+        limit
+    };
+    let search_sparse_threshold = sparse_threshold_for_visible_limit(3, candidate_limit, false);
+    let result = client
+        .search_with_fallback(
+            query,
+            filters,
+            candidate_limit,
+            0,
+            search_sparse_threshold,
+            FieldMask::FULL,
+        )
+        .map_err(|e| CliError {
+            code: 9,
+            kind: CliErrorKind::Search.kind_str(),
+            message: format!("pack search failed: {e}"),
+            hint: Some(
+                "Try `cass search <query> --robot --robot-meta` to inspect the search path."
+                    .to_string(),
+            ),
+            retryable: true,
+        })?;
+
+    if let Some(timeout) = timeout_duration
+        && start_time.elapsed() > timeout
+    {
+        return Err(CliError {
+            code: 10,
+            kind: CliErrorKind::Timeout.kind_str(),
+            message: format!(
+                "Operation timed out after {}ms while building answer pack",
+                timeout.as_millis()
+            ),
+            hint: Some("Increase --timeout value or lower --limit/--max-evidence".to_string()),
+            retryable: true,
+        });
+    }
+
+    let query_term_count = pack_query_term_count(query);
+    let query_phrase_count = pack_query_phrase_count(query);
+    let source_explicitly_requested = source.is_some() || sessions_from.is_some();
+    let candidates = result
+        .hits
+        .iter()
+        .enumerate()
+        .map(|(index, hit)| {
+            let mut candidate = crate::search::pack_planner::PackCandidate::from_search_hit(
+                hit,
+                query_term_count,
+                query_phrase_count,
+            );
+            candidate.hybrid_rank = Some(index + 1);
+            candidate.source_explicitly_requested = source_explicitly_requested;
+            candidate
+        })
+        .collect::<Vec<_>>();
+
+    let generated_at_ms = Utc::now().timestamp_millis();
+    let plan_request = PackPlanRequest {
+        now_ms: generated_at_ms,
+        limits: limits.clone(),
+        freshness_policy,
+        freshness_window_seconds,
+        candidates,
+        explain_selection,
+    };
+    let plan = plan_answer_pack(plan_request).map_err(pack_invalid_limit_error)?;
+
+    if require_evidence && plan.evidence.is_empty() {
+        return Err(CliError {
+            code: 13,
+            kind: CliErrorKind::PackNoEvidence.kind_str(),
+            message: "no evidence matched the pack query".to_string(),
+            hint: Some("Broaden the query or remove restrictive filters.".to_string()),
+            retryable: false,
+        });
+    }
+
+    let render_request = PackRenderRequest {
+        query_text: query.to_string(),
+        normalized_query: query.trim().to_string(),
+        generated_at_ms,
+        elapsed_ms: start_time.elapsed().as_millis() as u64,
+        request_id,
+        format: render_format,
+        limits,
+        search_mode: search_mode_label(mode_meta.realized).to_string(),
+        fallback_mode: mode_meta.fallback_tier.map(str::to_string),
+        semantic_joined: mode_meta.semantic_refinement(),
+        freshness_policy,
+        freshness_window_seconds,
+        redaction_policy: "strict".to_string(),
+        sensitive_output: false,
+        skill_content_included: false,
+        explain_selection,
+        readiness: PackReadinessSnapshot {
+            index_generation: search_self_heal
+                .indexed_docs
+                .map(|count| format!("indexed_docs:{count}")),
+            lexical_readiness: if rebuild_active {
+                PackLexicalReadiness::Rebuilding
+            } else {
+                PackLexicalReadiness::Ready
+            },
+            semantic_readiness: if mode_meta.fallback_tier.is_some() {
+                PackSemanticReadiness::FallbackLexical
+            } else {
+                PackSemanticReadiness::Disabled
+            },
+            active_rebuild: rebuild_active,
+            lock_state: rebuild_active.then(|| "index-run-lock-active".to_string()),
+            missing_database: !db_path.exists(),
+            source_sync_gaps: Vec::new(),
+            recommended_action: None,
+        },
+    };
+
+    match render_format {
+        PackRenderFormat::Json | PackRenderFormat::CompactJson | PackRenderFormat::Toon => {
+            let mut value =
+                render_answer_pack_value(&plan, &render_request).map_err(|err| CliError {
+                    code: 9,
+                    kind: CliErrorKind::EncodeJson.kind_str(),
+                    message: format!(
+                        "failed to render answer pack as {}: {}",
+                        err.format, err.message
+                    ),
+                    hint: None,
+                    retryable: false,
+                })?;
+            value = filter_pack_fields(value, fields.as_ref())?;
+            let output_format = match render_format {
+                PackRenderFormat::Json => RobotFormat::Json,
+                PackRenderFormat::CompactJson => RobotFormat::Compact,
+                PackRenderFormat::Toon => RobotFormat::Toon,
+                PackRenderFormat::Jsonl | PackRenderFormat::Markdown => unreachable!(),
+            };
+            output_structured_value(value, output_format)?;
+        }
+        PackRenderFormat::Jsonl | PackRenderFormat::Markdown => {
+            if fields.is_some() && matches!(render_format, PackRenderFormat::Jsonl) {
+                eprintln!("Warning: --fields is ignored for pack JSONL output.");
+            }
+            let rendered = render_answer_pack(&plan, &render_request).map_err(|err| CliError {
+                code: 9,
+                kind: CliErrorKind::EncodeJson.kind_str(),
+                message: format!(
+                    "failed to render answer pack as {}: {}",
+                    err.format, err.message
+                ),
+                hint: None,
+                retryable: false,
+            })?;
+            println!("{rendered}");
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_pack_render_format(
+    robot_format: Option<RobotFormat>,
+    display_format: Option<DisplayFormat>,
+) -> CliResult<crate::search::pack_planner::PackRenderFormat> {
+    use crate::search::pack_planner::PackRenderFormat;
+
+    if matches!(
+        display_format,
+        Some(DisplayFormat::Table | DisplayFormat::Lines)
+    ) {
+        return Err(CliError {
+            code: 2,
+            kind: CliErrorKind::PackUnsupportedFormat.kind_str(),
+            message: "cass pack only supports markdown for human display".to_string(),
+            hint: Some(
+                "Use --display markdown, --json/--robot, or --robot-format json|compact|jsonl|toon."
+                    .to_string(),
+            ),
+            retryable: false,
+        });
+    }
+
+    match robot_format {
+        Some(RobotFormat::Json) => Ok(PackRenderFormat::Json),
+        Some(RobotFormat::Compact) => Ok(PackRenderFormat::CompactJson),
+        Some(RobotFormat::Jsonl) => Ok(PackRenderFormat::Jsonl),
+        Some(RobotFormat::Toon) => Ok(PackRenderFormat::Toon),
+        Some(RobotFormat::Sessions) => Err(CliError {
+            code: 2,
+            kind: CliErrorKind::PackUnsupportedFormat.kind_str(),
+            message: "cass pack does not support --robot-format sessions".to_string(),
+            hint: Some(
+                "Use `cass search --robot-format sessions | cass pack <query> --robot --sessions-from -`."
+                    .to_string(),
+            ),
+            retryable: false,
+        }),
+        None => Ok(PackRenderFormat::Markdown),
+    }
+}
+
+fn pack_invalid_limit_error(err: crate::search::pack_planner::PackPlannerLimitError) -> CliError {
+    CliError {
+        code: 2,
+        kind: CliErrorKind::PackInvalidLimit.kind_str(),
+        message: format!(
+            "invalid pack limit {}={} (allowed {}..={})",
+            err.field, err.value, err.min, err.max
+        ),
+        hint: Some(
+            "Adjust --max-tokens, --max-sessions, --max-evidence, --context-lines, or --max-excerpt-chars."
+                .to_string(),
+        ),
+        retryable: false,
+    }
+}
+
+fn parse_pack_freshness_policy(
+    value: &str,
+) -> CliResult<crate::search::pack_planner::PackFreshnessPolicy> {
+    match value {
+        "prefer-recent" => Ok(crate::search::pack_planner::PackFreshnessPolicy::PreferRecent),
+        "strict" => Ok(crate::search::pack_planner::PackFreshnessPolicy::Strict),
+        "allow-stale" => Ok(crate::search::pack_planner::PackFreshnessPolicy::AllowStale),
+        other => Err(CliError::usage(
+            format!("invalid freshness policy: {other}"),
+            Some("Use prefer-recent, strict, or allow-stale.".to_string()),
+        )),
+    }
+}
+
+fn pack_query_term_count(query: &str) -> usize {
+    query
+        .split_whitespace()
+        .filter(|term| !term.trim_matches('"').is_empty())
+        .count()
+}
+
+fn pack_query_phrase_count(query: &str) -> usize {
+    query.matches('"').count() / 2
+}
+
+fn pack_missing_index_error(
+    data_dir: &Path,
+    db_path: &Path,
+    index_path: &Path,
+    db_exists: bool,
+    tantivy_index_initialized: bool,
+    rebuild_active: bool,
+) -> CliError {
+    let (message, hint) = if rebuild_active && !tantivy_index_initialized {
+        (
+            format!(
+                "cass is already building the initial search index in {}. Pack generation will become available when that index run finishes.",
+                data_dir.display()
+            ),
+            Some("Wait for the active 'cass index' run to finish, or inspect progress with 'cass status --json'.".to_string()),
+        )
+    } else if cass_not_initialized(db_exists, tantivy_index_initialized, rebuild_active) {
+        (
+            format!(
+                "cass has not been initialized in {} yet, so pack generation cannot run until the first index completes.",
+                data_dir.display()
+            ),
+            Some(cass_not_initialized_recommended_action()),
+        )
+    } else if db_exists && !tantivy_index_initialized {
+        (
+            format!(
+                "Search index not found at {}. The archive database exists, but the Tantivy index has not been built yet.",
+                index_path.display()
+            ),
+            Some("Run 'cass index --full' to build the search index for this archive.".to_string()),
+        )
+    } else if !db_exists && tantivy_index_initialized {
+        (
+            format!(
+                "Search index exists at {}, but the archive database {} is missing.",
+                index_path.display(),
+                db_path.display()
+            ),
+            Some("Run 'cass index --full' to recreate the local archive database.".to_string()),
+        )
+    } else {
+        (
+            format!(
+                "Index not found at {}. Run 'cass index --full' first.",
+                index_path.display()
+            ),
+            Some(
+                "Run 'cass index --full' to create the local archive and search index.".to_string(),
+            ),
+        )
+    };
+    CliError {
+        code: 3,
+        kind: CliErrorKind::MissingIndex.kind_str(),
+        message,
+        hint,
+        retryable: true,
+    }
+}
+
+fn filter_pack_fields(
+    value: serde_json::Value,
+    fields: Option<&Vec<String>>,
+) -> CliResult<serde_json::Value> {
+    let Some(fields) = fields else {
+        return Ok(value);
+    };
+    let Some(field_set) = expand_pack_field_mask(fields)? else {
+        return Ok(value);
+    };
+    let serde_json::Value::Object(mut object) = value else {
+        return Ok(value);
+    };
+    let mut filtered = serde_json::Map::new();
+    for field in field_set {
+        if let Some(value) = object.remove(&field) {
+            filtered.insert(field, value);
+        }
+    }
+    Ok(serde_json::Value::Object(filtered))
+}
+
+fn validate_pack_fields(fields: Option<&Vec<String>>) -> CliResult<()> {
+    if let Some(fields) = fields {
+        let _ = expand_pack_field_mask(fields)?;
+    }
+    Ok(())
+}
+
+fn expand_pack_field_mask(fields: &[String]) -> CliResult<Option<BTreeSet<String>>> {
+    let mut set = BTreeSet::new();
+    for field in fields
+        .iter()
+        .map(|field| field.trim())
+        .filter(|field| !field.is_empty())
+    {
+        match field {
+            "*" | "all" => return Ok(None),
+            "minimal" => {
+                set.extend([
+                    "schema_version".to_string(),
+                    "_meta".to_string(),
+                    "pack".to_string(),
+                    "evidence".to_string(),
+                    "warnings".to_string(),
+                ]);
+            }
+            "summary" => {
+                set.extend([
+                    "schema_version".to_string(),
+                    "_meta".to_string(),
+                    "limits".to_string(),
+                    "realized".to_string(),
+                    "health".to_string(),
+                    "freshness".to_string(),
+                    "pack".to_string(),
+                    "privacy".to_string(),
+                    "warnings".to_string(),
+                ]);
+            }
+            "meta" => {
+                set.insert("_meta".to_string());
+            }
+            field @ ("schema_version" | "_meta" | "query" | "limits" | "realized" | "health"
+            | "freshness" | "pack" | "evidence" | "omitted" | "privacy" | "warnings") => {
+                set.insert(field.to_string());
+            }
+            other => {
+                return Err(CliError {
+                    code: 2,
+                    kind: CliErrorKind::PackInvalidField.kind_str(),
+                    message: format!("unknown pack field mask: {other}"),
+                    hint: Some(
+                        "Use minimal, summary, all, or top-level fields such as evidence, health, freshness, omitted, privacy."
+                            .to_string(),
+                    ),
+                    retryable: false,
+                });
+            }
+        }
+    }
+    if set.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(set))
+    }
 }
 
 /// Output search results in human-readable display format
@@ -57454,6 +58225,7 @@ fn run_capabilities(output_format: Option<RobotFormat>) -> CliResult<()> {
             "timeout".to_string(),
             "cursor_pagination".to_string(),
             "request_id".to_string(),
+            "answer_pack_command".to_string(),
             "dry_run".to_string(),
             "query_explain".to_string(),
             "view_command".to_string(),
@@ -57988,10 +58760,16 @@ const INTEGER_ARG_NAMES: &[&str] = &[
     "offset",
     "max-content-length",
     "max-tokens",
+    "max-sessions",
+    "max-evidence",
+    "context-lines",
+    "max-excerpt-chars",
+    "freshness-window-seconds",
     "days",
     "line",
     "context",
     "stale-threshold",
+    "timeout",
 ];
 
 fn infer_value_type(arg: &Arg) -> Option<String> {
@@ -61020,6 +61798,38 @@ fn response_schema_search() -> serde_json::Value {
     ])
 }
 
+fn response_schema_pack() -> serde_json::Value {
+    response_schema_object([
+        ("schema_version", serde_json::json!({ "type": "string" })),
+        ("query", response_schema_opaque_object()),
+        ("_meta", response_schema_opaque_object()),
+        ("limits", response_schema_opaque_object()),
+        ("realized", response_schema_opaque_object()),
+        ("health", response_schema_opaque_object()),
+        ("freshness", response_schema_opaque_object()),
+        ("pack", response_schema_opaque_object()),
+        (
+            "evidence",
+            serde_json::json!({
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                }
+            }),
+        ),
+        ("omitted", response_schema_opaque_object()),
+        ("privacy", response_schema_opaque_object()),
+        (
+            "warnings",
+            serde_json::json!({
+                "type": "array",
+                "items": { "type": "string" }
+            }),
+        ),
+    ])
+}
+
 /// Build response schemas for commands that support JSON output.
 ///
 /// Returns a `BTreeMap` so the serialized JSON object has deterministic
@@ -61030,6 +61840,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
     let mut schemas = std::collections::BTreeMap::new();
 
     schemas.insert("search".to_string(), response_schema_search());
+    schemas.insert("pack".to_string(), response_schema_pack());
 
     schemas.insert(
         "status".to_string(),

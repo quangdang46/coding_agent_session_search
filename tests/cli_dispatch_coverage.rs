@@ -1646,7 +1646,9 @@ fn missing_required_arg_returns_error() {
 // Clap parsing tests for new commands
 // =============================================================================
 
-use coding_agent_search::{AnalyticsBucketing, AnalyticsCommand, Commands};
+use coding_agent_search::{
+    AnalyticsBucketing, AnalyticsCommand, Commands, DisplayFormat, RobotFormat,
+};
 
 #[test]
 fn parse_completions_bash() {
@@ -1673,6 +1675,178 @@ fn parse_health_with_stale_threshold() {
         }
         other => panic!("expected health command, got {other:?}"),
     }
+}
+
+#[test]
+fn parse_pack_robot_contract_flags() {
+    let cli = parse_cli_ok(
+        [
+            "cass",
+            "--robot-format",
+            "compact",
+            "pack",
+            "checkout failure",
+            "--json",
+            "--agent",
+            "codex",
+            "--agent",
+            "claude",
+            "--workspace",
+            "/repo",
+            "--limit",
+            "40",
+            "--fields",
+            "summary,evidence",
+            "--max-tokens",
+            "4000",
+            "--max-sessions",
+            "5",
+            "--max-evidence",
+            "12",
+            "--context-lines",
+            "2",
+            "--max-excerpt-chars",
+            "800",
+            "--request-id",
+            "req-1",
+            "--display",
+            "markdown",
+            "--data-dir",
+            "/tmp/cass-data",
+            "--days",
+            "7",
+            "--source",
+            "remote",
+            "--sessions-from",
+            "-",
+            "--mode",
+            "lexical",
+            "--freshness-policy",
+            "strict",
+            "--freshness-window-seconds",
+            "3600",
+            "--require-evidence",
+            "--explain-selection",
+            "--refresh",
+            "--timeout",
+            "9000",
+        ],
+        "parse pack robot contract flags",
+    );
+
+    assert_eq!(cli.robot_format, Some(RobotFormat::Compact));
+    match cli.command {
+        Some(Commands::Pack {
+            query,
+            agent,
+            workspace,
+            limit,
+            json,
+            fields,
+            max_tokens,
+            max_sessions,
+            max_evidence,
+            context_lines,
+            max_excerpt_chars,
+            request_id,
+            display,
+            data_dir,
+            days,
+            source,
+            sessions_from,
+            mode,
+            freshness_policy,
+            freshness_window_seconds,
+            require_evidence,
+            explain_selection,
+            refresh,
+            timeout,
+            ..
+        }) => {
+            assert_eq!(query, "checkout failure");
+            assert_eq!(agent, vec!["codex", "claude"]);
+            assert_eq!(workspace, vec!["/repo"]);
+            assert_eq!(limit, 40);
+            assert!(json);
+            assert_eq!(
+                fields,
+                Some(vec!["summary".to_string(), "evidence".to_string()])
+            );
+            assert_eq!(max_tokens, 4000);
+            assert_eq!(max_sessions, 5);
+            assert_eq!(max_evidence, 12);
+            assert_eq!(context_lines, 2);
+            assert_eq!(max_excerpt_chars, 800);
+            assert_eq!(request_id, Some("req-1".to_string()));
+            assert_eq!(display, Some(DisplayFormat::Markdown));
+            assert_eq!(data_dir.unwrap().to_str().unwrap(), "/tmp/cass-data");
+            assert_eq!(days, Some(7));
+            assert_eq!(source, Some("remote".to_string()));
+            assert_eq!(sessions_from, Some("-".to_string()));
+            assert_eq!(
+                mode,
+                Some(coding_agent_search::search::query::SearchMode::Lexical)
+            );
+            assert_eq!(freshness_policy, "strict");
+            assert_eq!(freshness_window_seconds, 3600);
+            assert!(require_evidence);
+            assert!(explain_selection);
+            assert!(refresh);
+            assert_eq!(timeout, Some(9000));
+        }
+        other => panic!("expected pack command, got {other:?}"),
+    }
+}
+
+fn assert_pack_robot_error(args: &[&str], stdin: Option<&str>, expected_kind: &str) {
+    let mut cmd = simple_cmd();
+    cmd.args(args);
+    if let Some(stdin) = stdin {
+        cmd.write_stdin(stdin);
+    }
+
+    let output = cmd.assert().failure().get_output().clone();
+    assert!(
+        output.stdout.is_empty(),
+        "pack robot errors must keep stdout data-only, got stdout={}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let json: Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|err| panic!("stderr should be a JSON error envelope: {err}\n{stderr}"));
+    assert_eq!(json["error"]["kind"], expected_kind);
+}
+
+#[test]
+fn pack_empty_query_json_error_uses_stderr_only() {
+    assert_pack_robot_error(&["pack", "", "--json"], None, "pack-empty-query");
+}
+
+#[test]
+fn pack_rejects_sessions_robot_format_before_search() {
+    assert_pack_robot_error(
+        &["--robot-format", "sessions", "pack", "checkout", "--json"],
+        None,
+        "pack-unsupported-format",
+    );
+}
+
+#[test]
+fn pack_invalid_field_with_sessions_from_stdin_is_json_error() {
+    assert_pack_robot_error(
+        &[
+            "pack",
+            "checkout",
+            "--json",
+            "--sessions-from",
+            "-",
+            "--fields",
+            "no_such_field",
+        ],
+        Some("/tmp/session-a.jsonl\n"),
+        "pack-invalid-field",
+    );
 }
 
 #[test]

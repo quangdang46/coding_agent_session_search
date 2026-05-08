@@ -3,6 +3,7 @@ cass --robot-help (contract v1)
 
 QUICKSTART (for AI agents):
   cass search "your query" --robot     # Search with JSON output
+  cass pack "your query" --robot --max-tokens 12000  # Cited handoff pack
   cass search "bug fix" --today        # Search today's sessions only
   cass search "api" --week --agent codex  # Last 7 days, codex only
   cass stats --json                    # Get index statistics
@@ -25,7 +26,7 @@ OUTPUT:
   stdout=data only; stderr=warnings/errors only (INFO auto-suppressed)
   Use -v/--verbose with --json to enable INFO logs if needed
 
-Subcommands: search | sessions | stats | view | index | tui | robot-docs <topic>
+Subcommands: search | pack | sessions | stats | view | index | tui | robot-docs <topic>
 Topics: commands | env | paths | schemas | guide | exit-codes | examples | contracts | wrap | sources
 Exit codes: 0 ok; 2 usage; 3 missing index/db; 9 unknown
 More: cass robot-docs examples | cass robot-docs commands

@@ -100,7 +100,7 @@ cass sources agents include openclaw
 - Lexical generation cleanup uses a dispositions + inspection-required-first policy. Operators running `cass doctor --fix` never have a generation reclaimed silently — every quarantine stays on disk until an explicit `cass models backfill` / `cass index --full --force-rebuild` replaces the source data.
 
 **Schema stability guarantees**
-- The JSON contract surfaces (`capabilities`, `health`, `status`, `diag`, `models status`, `models verify`, `models check-update`, `introspect`, `doctor`, `api-version`, `stats`, `sessions`, `search`) are pinned by golden-file regression tests under `tests/golden/robot/`. A change to any field name, type, or nullability fails the golden test suite and requires a deliberate regeneration pass (`UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-golden-target cargo test --test golden_robot_json`).
+- The JSON contract surfaces (`capabilities`, `health`, `status`, `diag`, `models status`, `models verify`, `models check-update`, `introspect`, `doctor`, `api-version`, `stats`, `sessions`, `search`, `pack`) are pinned by golden-file regression tests under `tests/golden/robot/`. A change to any field name, type, or nullability fails the golden test suite and requires a deliberate regeneration pass (`UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-golden-target cargo test --test golden_robot_json --test golden_robot_docs`).
 - `cass introspect --json`'s `response_schemas` block enumerates every schema in a stable alphabetical order (`BTreeMap`-backed — see bead coding_agent_session_search-8sl73).
 - Error envelopes (`{error: {code, kind, message, hint, retryable}}`) have a fixed shape. `kind` values are kebab-case; branch on `err.kind`, not on the numeric code, for codes ≥ 10 (see the Error Handling section below).
 
@@ -782,6 +782,9 @@ cass search "error" --robot-format compact
 # Include performance metadata
 cass search "error" --robot --robot-meta
 # → { "hits": [...], "_meta": { "elapsed_ms": 12, "cache_hit": true, "wildcard_fallback": false, ... } }
+
+# Deterministic answer pack for handoff prompts
+cass pack "why did checkout fail" --robot --max-tokens 12000 --limit 40
 ```
 
 **Design principle**: stdout contains only parseable JSON data; all diagnostics, warnings, and progress go to stderr.
@@ -798,6 +801,10 @@ LLMs have context limits. `cass` provides multiple levers to control output size
 | `--max-content-length 500` | Truncate long fields (UTF-8 safe, adds "...") |
 | `--max-tokens 2000` | Soft budget (~4 chars/token); adjusts truncation dynamically |
 | `--limit 5` | Cap number of results |
+| `cass pack "query" --robot` | Build a cited handoff pack from selected search evidence |
+| `pack --max-tokens N` | Set the pack planner's soft budget |
+| `pack --max-evidence N` | Cap evidence items selected into the pack |
+| `pack --sessions-from FILE` | Restrict pack evidence to newline-delimited session paths; use `-` for stdin |
 
 Truncated fields include a `*_truncated: true` indicator so agents know when they're seeing partial content.
 
@@ -1100,6 +1107,9 @@ cass introspect --json
  # Search across all agent histories
  cass search "authentication error" --robot --limit 5
 
+ # Build a cited handoff pack from search evidence
+ cass pack "authentication error root cause" --robot --max-tokens 12000 --limit 40
+
  # View a specific result (from search output)
  cass view /path/to/session.jsonl -n 42 --json
 
@@ -1122,6 +1132,7 @@ cass introspect --json
  |------------------|--------------------------------------------------------|
  | --robot / --json | Machine-readable JSON output (required!) |
  | --fields minimal | Reduce payload: source_path, line_number, agent only |
+ | pack --max-tokens N | Budget a cited handoff pack |
  | --limit N | Cap result count |
  | --agent NAME | Filter to specific agent (claude, codex, cursor, etc.) |
  | --days N | Limit to recent N days |
@@ -2361,6 +2372,7 @@ cass index [--full] [--watch] [--data-dir DIR] [--idempotency-key KEY]
 # Search
 cass search "query" --robot --limit 5 [--timeout 5000] [--explain] [--dry-run]
 cass search "error" --robot --aggregate agent,workspace --fields minimal
+cass pack "query" --robot --max-tokens 12000 [--limit 40] [--sessions-from FILE|-]
 
 # Inspection & Health
 cass status --json                    # Quick health snapshot
@@ -2395,6 +2407,7 @@ cass completions bash > ~/.bash_completion.d/cass
 | `index --full` | Discover sessions and refresh the canonical DB plus derived search assets |
 | `index --watch` | Daemon mode: watch for file changes, reindex automatically |
 | `search --robot` | JSON output for automation pipelines |
+| `pack --robot` | Deterministic cited answer packs for agent handoffs |
 | `status` / `state` | Health snapshot: index freshness, DB stats, recommended action |
 | `health` | Minimal health check (<50ms), exit 0=healthy, 1=unhealthy |
 | `capabilities` | Discover features, versions, limits (for agent introspection) |

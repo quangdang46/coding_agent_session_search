@@ -114,6 +114,11 @@ pub enum ErrorKind {
     OpencodeParse,
     OpencodeSqliteParse,
     OutputNotWritable,
+    PackEmptyQuery,
+    PackInvalidField,
+    PackInvalidLimit,
+    PackNoEvidence,
+    PackUnsupportedFormat,
     Pages,
     ParseError,
     PasswordReadError,
@@ -211,6 +216,11 @@ impl ErrorKind {
             Self::OpencodeParse => "opencode-parse",
             Self::OpencodeSqliteParse => "opencode-sqlite-parse",
             Self::OutputNotWritable => "output-not-writable",
+            Self::PackEmptyQuery => "pack-empty-query",
+            Self::PackInvalidField => "pack-invalid-field",
+            Self::PackInvalidLimit => "pack-invalid-limit",
+            Self::PackNoEvidence => "pack-no-evidence",
+            Self::PackUnsupportedFormat => "pack-unsupported-format",
             Self::Pages => "pages",
             Self::ParseError => "parse-error",
             Self::PasswordReadError => "password-read-error",
@@ -306,6 +316,11 @@ impl ErrorKind {
             "opencode-parse" => Self::OpencodeParse,
             "opencode-sqlite-parse" => Self::OpencodeSqliteParse,
             "output-not-writable" => Self::OutputNotWritable,
+            "pack-empty-query" => Self::PackEmptyQuery,
+            "pack-invalid-field" => Self::PackInvalidField,
+            "pack-invalid-limit" => Self::PackInvalidLimit,
+            "pack-no-evidence" => Self::PackNoEvidence,
+            "pack-unsupported-format" => Self::PackUnsupportedFormat,
             "pages" => Self::Pages,
             "parse-error" => Self::ParseError,
             "password-read-error" => Self::PasswordReadError,
@@ -401,6 +416,11 @@ impl ErrorKind {
             Self::OpencodeParse,
             Self::OpencodeSqliteParse,
             Self::OutputNotWritable,
+            Self::PackEmptyQuery,
+            Self::PackInvalidField,
+            Self::PackInvalidLimit,
+            Self::PackNoEvidence,
+            Self::PackUnsupportedFormat,
             Self::Pages,
             Self::ParseError,
             Self::PasswordReadError,
@@ -493,10 +513,10 @@ mod tests {
     /// drift immediately at CI time.
     #[test]
     fn variant_count_matches_audited_lib_rs_kind_literals() {
-        // 86 unique kinds at landing time (commit before the variant
+        // 91 unique kinds at landing time (commit before the pack
         // landed). If lib.rs grows a new kind, bump this count AND
         // add the variant + arms above.
-        const AUDITED_KIND_COUNT: usize = 86;
+        const AUDITED_KIND_COUNT: usize = 91;
         assert_eq!(
             ErrorKind::all_variants().len(),
             AUDITED_KIND_COUNT,

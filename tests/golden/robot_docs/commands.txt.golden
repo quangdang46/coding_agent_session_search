@@ -23,6 +23,12 @@ commands:
                       Returns buckets with counts. Reduces tokens by ~99% for overview queries
     --mode lexical|semantic|hybrid  Search mode (default: hybrid; hybrid fails open to lexical when semantic assets are unavailable)
     --robot-meta     Include readiness, requested/realized mode, semantic refinement, fallback tier/reason, cursor, and timing metadata
+  cass pack <query> [--robot] [--max-tokens N] [--limit N]
+    Build a deterministic, cited answer pack for agent handoffs without external summarization.
+    --sessions-from FILE|-  Restrict evidence to newline-delimited session paths; '-' reads stdin.
+    --fields minimal|summary|all,F1,F2  Select top-level pack fields for JSON/TOON output.
+    --freshness-policy prefer-recent|strict|allow-stale  Evidence freshness policy.
+    --require-evidence  Return a JSON error envelope instead of an empty successful pack.
   cass stats [--json] [--data-dir DIR]
   cass status [--json] [--stale-threshold N] [--data-dir DIR]
   cass diag [--json] [--verbose] [--data-dir DIR]

@@ -14,6 +14,7 @@
     "timeout",
     "cursor_pagination",
     "request_id",
+    "answer_pack_command",
     "dry_run",
     "query_explain",
     "view_command",

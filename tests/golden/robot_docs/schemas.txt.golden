@@ -2911,6 +2911,19 @@ schemas: (auto-generated from contract)
     - next_step: string
     - state_detail: string
     - status: string
+  pack:
+    - _meta: object
+    - evidence: array
+    - freshness: object
+    - health: object
+    - limits: object
+    - omitted: object
+    - pack: object
+    - privacy: object
+    - query: object
+    - realized: object
+    - schema_version: string
+    - warnings: array
   search:
     - _meta: object
       - ann_stats: ?
