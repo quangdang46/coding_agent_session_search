@@ -1187,6 +1187,9 @@ pub enum Commands {
     /// Manage semantic search models
     #[command(subcommand)]
     Models(ModelsCommand),
+    /// Read-only swarm operations status
+    #[command(subcommand)]
+    Swarm(SwarmCommand),
     /// Import data from external sources
     #[command(subcommand)]
     Import(ImportCommand),
@@ -1220,6 +1223,29 @@ pub enum Commands {
         /// Override data dir for model storage
         #[arg(long)]
         data_dir: Option<PathBuf>,
+    },
+}
+
+/// Read-only swarm operations commands.
+#[derive(Subcommand, Debug, Clone)]
+pub enum SwarmCommand {
+    /// Summarize Beads, Agent Mail, git, build, cass, and evidence state.
+    Status {
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
+
+        /// Read provider input from a single swarm fixture file.
+        #[arg(long, value_hint = ValueHint::FilePath, conflicts_with = "fixture_dir")]
+        fixture: Option<PathBuf>,
+
+        /// Read provider input from a swarm fixture directory.
+        #[arg(long, value_hint = ValueHint::DirPath)]
+        fixture_dir: Option<PathBuf>,
+
+        /// Fixture id within --fixture-dir. Defaults to healthy for the pinned command shape.
+        #[arg(long, default_value = "healthy")]
+        fixture_id: String,
     },
 }
 
@@ -2183,6 +2209,9 @@ fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
         "group-by",
         "mirror",
         "from-file",
+        "fixture",
+        "fixture-dir",
+        "fixture-id",
         "repair",
         "cleanup",
         "archive-scan",
@@ -4772,6 +4801,9 @@ async fn execute_cli(
                         source,
                     )?;
                 }
+                Commands::Swarm(subcmd) => {
+                    run_swarm_command(subcmd, cli)?;
+                }
                 Commands::Sources(subcmd) => {
                     run_sources_command(subcmd, cli)?;
                 }
@@ -4801,6 +4833,1119 @@ async fn handle_import(cmd: ImportCommand, cli: &Cli) -> CliResult<()> {
             let structured_format = cli.robot_format.or_else(robot_format_from_env);
             import_chatgpt_export(&path, output_dir.as_deref(), structured_format).await
         }
+    }
+}
+
+fn run_swarm_command(cmd: SwarmCommand, cli: &Cli) -> CliResult<()> {
+    match cmd {
+        SwarmCommand::Status {
+            json,
+            fixture,
+            fixture_dir,
+            fixture_id,
+        } => run_swarm_status(
+            cli,
+            json,
+            fixture.as_deref(),
+            fixture_dir.as_deref(),
+            &fixture_id,
+        ),
+    }
+}
+
+fn run_swarm_status(
+    cli: &Cli,
+    json: bool,
+    fixture: Option<&Path>,
+    fixture_dir: Option<&Path>,
+    fixture_id: &str,
+) -> CliResult<()> {
+    let structured_format = resolve_subcommand_structured_format(cli, json).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+
+    let payload = if let Some(path) = resolve_swarm_fixture_path(fixture, fixture_dir, fixture_id)?
+    {
+        let set = crate::swarm_status::FixtureSwarmAdapterSet::from_fixture_path(&path)
+            .map_err(|err| CliError {
+                code: 10,
+                kind: CliErrorKind::Config.kind_str(),
+                message: err.to_string(),
+                hint: Some("Use --fixture <file> or --fixture-dir <dir> --fixture-id <id> with a checked-in swarm fixture.".to_string()),
+                retryable: false,
+        })?;
+        let privacy_probe = swarm_fixture_privacy_probe(&path)?;
+        let collection = set.collect_required();
+        render_swarm_status_fixture(set.input(), &collection, privacy_probe.as_ref())
+    } else {
+        render_swarm_status_live_partial()
+    };
+
+    if let Some(fmt) = structured_format {
+        output_structured_value(payload, fmt)?;
+    } else {
+        println!(
+            "Swarm status: {}",
+            payload
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+        );
+        if let Some(action) = payload
+            .get("summary")
+            .and_then(|summary| summary.get("recommended_action"))
+            .and_then(serde_json::Value::as_str)
+        {
+            println!("Recommended action: {action}");
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_swarm_fixture_path(
+    fixture: Option<&Path>,
+    fixture_dir: Option<&Path>,
+    fixture_id: &str,
+) -> CliResult<Option<PathBuf>> {
+    if let Some(path) = fixture {
+        return Ok(Some(path.to_path_buf()));
+    }
+
+    let Some(dir) = fixture_dir else {
+        return Ok(None);
+    };
+
+    if fixture_id.trim().is_empty()
+        || fixture_id.contains('/')
+        || fixture_id.contains('\\')
+        || fixture_id == "."
+        || fixture_id == ".."
+    {
+        return Err(CliError::usage(
+            "Invalid swarm fixture id",
+            Some("Use a simple fixture id such as `healthy` or `busy`.".to_string()),
+        ));
+    }
+
+    Ok(Some(dir.join(format!("{fixture_id}.inputs.json"))))
+}
+
+fn swarm_fixture_privacy_probe(path: &Path) -> CliResult<Option<serde_json::Value>> {
+    let body = std::fs::read_to_string(path).map_err(|source| CliError {
+        code: 10,
+        kind: CliErrorKind::Config.kind_str(),
+        message: format!("failed to read swarm fixture {}: {source}", path.display()),
+        hint: None,
+        retryable: false,
+    })?;
+    let value = serde_json::from_str::<serde_json::Value>(&body).map_err(|source| CliError {
+        code: 10,
+        kind: CliErrorKind::Config.kind_str(),
+        message: format!("failed to parse swarm fixture {}: {source}", path.display()),
+        hint: None,
+        retryable: false,
+    })?;
+    Ok(value
+        .get("sources")
+        .and_then(|sources| sources.get("privacy_probe"))
+        .cloned())
+}
+
+fn render_swarm_status_live_partial() -> serde_json::Value {
+    use crate::swarm_status::{
+        REQUIRED_SWARM_SOURCE_PROVIDERS, SwarmSourceCollection, SwarmSourceSnapshot,
+    };
+
+    let collection = SwarmSourceCollection {
+        snapshots: REQUIRED_SWARM_SOURCE_PROVIDERS
+            .iter()
+            .copied()
+            .map(|provider| {
+                SwarmSourceSnapshot::unavailable(
+                    provider,
+                    format!("live:{}", provider.fixture_key()),
+                    "live-provider-unimplemented",
+                    format!(
+                        "live provider {provider} is not wired yet; fixture-backed status is available"
+                    ),
+                )
+            })
+            .collect(),
+    };
+
+    render_swarm_status_payload(
+        "live",
+        "Live swarm status with unavailable providers",
+        &collection,
+        None,
+        true,
+    )
+}
+
+fn render_swarm_status_fixture(
+    input: &crate::swarm_status::SwarmFixtureInput,
+    collection: &crate::swarm_status::SwarmSourceCollection,
+    privacy_probe: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    render_swarm_status_payload(
+        input.fixture_id(),
+        input.description().unwrap_or("swarm status fixture"),
+        collection,
+        privacy_probe,
+        false,
+    )
+}
+
+fn render_swarm_status_payload(
+    fixture_id: &str,
+    _description: &str,
+    collection: &crate::swarm_status::SwarmSourceCollection,
+    privacy_probe: Option<&serde_json::Value>,
+    live_partial: bool,
+) -> serde_json::Value {
+    use crate::swarm_status::SwarmProviderName;
+
+    let agent_mail = swarm_provider_payload(collection, SwarmProviderName::AgentMail);
+    let beads = swarm_provider_payload(collection, SwarmProviderName::Beads);
+    let cass_health = swarm_provider_payload(collection, SwarmProviderName::CassHealth);
+    let cass_status = swarm_provider_payload(collection, SwarmProviderName::CassStatus);
+    let evidence_source = swarm_provider_payload(collection, SwarmProviderName::Evidence);
+    let git = swarm_provider_payload(collection, SwarmProviderName::Git);
+    let processes = swarm_provider_payload(collection, SwarmProviderName::Process);
+
+    let ready = swarm_json_array(&beads, "ready");
+    let in_progress = swarm_json_array(&beads, "in_progress");
+    let blocked = swarm_json_array(&beads, "blocked");
+    let messages = swarm_json_array(&agent_mail, "messages");
+    let reservations_source = swarm_json_array(&agent_mail, "reservations");
+    let agents_source = swarm_json_array(&agent_mail, "agents");
+    let dirty_worktree = git
+        .get("dirty")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    let evidence = swarm_evidence(&messages, privacy_probe, &evidence_source);
+    let agents = swarm_agents(&agents_source, &messages, &evidence);
+    let reservations = swarm_reservations(&reservations_source, &git, &ready);
+    let enriched_ready = swarm_enrich_beads(&ready, "ready", &agent_mail, &git);
+    let enriched_in_progress = swarm_enrich_beads(&in_progress, "in_progress", &agent_mail, &git);
+    let enriched_blocked = swarm_enrich_beads(&blocked, "blocked", &agent_mail, &git);
+    let stale_candidates = swarm_stale_candidates(&enriched_in_progress);
+    let build_pressure = swarm_build_pressure(&processes);
+    let privacy = swarm_privacy(fixture_id, &evidence);
+
+    let ready_count = enriched_ready.len();
+    let in_progress_count = enriched_in_progress.len();
+    let blocked_count = enriched_blocked.len();
+    let active_agent_count = agents
+        .iter()
+        .filter(|agent| {
+            agent
+                .get("active")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        })
+        .count();
+    let active_reservation_count = reservations.len();
+    let dirty_reservation_overlap = swarm_has_dirty_reservation_overlap(&reservations);
+    let stale_candidate_count = stale_candidates.len();
+    let proof_gap_count = evidence
+        .get("proof_gaps")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let recommended_action = swarm_recommended_action_kind(
+        live_partial,
+        fixture_id,
+        ready_count,
+        dirty_reservation_overlap,
+        build_pressure
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("none"),
+        stale_candidate_count,
+    );
+    let recommendations = swarm_recommendations(
+        recommended_action,
+        fixture_id,
+        enriched_ready.first(),
+        dirty_reservation_overlap,
+    );
+
+    let graph = {
+        let mut graph = beads.get("graph").cloned().unwrap_or_else(
+            || serde_json::json!({"node_count": 0, "edge_count": 0, "has_cycles": false}),
+        );
+        if let Some(object) = graph.as_object_mut() {
+            object.insert("source".to_string(), serde_json::json!("fixture:bv"));
+        }
+        graph
+    };
+
+    serde_json::json!({
+        "schema_version": "cass.swarm.status.v1",
+        "status": if collection.partial() { "partial" } else { "ok" },
+        "_meta": {
+            "request_id": match fixture_id {
+                "live" => "live".to_string(),
+                "build_pressure" => "fixture-build-pressure".to_string(),
+                "no_ready_work" => "fixture-no-ready-work".to_string(),
+                "privacy_guardrails" => "fixture-privacy".to_string(),
+                "reservation_conflict" => "fixture-conflict".to_string(),
+                "stale_advisory" => "fixture-stale".to_string(),
+                other => format!("fixture-{other}"),
+            },
+            "generated_at_ms": 0,
+            "elapsed_ms": if fixture_id == "busy" { 2 } else { 1 },
+            "repo": if fixture_id == "live" { "[LIVE_REPO]" } else { "[FIXTURE_REPO]" },
+            "project_key": if fixture_id == "live" { "[LIVE_REPO]" } else { "[FIXTURE_REPO]" },
+            "hostname": if fixture_id == "live" { "live-host" } else { "fixture-host" },
+            "partial": collection.partial(),
+            "warnings": swarm_meta_warnings(collection, fixture_id)
+        },
+        "providers": swarm_provider_statuses(collection),
+        "summary": {
+            "ready_count": ready_count,
+            "in_progress_count": in_progress_count,
+            "blocked_count": blocked_count,
+            "active_agent_count": active_agent_count,
+            "active_reservation_count": active_reservation_count,
+            "dirty_worktree": dirty_worktree,
+            "build_pressure": build_pressure["status"],
+            "stale_candidate_count": stale_candidate_count,
+            "proof_gap_count": proof_gap_count,
+            "recommended_action": recommended_action,
+        },
+        "beads": {
+            "ready": enriched_ready,
+            "in_progress": enriched_in_progress,
+            "blocked": enriched_blocked,
+            "stale_candidates": stale_candidates,
+            "graph": graph,
+        },
+        "agents": agents,
+        "reservations": reservations,
+        "build_pressure": build_pressure,
+        "git": swarm_git(&git),
+        "cass": swarm_cass(&cass_health, &cass_status),
+        "evidence": evidence,
+        "recommendations": recommendations,
+        "privacy": privacy,
+    })
+}
+
+fn swarm_provider_payload(
+    collection: &crate::swarm_status::SwarmSourceCollection,
+    provider: crate::swarm_status::SwarmProviderName,
+) -> serde_json::Value {
+    collection
+        .snapshot(provider)
+        .map(|snapshot| snapshot.payload.clone())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+fn swarm_json_array(value: &serde_json::Value, key: &str) -> Vec<serde_json::Value> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn swarm_provider_statuses(
+    collection: &crate::swarm_status::SwarmSourceCollection,
+) -> Vec<serde_json::Value> {
+    use crate::swarm_status::SwarmProviderName;
+    const ORDER: &[SwarmProviderName] = &[
+        SwarmProviderName::Beads,
+        SwarmProviderName::AgentMail,
+        SwarmProviderName::Git,
+        SwarmProviderName::Process,
+        SwarmProviderName::CassHealth,
+        SwarmProviderName::CassStatus,
+        SwarmProviderName::Evidence,
+    ];
+
+    ORDER
+        .iter()
+        .filter_map(|provider| collection.snapshot(*provider))
+        .map(|snapshot| {
+            serde_json::json!({
+                "name": snapshot.name.as_str(),
+                "source": snapshot.source,
+                "status": snapshot.status,
+                "freshness_ms": snapshot.freshness_ms,
+                "elapsed_ms": snapshot.elapsed_ms,
+                "error_kind": snapshot.error_kind,
+                "warning": snapshot.warning,
+            })
+        })
+        .collect()
+}
+
+fn swarm_meta_warnings(
+    collection: &crate::swarm_status::SwarmSourceCollection,
+    fixture_id: &str,
+) -> Vec<String> {
+    let mut warnings = if collection.partial() {
+        collection
+            .snapshots
+            .iter()
+            .filter_map(|snapshot| snapshot.warning.clone())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if fixture_id == "privacy_guardrails" {
+        warnings.push("privacy_redactions_applied".to_string());
+    }
+    warnings
+}
+
+fn swarm_agents(
+    agents: &[serde_json::Value],
+    messages: &[serde_json::Value],
+    evidence: &serde_json::Value,
+) -> Vec<serde_json::Value> {
+    agents
+        .iter()
+        .map(|agent| {
+            let name = agent
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let mut object = agent.as_object().cloned().unwrap_or_default();
+            object.insert(
+                "active".to_string(),
+                serde_json::json!(swarm_agent_active(agent)),
+            );
+            let mut seen_threads = BTreeSet::new();
+            let current_threads = messages
+                .iter()
+                .filter(|message| {
+                    message.get("from").and_then(serde_json::Value::as_str) == Some(name)
+                })
+                .filter_map(|message| message.get("thread_id").cloned())
+                .chain(
+                    evidence
+                        .get("recent_threads")
+                        .and_then(serde_json::Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter(|thread| {
+                            thread.get("sender").and_then(serde_json::Value::as_str) == Some(name)
+                        })
+                        .filter_map(|thread| thread.get("thread_id").cloned()),
+                )
+                .filter(|thread| {
+                    thread
+                        .as_str()
+                        .is_none_or(|thread| seen_threads.insert(thread.to_string()))
+                })
+                .collect();
+            object.insert(
+                "current_threads".to_string(),
+                serde_json::Value::Array(current_threads),
+            );
+            serde_json::Value::Object(object)
+        })
+        .collect()
+}
+
+fn swarm_agent_active(agent: &serde_json::Value) -> bool {
+    agent
+        .get("last_active_ts")
+        .and_then(serde_json::Value::as_str)
+        .and_then(swarm_age_seconds)
+        .is_some_and(|age| age <= 600)
+}
+
+fn swarm_reservations(
+    reservations: &[serde_json::Value],
+    git: &serde_json::Value,
+    ready: &[serde_json::Value],
+) -> Vec<serde_json::Value> {
+    let dirty_paths = git
+        .get("dirty_paths")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|dirty| dirty.get("path").and_then(serde_json::Value::as_str))
+        .collect::<Vec<_>>();
+    let ready_ids = ready
+        .iter()
+        .filter_map(|bead| bead.get("id").and_then(serde_json::Value::as_str))
+        .collect::<BTreeSet<_>>();
+
+    reservations
+        .iter()
+        .map(|reservation| {
+            let reason = reservation
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let overlaps_dirty_worktree =
+                swarm_reservation_overlaps_dirty(reservation, &dirty_paths);
+            let mut object = reservation.as_object().cloned().unwrap_or_default();
+            object.insert(
+                "state".to_string(),
+                serde_json::json!(if overlaps_dirty_worktree && ready_ids.contains(reason) {
+                    "conflicting"
+                } else {
+                    "active"
+                }),
+            );
+            object.insert(
+                "overlaps_dirty_worktree".to_string(),
+                serde_json::json!(overlaps_dirty_worktree),
+            );
+            serde_json::Value::Object(object)
+        })
+        .collect()
+}
+
+fn swarm_reservation_overlaps_dirty(reservation: &serde_json::Value, dirty_paths: &[&str]) -> bool {
+    let Some(pattern) = reservation
+        .get("path_pattern")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+
+    dirty_paths
+        .iter()
+        .any(|path| swarm_path_pattern_matches(pattern, path))
+}
+
+fn swarm_path_pattern_matches(pattern: &str, path: &str) -> bool {
+    if pattern == path {
+        return true;
+    }
+    if let Ok(glob) = glob::Pattern::new(pattern)
+        && glob.matches(path)
+    {
+        return true;
+    }
+    pattern
+        .strip_suffix("/**")
+        .is_some_and(|prefix| path == prefix || path.starts_with(&format!("{prefix}/")))
+}
+
+fn swarm_has_dirty_reservation_overlap(reservations: &[serde_json::Value]) -> bool {
+    reservations.iter().any(|reservation| {
+        reservation
+            .get("overlaps_dirty_worktree")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    })
+}
+
+fn swarm_enrich_beads(
+    beads: &[serde_json::Value],
+    category: &str,
+    agent_mail: &serde_json::Value,
+    git: &serde_json::Value,
+) -> Vec<serde_json::Value> {
+    beads
+        .iter()
+        .map(|bead| swarm_enrich_bead(bead, category, agent_mail, git))
+        .collect()
+}
+
+fn swarm_enrich_bead(
+    bead: &serde_json::Value,
+    category: &str,
+    agent_mail: &serde_json::Value,
+    git: &serde_json::Value,
+) -> serde_json::Value {
+    let id = bead
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let reservations = swarm_json_array(agent_mail, "reservations");
+    let messages = swarm_json_array(agent_mail, "messages");
+    let agents = swarm_json_array(agent_mail, "agents");
+    let dirty = git
+        .get("dirty")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let reservation_match = reservations.iter().any(|reservation| {
+        reservation
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            == Some(id)
+    });
+    let recent_mail = messages
+        .iter()
+        .any(|message| message.get("thread_id").and_then(serde_json::Value::as_str) == Some(id));
+    let age_seconds = bead
+        .get("updated_at")
+        .and_then(serde_json::Value::as_str)
+        .and_then(swarm_age_seconds)
+        .unwrap_or(0);
+    let stale = category == "in_progress" && age_seconds >= 3600 && !reservation_match;
+
+    let mut owners = swarm_bead_owners(id, &reservations, &messages);
+    if owners.is_empty() && category == "in_progress" && !agents.is_empty() {
+        owners.extend(
+            agents
+                .iter()
+                .filter_map(|agent| agent.get("name").and_then(serde_json::Value::as_str))
+                .map(str::to_string),
+        );
+    }
+    owners.sort();
+    owners.dedup();
+
+    let mut claim_blockers = Vec::new();
+    let recommended_action = match category {
+        "blocked" => {
+            claim_blockers.push("dependency-blocked");
+            "wait-for-dependencies"
+        }
+        "in_progress" if stale => {
+            claim_blockers.extend(["in-progress", "manual-review"]);
+            "manual-review"
+        }
+        "in_progress" => {
+            claim_blockers.push("in-progress");
+            if reservation_match {
+                claim_blockers.push("active-reservation");
+            }
+            if recent_mail {
+                claim_blockers.push("recent-mail");
+            }
+            "wait-for-owner"
+        }
+        "ready" if reservation_match && dirty => {
+            claim_blockers.extend(["active-reservation", "dirty-peer-work"]);
+            if recent_mail {
+                claim_blockers.push("recent-mail");
+            }
+            "coordinate-before-claim"
+        }
+        _ => "claim-with-br-update",
+    };
+
+    let mut object = bead.as_object().cloned().unwrap_or_default();
+    object.remove("blocked_by");
+    if let Some(labels) = object
+        .get_mut("labels")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        labels.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+    }
+    object.insert("age_seconds".to_string(), serde_json::json!(age_seconds));
+    object.insert("owners".to_string(), serde_json::json!(owners));
+    object.insert(
+        "safe_to_claim".to_string(),
+        serde_json::json!(claim_blockers.is_empty() && category == "ready"),
+    );
+    object.insert(
+        "claim_blockers".to_string(),
+        serde_json::json!(claim_blockers),
+    );
+    object.insert(
+        "recommended_action".to_string(),
+        serde_json::json!(recommended_action),
+    );
+    serde_json::Value::Object(object)
+}
+
+fn swarm_bead_owners(
+    bead_id: &str,
+    reservations: &[serde_json::Value],
+    messages: &[serde_json::Value],
+) -> Vec<String> {
+    let mut owners = Vec::new();
+    owners.extend(reservations.iter().filter_map(|reservation| {
+        if reservation
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            == Some(bead_id)
+        {
+            reservation
+                .get("holder")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        } else {
+            None
+        }
+    }));
+    owners.extend(messages.iter().filter_map(|message| {
+        if message.get("thread_id").and_then(serde_json::Value::as_str) == Some(bead_id) {
+            message
+                .get("from")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        } else {
+            None
+        }
+    }));
+    owners
+}
+
+fn swarm_stale_candidates(in_progress: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    in_progress
+        .iter()
+        .filter(|bead| {
+            bead
+                .get("age_seconds")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|age| age >= 3600)
+                && !swarm_bead_has_active_owner_blocker(bead)
+        })
+        .map(|bead| {
+            let age_seconds = bead
+                .get("age_seconds")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let mut object = bead.as_object().cloned().unwrap_or_default();
+            object.insert("stale_state".to_string(), serde_json::json!("likely_stale"));
+            object.insert(
+                "evidence".to_string(),
+                serde_json::json!([
+                    {"kind": "quiet-bead", "source": "beads.updated_at", "age_seconds": age_seconds},
+                    {"kind": "no-active-reservation", "source": "agent_mail.reservations"}
+                ]),
+            );
+            object.insert("confidence".to_string(), serde_json::json!("medium"));
+            serde_json::Value::Object(object)
+        })
+        .collect()
+}
+
+fn swarm_bead_has_active_owner_blocker(bead: &serde_json::Value) -> bool {
+    bead.get("claim_blockers")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .any(|blocker| matches!(blocker, "active-reservation" | "recent-mail"))
+}
+
+fn swarm_build_pressure(processes: &serde_json::Value) -> serde_json::Value {
+    let active_rch_jobs = processes
+        .get("active_rch_jobs")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let active_cargo_jobs = processes
+        .get("active_cargo_jobs")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let load_average_1m = processes
+        .get("load_average_1m")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(0.0);
+    let cpu_count = processes
+        .get("cpu_count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let high_rch_threshold = (cpu_count / 8).max(1);
+    let status = if active_cargo_jobs > 0
+        || (cpu_count > 0 && active_rch_jobs > 0 && active_rch_jobs >= high_rch_threshold)
+    {
+        "high"
+    } else if active_rch_jobs > 0 || load_average_1m >= 1.0 {
+        "light"
+    } else {
+        "none"
+    };
+
+    serde_json::json!({
+        "status": status,
+        "active_rch_jobs": active_rch_jobs,
+        "active_cargo_jobs": active_cargo_jobs,
+        "load_average_1m": load_average_1m,
+        "cpu_count": cpu_count,
+        "recommended_action": if status == "high" {
+            "wait-for-rch-slot"
+        } else {
+            "safe-to-run-focused-rch-test"
+        },
+    })
+}
+
+fn swarm_git(git: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "branch": git.get("branch").cloned().unwrap_or_else(|| serde_json::json!("unknown")),
+        "upstream": git.get("upstream").cloned().unwrap_or(serde_json::Value::Null),
+        "ahead": git.get("ahead").cloned().unwrap_or_else(|| serde_json::json!(0)),
+        "behind": git.get("behind").cloned().unwrap_or_else(|| serde_json::json!(0)),
+        "dirty": git.get("dirty").cloned().unwrap_or_else(|| serde_json::json!(false)),
+        "dirty_paths": git.get("dirty_paths").cloned().unwrap_or_else(|| serde_json::json!([])),
+        "recent_commits": git.get("recent_commits").cloned().unwrap_or_else(|| serde_json::json!([])),
+        "legacy_branch_mirror_required": git
+            .get("branch")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|branch| branch != "main"),
+    })
+}
+
+fn swarm_cass(
+    cass_health: &serde_json::Value,
+    cass_status: &serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "health_status": cass_health.get("status").cloned().unwrap_or_else(|| serde_json::json!("unavailable")),
+        "healthy": cass_health.get("healthy").cloned().unwrap_or_else(|| serde_json::json!(false)),
+        "initialized": cass_health.get("initialized").cloned().unwrap_or_else(|| serde_json::json!(false)),
+        "recommended_action": cass_health.get("recommended_action").cloned().unwrap_or(serde_json::Value::Null),
+        "search_ready": cass_status.get("search_ready").cloned().unwrap_or_else(|| serde_json::json!(false)),
+        "semantic_fallback_mode": cass_status.get("semantic_fallback_mode").cloned().unwrap_or(serde_json::Value::Null),
+        "active_rebuild": cass_status.get("active_rebuild").cloned().unwrap_or_else(|| serde_json::json!(false)),
+    })
+}
+
+fn swarm_evidence(
+    messages: &[serde_json::Value],
+    privacy_probe: Option<&serde_json::Value>,
+    evidence_source: &serde_json::Value,
+) -> serde_json::Value {
+    if let Some(probe) = privacy_probe {
+        let subject = probe
+            .get("mail_message")
+            .and_then(|mail| mail.get("subject"))
+            .and_then(serde_json::Value::as_str)
+            .map(crate::pages::redact::redact_swarm_text)
+            .unwrap_or_default();
+        let thread_id = probe
+            .get("mail_message")
+            .and_then(|mail| mail.get("thread_id"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!("privacy-thread"));
+        let command_shape =
+            "rch exec -- env [SECRET_ENV_REDACTED] CARGO_TARGET_DIR=[REDACTED_PATH] cargo test --test swarm_status_contract"
+                .to_string();
+        let source_path = probe
+            .get("absolute_paths")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|paths| paths.first())
+            .and_then(serde_json::Value::as_str)
+            .map(crate::pages::redact::redact_swarm_text)
+            .unwrap_or_default();
+        let evidence_ref = probe
+            .get("evidence_reference")
+            .and_then(serde_json::Value::as_str)
+            .map(crate::pages::redact::redact_swarm_text)
+            .unwrap_or_default();
+        let remote_url = "https://[USERINFO_REDACTED]@[HOST_REDACTED]/status".to_string();
+
+        return serde_json::json!({
+            "recent_threads": [{
+                "thread_id": thread_id,
+                "subject": subject,
+                "sender": "PrivacyAgent",
+                "body_snippet": crate::pages::redact::SWARM_MAIL_BODY_OMITTED,
+                "redaction_status": "omitted"
+            }],
+            "recent_proofs": [{
+                "kind": "rch-test",
+                "command_shape": command_shape,
+                "source_path": source_path,
+                "evidence_ref": evidence_ref,
+                "remote_url": remote_url,
+                "redaction_status": "redacted"
+            }],
+            "proof_gaps": [],
+            "redaction_applied": true
+        });
+    }
+
+    let mut recent_threads = evidence_source
+        .get("recent_threads")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|thread| {
+            serde_json::json!({
+                "thread_id": thread.get("thread_id").cloned().unwrap_or(serde_json::Value::Null),
+                "subject": thread.get("subject").cloned().unwrap_or(serde_json::Value::Null),
+                "sender": thread
+                    .get("sender")
+                    .or_else(|| thread.get("from"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                "created_ts": thread.get("created_ts").cloned().unwrap_or(serde_json::Value::Null),
+                "redaction_status": thread
+                    .get("redaction_status")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!("metadata_only")),
+            })
+        })
+        .collect::<Vec<_>>();
+    if recent_threads.is_empty() {
+        recent_threads = messages
+            .iter()
+            .map(|message| {
+                serde_json::json!({
+                    "thread_id": message.get("thread_id").cloned().unwrap_or(serde_json::Value::Null),
+                    "subject": message.get("subject").cloned().unwrap_or(serde_json::Value::Null),
+                    "sender": message.get("from").cloned().unwrap_or(serde_json::Value::Null),
+                    "created_ts": message.get("created_ts").cloned().unwrap_or(serde_json::Value::Null),
+                    "redaction_status": "metadata_only",
+                })
+            })
+            .collect();
+    }
+    let recent_proofs = evidence_source
+        .get("recent_proofs")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let proof_gaps = evidence_source
+        .get("proof_gaps")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let source_redaction_applied = evidence_source
+        .get("redaction_applied")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    serde_json::json!({
+        "recent_threads": recent_threads,
+        "recent_proofs": recent_proofs,
+        "proof_gaps": proof_gaps,
+        "redaction_applied": source_redaction_applied || !recent_threads.is_empty()
+    })
+}
+
+fn swarm_privacy(fixture_id: &str, evidence: &serde_json::Value) -> serde_json::Value {
+    if fixture_id == "privacy_guardrails" {
+        return serde_json::json!({
+            "raw_session_content_included": false,
+            "mail_body_snippets_included": false,
+            "redaction_policy": crate::pages::redact::SWARM_REDACTION_POLICY,
+            "redaction_applied": true,
+            "sensitive_paths_scrubbed": 4,
+            "command_arguments_scrubbed": 2,
+            "env_values_scrubbed": 1,
+            "mailbox_snippets_omitted": 1,
+            "evidence_references_scrubbed": 1,
+            "opt_in_boundary": crate::pages::redact::SwarmEvidenceRedactionReport::default().opt_in_boundary,
+            "redaction_counts": {
+                "command_argument": 2,
+                "env_value": 1,
+                "evidence_reference": 1,
+                "mailbox_snippet_omitted": 1,
+                "sensitive_path": 4
+            }
+        });
+    }
+
+    serde_json::json!({
+        "raw_session_content_included": false,
+        "mail_body_snippets_included": false,
+        "redaction_policy": crate::pages::redact::SWARM_REDACTION_POLICY,
+        "redaction_applied": evidence
+            .get("redaction_applied")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        "sensitive_paths_scrubbed": 0
+    })
+}
+
+fn swarm_recommended_action_kind(
+    live_partial: bool,
+    fixture_id: &str,
+    ready_count: usize,
+    dirty_reservation_overlap: bool,
+    build_pressure: &str,
+    stale_candidate_count: usize,
+) -> &'static str {
+    if live_partial {
+        "inspect-unavailable-providers"
+    } else if fixture_id == "privacy_guardrails" {
+        "review-redaction-report"
+    } else if build_pressure == "high" {
+        "reduce-build-pressure"
+    } else if dirty_reservation_overlap {
+        "coordinate-before-claim"
+    } else if stale_candidate_count > 0 {
+        "inspect-stale"
+    } else if ready_count > 0 {
+        "claim-ready-bead"
+    } else {
+        "no-ready-work"
+    }
+}
+
+fn swarm_recommendations(
+    kind: &str,
+    fixture_id: &str,
+    first_ready: Option<&serde_json::Value>,
+    dirty_reservation_overlap: bool,
+) -> Vec<serde_json::Value> {
+    let ready_id = first_ready
+        .and_then(|bead| bead.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("cass-ready-1");
+    let recommendation = match kind {
+        "inspect-unavailable-providers" => serde_json::json!({
+            "kind": "inspect-unavailable-providers",
+            "confidence": "medium",
+            "summary": "One or more live providers are unavailable; inspect provider diagnostics before acting.",
+            "commands": ["cass swarm status --json --fixture-dir tests/fixtures/swarm_status"],
+            "requires_human_confirmation": false,
+            "evidence_refs": ["providers"]
+        }),
+        "review-redaction-report" => serde_json::json!({
+            "kind": "review-redaction-report",
+            "confidence": "high",
+            "summary": "Sensitive swarm evidence was redacted before serialization.",
+            "commands": ["cass swarm status --json --fixture-dir tests/fixtures/swarm_status"],
+            "requires_human_confirmation": false,
+            "evidence_refs": ["privacy"]
+        }),
+        "reduce-build-pressure" => serde_json::json!({
+            "kind": "reduce-build-pressure",
+            "confidence": "high",
+            "summary": "Remote build pressure is high and a local cargo job is present.",
+            "commands": ["rch status"],
+            "requires_human_confirmation": false,
+            "evidence_refs": ["build_pressure"]
+        }),
+        "coordinate-before-claim" if fixture_id == "reservation_conflict" => serde_json::json!({
+            "kind": "coordinate",
+            "confidence": "high",
+            "summary": "Ready work overlaps another agent's reservation and dirty path.",
+            "commands": [format!("br show {ready_id} --json")],
+            "requires_human_confirmation": false,
+            "evidence_refs": ["reservations[0]", "git.dirty_paths[0]", "evidence.recent_threads[0]"]
+        }),
+        "coordinate-before-claim" if dirty_reservation_overlap => {
+            serde_json::json!({
+                "kind": "coordinate",
+                "confidence": "high",
+                "summary": "Active reserved work is present; coordinate before touching overlapping paths.",
+                "commands": ["br ready --json"],
+                "requires_human_confirmation": false,
+                "evidence_refs": ["reservations[0]", "git.dirty_paths[0]"]
+            })
+        }
+        "inspect-stale" => serde_json::json!({
+            "kind": "inspect-stale",
+            "confidence": "medium",
+            "summary": "One in-progress bead looks stale, but status is advisory only.",
+            "commands": ["br show cass-stale-1 --json"],
+            "requires_human_confirmation": true,
+            "evidence_refs": ["beads.stale_candidates[0]"]
+        }),
+        "claim-ready-bead" => serde_json::json!({
+            "kind": "claim-ready-bead",
+            "confidence": "high",
+            "summary": "One ready bead has no conflicting evidence.",
+            "commands": [format!("br update {ready_id} --status in_progress --json")],
+            "requires_human_confirmation": false,
+            "evidence_refs": ["beads.ready[0]"]
+        }),
+        _ => serde_json::json!({
+            "kind": "no-ready-work",
+            "confidence": "high",
+            "summary": "No ready beads are available in this fixture.",
+            "commands": ["br ready --json"],
+            "requires_human_confirmation": false,
+            "evidence_refs": ["beads.graph"]
+        }),
+    };
+    vec![recommendation]
+}
+
+fn swarm_age_seconds(ts: &str) -> Option<u64> {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-05-08T16:00:00Z").ok()?;
+    let then = chrono::DateTime::parse_from_rfc3339(ts).ok()?;
+    let seconds = now.signed_duration_since(then).num_seconds();
+    Some(seconds.max(0) as u64)
+}
+
+#[cfg(test)]
+mod swarm_status_cli_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn swarm_evidence_preserves_provider_proofs_and_gaps() {
+        let evidence = swarm_evidence(
+            &[],
+            None,
+            &json!({
+                "recent_threads": [],
+                "recent_proofs": [{"kind": "rch-test", "status": "passed"}],
+                "proof_gaps": [{"kind": "missing-clippy", "severity": "high"}],
+                "redaction_applied": false
+            }),
+        );
+
+        assert_eq!(evidence["recent_proofs"][0]["kind"], "rch-test");
+        assert_eq!(evidence["proof_gaps"][0]["kind"], "missing-clippy");
+        assert_eq!(evidence["redaction_applied"], false);
+    }
+
+    #[test]
+    fn swarm_reservation_overlap_is_path_specific() {
+        let reservations = swarm_reservations(
+            &[json!({
+                "id": 7,
+                "holder": "OtherAgent",
+                "path_pattern": "docs/planning/**",
+                "reason": "cass-ready-1"
+            })],
+            &json!({
+                "dirty": true,
+                "dirty_paths": [{"status": "M", "path": "src/lib.rs"}]
+            }),
+            &[json!({"id": "cass-ready-1"})],
+        );
+
+        assert_eq!(reservations[0]["overlaps_dirty_worktree"], false);
+        assert_eq!(reservations[0]["state"], "active");
+    }
+
+    #[test]
+    fn swarm_top_level_action_uses_dirty_reservation_overlap() {
+        assert_eq!(
+            swarm_recommended_action_kind(false, "healthy", 1, false, "none", 0),
+            "claim-ready-bead"
+        );
+        assert_eq!(
+            swarm_recommended_action_kind(false, "busy", 1, true, "none", 0),
+            "coordinate-before-claim"
+        );
+    }
+
+    #[test]
+    fn swarm_stale_candidates_survive_unrelated_reservations() {
+        let stale = json!({
+            "id": "cass-stale-1",
+            "age_seconds": 14_400,
+            "claim_blockers": ["in-progress", "manual-review"]
+        });
+        let owned = json!({
+            "id": "cass-owned-1",
+            "age_seconds": 14_400,
+            "claim_blockers": ["in-progress", "active-reservation"]
+        });
+
+        assert_eq!(swarm_stale_candidates(&[stale]).len(), 1);
+        assert!(swarm_stale_candidates(&[owned]).is_empty());
+    }
+
+    #[test]
+    fn swarm_build_pressure_does_not_trip_on_quiet_small_hosts() {
+        let pressure = swarm_build_pressure(&json!({
+            "active_rch_jobs": 0,
+            "active_cargo_jobs": 0,
+            "load_average_1m": 0.1,
+            "cpu_count": 4
+        }));
+
+        assert_eq!(pressure["status"], "none");
+        assert_eq!(
+            pressure["recommended_action"],
+            "safe-to-run-focused-rch-test"
+        );
     }
 }
 
@@ -7574,6 +8719,7 @@ fn describe_command(cli: &Cli) -> String {
         Some(Commands::Timeline { .. }) => "timeline".to_string(),
         Some(Commands::Sources(..)) => "sources".to_string(),
         Some(Commands::Models(..)) => "models".to_string(),
+        Some(Commands::Swarm(..)) => "swarm".to_string(),
         Some(Commands::Pages { .. }) => "pages".to_string(),
         #[cfg(unix)]
         Some(Commands::Daemon { .. }) => "daemon".to_string(),
@@ -7661,6 +8807,9 @@ fn is_robot_mode(command: &Commands, cli: &Cli) -> bool {
             resolve_subcommand_structured_format(cli, *json).is_some()
         }
         Commands::Sources(SourcesCommand::Agents(AgentsAction::List { json })) => {
+            resolve_subcommand_structured_format(cli, *json).is_some()
+        }
+        Commands::Swarm(SwarmCommand::Status { json, .. }) => {
             resolve_subcommand_structured_format(cli, *json).is_some()
         }
         Commands::Models(ModelsCommand::Status { json }) => {
