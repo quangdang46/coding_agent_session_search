@@ -3459,7 +3459,15 @@ impl SearchClient {
             // Retry logic below preserves correctness on duplicate-heavy corpora.
             target_hits.saturating_mul(3).div_ceil(2)
         };
-        let fallback_fetch_limit = target_hits.saturating_mul(3);
+        let session_path_filter_active = !filters.session_paths.is_empty();
+        let fallback_fetch_limit = if session_path_filter_active {
+            self.total_docs()
+                .min(no_limit_result_cap())
+                .max(target_hits.saturating_mul(3))
+                .max(1)
+        } else {
+            target_hits.saturating_mul(3)
+        };
 
         // Tantivy is the primary high-performance engine.
         if let Some((reader, fields)) = &self.reader {
@@ -3502,7 +3510,8 @@ impl SearchClient {
                         deduped_len,
                         initial_fetch_limit,
                         fallback_fetch_limit,
-                        "retrying lexical fetch due to dedup shortfall"
+                        session_path_filter_active,
+                        "retrying lexical fetch due to dedup or session-path shortfall"
                     );
                     let (retry_hits, retry_total_count) = self.search_tantivy(
                         reader,
@@ -3568,8 +3577,13 @@ impl SearchClient {
 
                 let (mut deduped_len, mut paged_hits) = page_hits(hits);
                 let expected_federated_capacity = initial_fetch_limit.saturating_mul(readers.len());
+                let federated_initial_capacity_reached = if session_path_filter_active {
+                    initial_hit_count >= initial_fetch_limit.min(expected_federated_capacity)
+                } else {
+                    initial_hit_count == expected_federated_capacity
+                };
                 let needs_retry = deduped_len < target_hits
-                    && initial_hit_count == expected_federated_capacity
+                    && federated_initial_capacity_reached
                     && initial_fetch_limit < fallback_fetch_limit;
 
                 if needs_retry {
@@ -3580,7 +3594,8 @@ impl SearchClient {
                         initial_fetch_limit,
                         fallback_fetch_limit,
                         shards = readers.len(),
-                        "retrying federated lexical fetch due to dedup shortfall"
+                        session_path_filter_active,
+                        "retrying federated lexical fetch due to dedup or session-path shortfall"
                     );
                     let (retry_hits, retry_total_count) = self.search_tantivy_federated(
                         readers.as_ref(),
@@ -16958,6 +16973,73 @@ mod tests {
         assert!(filtered_paths.contains(paths[0].to_string_lossy().as_ref()));
         assert!(filtered_paths.contains(paths[2].to_string_lossy().as_ref()));
         assert!(!filtered_paths.contains(paths[1].to_string_lossy().as_ref()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn lexical_session_paths_filter_retries_past_initial_page() -> Result<()> {
+        let dir = TempDir::new()?;
+        let mut index = TantivyIndex::open_or_create(dir.path())?;
+        let requested_path = dir.path().join("requested-session.jsonl");
+
+        for i in 0..4 {
+            let conv = NormalizedConversation {
+                agent_slug: "claude".into(),
+                external_id: None,
+                title: Some(format!("distractor-{i}")),
+                workspace: Some(std::path::PathBuf::from("/ws")),
+                source_path: dir.path().join(format!("distractor-{i}.jsonl")),
+                started_at: Some(100 + i as i64),
+                ended_at: None,
+                metadata: serde_json::json!({}),
+                messages: vec![NormalizedMessage {
+                    idx: 0,
+                    role: "user".into(),
+                    author: None,
+                    created_at: Some(100 + i as i64),
+                    content: "needle needle needle high ranking distractor".into(),
+                    extra: serde_json::json!({}),
+                    snippets: vec![],
+                    invocations: Vec::new(),
+                }],
+            };
+            index.add_conversation(&conv)?;
+        }
+
+        let requested = NormalizedConversation {
+            agent_slug: "claude".into(),
+            external_id: None,
+            title: Some("requested".into()),
+            workspace: Some(std::path::PathBuf::from("/ws")),
+            source_path: requested_path.clone(),
+            started_at: Some(200),
+            ended_at: None,
+            metadata: serde_json::json!({}),
+            messages: vec![NormalizedMessage {
+                idx: 0,
+                role: "user".into(),
+                author: None,
+                created_at: Some(200),
+                content: "needle requested session should survive post-filter paging".into(),
+                extra: serde_json::json!({}),
+                snippets: vec![],
+                invocations: Vec::new(),
+            }],
+        };
+        index.add_conversation(&requested)?;
+        index.commit()?;
+
+        let client = SearchClient::open(dir.path(), None)?.expect("index present");
+        let mut filters = SearchFilters::default();
+        filters
+            .session_paths
+            .insert(requested_path.to_string_lossy().to_string());
+
+        let hits = client.search("needle", filters, 1, 0, FieldMask::FULL)?;
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].source_path, requested_path.to_string_lossy());
 
         Ok(())
     }
