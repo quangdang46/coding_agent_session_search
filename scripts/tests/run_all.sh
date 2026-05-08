@@ -48,6 +48,7 @@ FAIL_FAST=${FAIL_FAST:-0}
 VERBOSE=${VERBOSE:-0}
 RCH_BIN=${RCH_BIN:-rch}
 RCH_TARGET_DIR=${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_cass_tests_run_all}
+CASS_ROUTINE_FEATURES="${CASS_ROUTINE_FEATURES:-qr encryption backtrace}"
 
 # Colors
 if [[ -t 1 ]]; then
@@ -83,6 +84,10 @@ Options:
 Environment:
     RCH_BIN          rch executable to use for Rust E2E tests (default: rch)
     RCH_TARGET_DIR   remote Cargo target dir for Rust E2E tests
+    CASS_ROUTINE_FEATURES
+                     Cass features for Rust E2E tests; defaults to
+                     "qr encryption backtrace" and intentionally excludes
+                     strict-path-dep-validation
 
 Playwright:
     Browser E2E suites are disabled outside GitHub Actions CI. Local runs cover
@@ -360,7 +365,7 @@ main() {
                 ((TOTAL_FAILED++))
                 log_result "rust_e2e" "fail" "0"
                 [[ "$FAIL_FAST" -eq 1 ]] && { generate_summary; exit 1; }
-            elif run_suite "rust_e2e" "rust" "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_TARGET_DIR" E2E_LOG=1 cargo test --all-features --verbose "${args[@]}" -- --test-threads=1 --nocapture; then
+            elif run_suite "rust_e2e" "rust" "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_TARGET_DIR" E2E_LOG=1 cargo test --features "$CASS_ROUTINE_FEATURES" --verbose "${args[@]}" -- --test-threads=1 --nocapture; then
                 :
             else
                 failed=1

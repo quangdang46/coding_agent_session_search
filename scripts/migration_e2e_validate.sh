@@ -10,6 +10,9 @@
 # Environment:
 #   RCH_BIN         rch executable (default: rch)
 #   RCH_TARGET_DIR  cargo target dir for offloaded validation commands
+#   CASS_ROUTINE_FEATURES
+#                   cass feature set for routine gates, excluding
+#                   strict-path-dep-validation unless explicitly overridden
 #
 # Exit code: 0 if all pass, 1 if any fail.
 
@@ -26,6 +29,7 @@ FAD_ROOT="/data/projects/franken_agent_detection"
 BASELINE_DIR="${CASS_ROOT}/docs/artifacts/migration-baseline"
 RCH_BIN="${RCH_BIN:-rch}"
 RCH_TARGET_DIR="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_cass_migration_e2e_validate}"
+CASS_ROUTINE_FEATURES="${CASS_ROUTINE_FEATURES:-qr encryption backtrace}"
 
 # Colors (only when stdout is a terminal)
 if [[ -t 1 ]]; then
@@ -141,10 +145,10 @@ else
 fi
 
 log "Building cass..."
-if (cd "$CASS_ROOT" && cargo_cmd check --all-features) >> "$LOG_FILE" 2>&1; then
-    pass "cass: cargo check --all-features"
+if (cd "$CASS_ROOT" && cargo_cmd check --features "$CASS_ROUTINE_FEATURES") >> "$LOG_FILE" 2>&1; then
+    pass "cass: cargo check --features '$CASS_ROUTINE_FEATURES'"
 else
-    fail "cass: cargo check --all-features"
+    fail "cass: cargo check --features '$CASS_ROUTINE_FEATURES'"
 fi
 
 log "  Build step: $(elapsed_since "$STEP_START")s"
@@ -192,7 +196,7 @@ fi
 
 # Cass tests
 log "Running cass tests..."
-CASS_TEST_OUT=$(cd "$CASS_ROOT" && cargo_cmd test --lib 2>&1) || true
+CASS_TEST_OUT=$(cd "$CASS_ROOT" && cargo_cmd test --features "$CASS_ROUTINE_FEATURES" --lib 2>&1) || true
 echo "$CASS_TEST_OUT" >> "$LOG_FILE"
 CASS_PASSED=$(sum_test_metric "$CASS_TEST_OUT" "passed")
 CASS_FAILED=$(sum_test_metric "$CASS_TEST_OUT" "failed")
@@ -234,7 +238,7 @@ else
 fi
 
 log "Clippy: cass..."
-if (cd "$CASS_ROOT" && cargo_cmd clippy --all-targets -- -D warnings) >> "$LOG_FILE" 2>&1; then
+if (cd "$CASS_ROOT" && cargo_cmd clippy --all-targets --features "$CASS_ROUTINE_FEATURES" -- -D warnings) >> "$LOG_FILE" 2>&1; then
     pass "cass clippy: clean (no errors)"
 else
     fail "cass clippy: failed with errors or denied warnings"

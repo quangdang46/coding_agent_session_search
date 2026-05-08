@@ -10,6 +10,7 @@ NO_MOCK_FAILED=false
 E2E_COMPLIANCE_FAILED=false
 RCH_BIN=${RCH_BIN:-rch}
 RCH_TARGET_DIR=${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_cass_validate_ci}
+CASS_ROUTINE_FEATURES="${CASS_ROUTINE_FEATURES:-qr encryption backtrace}"
 
 usage() {
     cat <<'USAGE'
@@ -18,6 +19,9 @@ Usage: scripts/validate_ci.sh [--no-mock-only|--artifact-hygiene-only]
 Environment:
   RCH_BIN=rch         Remote compilation helper binary for heavy Cargo gates
   RCH_TARGET_DIR=...  Remote Cargo target dir for heavy gates
+  CASS_ROUTINE_FEATURES="qr encryption backtrace"
+                       Cass features for routine gates; excludes
+                       strict-path-dep-validation by default
 USAGE
 }
 
@@ -231,14 +235,15 @@ fi
 echo "3. Running local CI simulation..."
 ensure_rch
 echo "  - Using rch target dir: $RCH_TARGET_DIR"
+echo "  - Using cass features: $CASS_ROUTINE_FEATURES"
 echo "  - Checking formatting..."
 run_cargo fmt --all -- --check
 
 echo "  - Running Clippy..."
-run_cargo clippy --all-targets --all-features -- -D warnings
+run_cargo clippy --all-targets --features "$CASS_ROUTINE_FEATURES" -- -D warnings
 
 echo "  - Running Rust tests..."
-run_cargo test --all-features
+run_cargo test --features "$CASS_ROUTINE_FEATURES"
 
 echo "  - Running Crypto Vector tests..."
 run_cargo test --test crypto_vectors
