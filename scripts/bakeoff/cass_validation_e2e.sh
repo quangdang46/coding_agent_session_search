@@ -11,7 +11,7 @@
 #   ./scripts/bakeoff/cass_validation_e2e.sh
 #
 # Environment:
-#   CASS_BIN             - cass binary/command (default: target/release/cass, target/debug/cass, cass, or cargo run -q --)
+#   CASS_BIN             - cass binary/command (default: target/release/cass, target/debug/cass, or cass on PATH)
 #   CORPUS_PATH          - benchmark corpus JSON (default: /data/projects/xf/tests/fixtures/benchmark_corpus.json)
 #   DATA_DIR             - cass data dir to use (default: tmp/bakeoff_validation_<timestamp>)
 #   MAX_DOCS             - number of corpus docs to index (default: 500)
@@ -99,7 +99,8 @@ if [[ -z "${CASS_BIN:-}" ]]; then
     elif command -v cass >/dev/null 2>&1; then
         CASS_BIN="$(command -v cass)"
     else
-        CASS_BIN="cargo run -q --"
+        log_fail "cass binary not found. Build via rch, then rerun this script with CASS_BIN=/path/to/cass"
+        exit 1
     fi
 fi
 export CASS_BIN
