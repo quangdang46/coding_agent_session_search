@@ -232,14 +232,21 @@ const INPUT_AUTOCOMPLETE_AGENT_HINTS: &[&str] = &[
     "amp",
     "chatgpt",
     "claude_code",
+    "clawdbot",
     "cline",
     "codex",
     "copilot",
+    "copilot_cli",
+    "crush",
     "cursor",
     "factory",
     "gemini",
+    "kimi",
     "opencode",
+    "openclaw",
     "pi_agent",
+    "qwen",
+    "vibe",
 ];
 const PANEL_RATIO_MIN: f64 = 0.25;
 const PANEL_RATIO_MAX: f64 = 0.75;
@@ -31123,9 +31130,12 @@ not jsonl",
         let mut app = CassApp::default();
         app.input_mode = InputMode::Agent;
         let candidates = app.input_autocomplete_candidates();
-        assert!(candidates.contains("claude_code"));
-        assert!(candidates.contains("cursor"));
-        assert!(candidates.contains("aider"));
+        for slug in INPUT_AUTOCOMPLETE_AGENT_HINTS {
+            assert!(
+                candidates.contains(*slug),
+                "agent autocomplete should include supported provider slug {slug}"
+            );
+        }
     }
 
     #[test]
