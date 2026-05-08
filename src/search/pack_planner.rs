@@ -3,17 +3,56 @@
 //! This module is intentionally independent of the CLI. `cass pack` will wire it
 //! to search, source health, renderers, and robot docs in later beads.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+use once_cell::sync::Lazy;
+use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::indexer::redact_secrets::redact_text;
 
 use super::query::{MatchType, SearchHit};
 
 const TOKEN_ESTIMATE_CHARS_PER_TOKEN: usize = 4;
 const DEFAULT_FRESHNESS_WINDOW_SECONDS: i64 = 30 * 24 * 60 * 60;
 const PACK_CANDIDATE_LIMIT_CAP: usize = 2_048;
+const REDACTED_VALUE_MARKER: &str = "[REDACTED]";
+const REDACTED_PATH_PREFIX: &str = "[REDACTED_PATH]";
+const REDACTED_REMOTE_HOST_MARKER: &str = "[REDACTED_REMOTE_HOST]";
+const REDACTED_SOURCE_MARKER: &str = "[REDACTED_SOURCE]";
+const REDACTED_ENCRYPTED_PAYLOAD_MARKER: &str = "[REDACTED_ENCRYPTED_PAYLOAD]";
+
+static PRIVATE_PATH_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?x)
+        (?:
+            (?:/home/[^/\s"'`<>\[\](){}:,;]+|/Users/[^/\s"'`<>\[\](){}:,;]+|~)
+            (?:/[^\s"'`<>\[\](){}:,;]+)*
+          |
+            [A-Za-z]:\\Users\\[^\\\s"'`<>\[\](){}:,;]+
+            (?:\\[^\s"'`<>\[\](){}:,;]+)*
+        )
+        "#,
+    )
+    .expect("private path redaction regex")
+});
+
+static ENCRYPTED_PAYLOAD_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?i)\b(?:encrypted_(?:payload(?:_material)?|content|blob|material)|ciphertext)\b\s*[:=]\s*[A-Za-z0-9+/=_:.-]{16,}",
+    )
+    .expect("encrypted payload redaction regex")
+});
+
+static PRIVATE_HOST_LABEL_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?i)\b(?:[A-Za-z0-9._%+-]+@)?[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*(?:\.internal|\.local)\b",
+    )
+    .expect("private host label redaction regex")
+});
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackPlannerLimits {
@@ -1361,9 +1400,17 @@ fn rendered_answer_pack(
         .iter()
         .map(|item| rendered_evidence(item, request))
         .collect::<Vec<_>>();
+    let mut envelope_redactions = Vec::new();
+    let query_text = redact_pack_output_text(&request.query_text, &mut envelope_redactions);
+    let normalized_query =
+        redact_pack_output_text(&normalized_query(request), &mut envelope_redactions);
+    let pack_title = redact_pack_output_text(&pack_title(request), &mut envelope_redactions);
     let source_summary = rendered_source_summary(&evidence);
     let source_readiness = rendered_source_readiness(&evidence);
-    let source_sync_gaps = rendered_source_sync_gaps(&request.readiness.source_sync_gaps);
+    let source_sync_gaps = rendered_source_sync_gaps(
+        &request.readiness.source_sync_gaps,
+        &mut envelope_redactions,
+    );
     let stale_evidence_count = evidence
         .iter()
         .filter(|item| {
@@ -1378,22 +1425,45 @@ fn rendered_answer_pack(
         .iter()
         .filter(|omitted| omitted.reason == PackOmittedReason::RedactedToEmpty)
         .count();
+    let (omitted_items, omitted_redactions) = rendered_omitted_items(&plan.omitted);
     let semantic_readiness = effective_semantic_readiness(request);
     let health_is_healthy = health_is_healthy(request, &source_readiness);
-    let warnings = readiness_warnings(
+    let mut warnings = readiness_warnings(
         request,
         semantic_readiness,
         &source_readiness,
         evidence.is_empty(),
+        &mut envelope_redactions,
     );
     let recommended_action =
-        readiness_recommended_action(request, semantic_readiness, health_is_healthy);
+        readiness_recommended_action(request, semantic_readiness, health_is_healthy)
+            .map(|action| redact_pack_output_text(&action, &mut envelope_redactions));
+    let index_generation = request
+        .readiness
+        .index_generation
+        .as_deref()
+        .map(|generation| redact_pack_output_text(generation, &mut envelope_redactions));
+    let lock_state = request
+        .readiness
+        .lock_state
+        .as_deref()
+        .map(|state| redact_pack_output_text(state, &mut envelope_redactions));
+    let redaction_counts = redaction_counts(
+        redacted_count,
+        &evidence,
+        &omitted_redactions,
+        &envelope_redactions,
+    );
+    let redaction_applied = !redaction_counts.is_empty();
+    if redaction_applied {
+        warnings.push("privacy_redactions_applied".to_string());
+    }
 
     RenderedAnswerPack {
         schema_version: "cass.pack.v1",
         query: RenderedQuery {
-            text: request.query_text.clone(),
-            normalized: normalized_query(request),
+            text: query_text,
+            normalized: normalized_query,
             filters: BTreeMap::new(),
         },
         meta: RenderedMeta {
@@ -1425,11 +1495,11 @@ fn rendered_answer_pack(
             healthy: health_is_healthy,
             recommended_action,
             index_state: lexical_readiness_label(request.readiness.lexical_readiness),
-            index_generation: request.readiness.index_generation.clone(),
+            index_generation,
             lexical_readiness: lexical_readiness_label(request.readiness.lexical_readiness),
             semantic_state: semantic_readiness_label(semantic_readiness),
             active_rebuild: request.readiness.active_rebuild,
-            lock_state: request.readiness.lock_state.clone(),
+            lock_state,
             missing_database: request.readiness.missing_database,
             source_sync_gaps,
             source_readiness,
@@ -1448,7 +1518,7 @@ fn rendered_answer_pack(
             stale_evidence_count,
         },
         pack: RenderedPack {
-            title: pack_title(request),
+            title: pack_title,
             answer_outline: rendered_outline(&evidence),
             source_summary,
             handoff: rendered_handoff(&evidence),
@@ -1456,14 +1526,14 @@ fn rendered_answer_pack(
         evidence,
         omitted: RenderedOmitted {
             count: plan.omitted.len(),
-            items: plan.omitted.clone(),
+            items: omitted_items,
         },
         privacy: RenderedPrivacy {
             redaction_policy: request.redaction_policy.clone(),
-            redaction_applied: redacted_count > 0,
+            redaction_applied,
             sensitive_output: request.sensitive_output,
             skill_content_included: request.skill_content_included,
-            redaction_counts: redaction_counts(redacted_count),
+            redaction_counts,
         },
         warnings,
     }
@@ -1488,6 +1558,7 @@ fn readiness_warnings(
     semantic_readiness: PackSemanticReadiness,
     source_readiness: &[RenderedSourceReadiness],
     no_evidence: bool,
+    redactions: &mut Vec<RenderedRedaction>,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
     if no_evidence {
@@ -1520,9 +1591,10 @@ fn readiness_warnings(
         warnings.push("missing_database".to_string());
     }
     for gap in &request.readiness.source_sync_gaps {
+        let source_id = redacted_source_label(&gap.source_id, &gap.origin_kind, redactions);
         warnings.push(format!(
             "source_sync_gap:{}:{}",
-            gap.source_id,
+            source_id,
             source_sync_gap_kind_label(gap.kind)
         ));
     }
@@ -1606,16 +1678,152 @@ fn pack_title(request: &PackRenderRequest) -> String {
     }
 }
 
+fn redact_pack_output_text(input: &str, redactions: &mut Vec<RenderedRedaction>) -> String {
+    let mut output = input.to_string();
+
+    let encrypted_redacted = ENCRYPTED_PAYLOAD_RE.replace_all(&output, |_: &Captures<'_>| {
+        REDACTED_ENCRYPTED_PAYLOAD_MARKER
+    });
+    if let Cow::Owned(redacted) = encrypted_redacted {
+        push_full_redaction(
+            redactions,
+            "encrypted_payload",
+            &output,
+            REDACTED_ENCRYPTED_PAYLOAD_MARKER,
+        );
+        output = redacted;
+    }
+
+    if let Cow::Owned(redacted) = redact_text(&output) {
+        push_full_redaction(redactions, "secret", &output, REDACTED_VALUE_MARKER);
+        output = redacted;
+    }
+
+    let host_redacted =
+        PRIVATE_HOST_LABEL_RE.replace_all(&output, |_: &Captures<'_>| REDACTED_REMOTE_HOST_MARKER);
+    if let Cow::Owned(redacted) = host_redacted {
+        push_full_redaction(
+            redactions,
+            "remote_host",
+            &output,
+            REDACTED_REMOTE_HOST_MARKER,
+        );
+        output = redacted;
+    }
+
+    let path_redacted = PRIVATE_PATH_RE.replace_all(&output, |captures: &Captures<'_>| {
+        redacted_private_path_marker(&captures[0])
+    });
+    if let Cow::Owned(redacted) = path_redacted {
+        push_full_redaction(
+            redactions,
+            "private_path",
+            &output,
+            &format!("{REDACTED_PATH_PREFIX}/<name>"),
+        );
+        output = redacted;
+    }
+
+    output
+}
+
+fn redacted_source_label(
+    source_id: &str,
+    origin_kind: &str,
+    redactions: &mut Vec<RenderedRedaction>,
+) -> String {
+    if is_remote_origin(origin_kind) && looks_like_private_host_label(source_id) {
+        push_full_redaction(redactions, "remote_host", source_id, REDACTED_SOURCE_MARKER);
+        REDACTED_SOURCE_MARKER.to_string()
+    } else {
+        redact_pack_output_text(source_id, redactions)
+    }
+}
+
+fn rendered_origin_host(
+    origin_host: Option<&str>,
+    redactions: &mut Vec<RenderedRedaction>,
+) -> Option<String> {
+    let host = origin_host?;
+    let trimmed = host.trim();
+    if trimmed.is_empty() {
+        return Some(String::new());
+    }
+    push_full_redaction(redactions, "remote_host", host, REDACTED_REMOTE_HOST_MARKER);
+    Some(REDACTED_REMOTE_HOST_MARKER.to_string())
+}
+
+fn is_remote_origin(origin_kind: &str) -> bool {
+    !origin_kind.trim().eq_ignore_ascii_case("local")
+}
+
+fn looks_like_private_host_label(value: &str) -> bool {
+    PRIVATE_HOST_LABEL_RE.is_match(value)
+        || value.contains('@')
+        || value.contains('.')
+        || value.contains(':')
+        || value.ends_with(".local")
+        || value.ends_with(".internal")
+}
+
+fn redacted_private_path_marker(path: &str) -> String {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    let components = trimmed
+        .split(['/', '\\'])
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
+    let basename = match components.as_slice() {
+        ["home", _] | ["Users", _] | [_, "Users", _] | ["~"] => "home",
+        _ => components
+            .last()
+            .copied()
+            .filter(|component| *component != "~")
+            .unwrap_or("path"),
+    };
+    format!("{REDACTED_PATH_PREFIX}/{basename}")
+}
+
+fn push_full_redaction(
+    redactions: &mut Vec<RenderedRedaction>,
+    kind: &str,
+    original: &str,
+    replacement: &str,
+) {
+    if original.is_empty() {
+        return;
+    }
+    redactions.push(RenderedRedaction {
+        kind: kind.to_string(),
+        start_char: 0,
+        end_char: original.chars().count(),
+        replacement: replacement.to_string(),
+    });
+}
+
 fn rendered_evidence(item: &PlannedPackEvidence, request: &PackRenderRequest) -> RenderedEvidence {
     let candidate = &item.candidate;
+    let mut redactions = Vec::new();
+    let excerpt = redact_pack_output_text(&item.excerpt, &mut redactions);
+    let source_id = redacted_source_label(
+        &candidate.source_id,
+        &candidate.origin_kind,
+        &mut redactions,
+    );
+    let source_path = redact_pack_output_text(&candidate.source_path, &mut redactions);
+    let workspace = redact_pack_output_text(&candidate.workspace, &mut redactions);
+    let workspace_original = candidate
+        .workspace_original
+        .as_deref()
+        .map(|workspace| redact_pack_output_text(workspace, &mut redactions));
+    let origin_host = rendered_origin_host(candidate.origin_host.as_deref(), &mut redactions);
     let citation = RenderedCitation {
-        source_path: candidate.source_path.clone(),
-        source_id: candidate.source_id.clone(),
+        source_path,
+        source_id,
         origin_kind: candidate.origin_kind.clone(),
-        origin_host: candidate.origin_host.clone(),
-        workspace: candidate.workspace.clone(),
-        workspace_original: candidate.workspace_original.clone(),
-        agent: candidate.agent.clone(),
+        origin_host,
+        workspace,
+        workspace_original,
+        agent: redact_pack_output_text(&candidate.agent, &mut redactions),
         line_start: candidate.line_start,
         line_end: candidate.line_end,
         message_index: candidate.message_index,
@@ -1634,14 +1842,18 @@ fn rendered_evidence(item: &PlannedPackEvidence, request: &PackRenderRequest) ->
     RenderedEvidence {
         id: item.id.clone(),
         rank: item.rank,
-        excerpt: item.excerpt.clone(),
+        excerpt,
         excerpt_truncated: item.excerpt_truncated,
         estimated_tokens: item.estimated_tokens,
         citation,
         selection: rendered_selection(item.selection, request.explain_selection),
         roles: rendered_roles(candidate.role),
-        matched_terms: candidate.matched_terms.clone(),
-        redactions: Vec::new(),
+        matched_terms: candidate
+            .matched_terms
+            .iter()
+            .map(|term| redact_pack_output_text(term, &mut redactions))
+            .collect(),
+        redactions,
         source_readiness: candidate.source_readiness,
     }
 }
@@ -1783,15 +1995,21 @@ fn rendered_source_readiness(evidence: &[RenderedEvidence]) -> Vec<RenderedSourc
         .collect()
 }
 
-fn rendered_source_sync_gaps(gaps: &[PackSourceSyncGap]) -> Vec<RenderedSourceSyncGap> {
+fn rendered_source_sync_gaps(
+    gaps: &[PackSourceSyncGap],
+    redactions: &mut Vec<RenderedRedaction>,
+) -> Vec<RenderedSourceSyncGap> {
     gaps.iter()
         .map(|gap| RenderedSourceSyncGap {
-            source_id: gap.source_id.clone(),
+            source_id: redacted_source_label(&gap.source_id, &gap.origin_kind, redactions),
             origin_kind: gap.origin_kind.clone(),
             kind: source_sync_gap_kind_label(gap.kind),
             lag_seconds: gap.lag_seconds,
             last_synced_at_ms: gap.last_synced_at_ms,
-            recommended_action: gap.recommended_action.clone(),
+            recommended_action: gap
+                .recommended_action
+                .as_deref()
+                .map(|action| redact_pack_output_text(action, redactions)),
         })
         .collect()
 }
@@ -1815,10 +2033,39 @@ fn newer_timestamp(left: Option<i64>, right: Option<i64>) -> Option<i64> {
     }
 }
 
-fn redaction_counts(redacted_count: usize) -> BTreeMap<String, usize> {
+fn rendered_omitted_items(
+    omitted: &[OmittedPackCandidate],
+) -> (Vec<OmittedPackCandidate>, Vec<RenderedRedaction>) {
+    let mut redactions = Vec::new();
+    let items = omitted
+        .iter()
+        .map(|item| {
+            let mut rendered = item.clone();
+            rendered.source_path = redact_pack_output_text(&rendered.source_path, &mut redactions);
+            rendered.agent = redact_pack_output_text(&rendered.agent, &mut redactions);
+            rendered
+        })
+        .collect();
+    (items, redactions)
+}
+
+fn redaction_counts(
+    redacted_count: usize,
+    evidence: &[RenderedEvidence],
+    omitted_redactions: &[RenderedRedaction],
+    envelope_redactions: &[RenderedRedaction],
+) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
     if redacted_count > 0 {
         counts.insert("redacted_to_empty".to_string(), redacted_count);
+    }
+    for redaction in evidence
+        .iter()
+        .flat_map(|item| item.redactions.iter())
+        .chain(omitted_redactions.iter())
+        .chain(envelope_redactions.iter())
+    {
+        *counts.entry(redaction.kind.clone()).or_default() += 1;
     }
     counts
 }
@@ -2463,6 +2710,70 @@ mod tests {
     }
 
     #[test]
+    fn render_pack_redacts_freeform_query_and_health_strings() {
+        let home_path = "/home/alice/projects/private";
+        let host = "alice-workstation.internal";
+        let token = format!("sk-{}", "abcdefghijklmnopqrstuv");
+        let plan = plan_answer_pack(request(vec![candidate(
+            "health-redaction",
+            "local",
+            "/s/health.jsonl",
+            10.0,
+        )]))
+        .unwrap();
+        let mut req = render_request(PackRenderFormat::Json);
+        req.query_text = format!("investigate {token} at {home_path}");
+        req.normalized_query = req.query_text.clone();
+        req.readiness.lexical_readiness = PackLexicalReadiness::Stale;
+        req.readiness.index_generation = Some(format!("generation from {home_path}"));
+        req.readiness.lock_state = Some(format!("writer lock held by {host}"));
+        req.readiness.recommended_action = Some(format!("inspect {home_path} on {host}"));
+        req.readiness.source_sync_gaps = vec![PackSourceSyncGap {
+            source_id: host.to_string(),
+            origin_kind: "ssh".to_string(),
+            kind: PackSourceSyncGapKind::RemoteStale,
+            lag_seconds: Some(60),
+            last_synced_at_ms: Some(1_000_000),
+            recommended_action: Some(format!("sync {home_path} from {host}")),
+        }];
+
+        let rendered = render_answer_pack(&plan, &req).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+
+        for raw in [&token, home_path, host] {
+            assert!(!rendered.contains(raw));
+        }
+        assert_eq!(
+            value["query"]["text"],
+            "investigate [REDACTED] at [REDACTED_PATH]/private"
+        );
+        assert_eq!(value["pack"]["title"], value["query"]["normalized"]);
+        assert_eq!(
+            value["health"]["source_sync_gaps"][0]["source_id"],
+            REDACTED_SOURCE_MARKER
+        );
+        assert!(
+            value["health"]["recommended_action"]
+                .as_str()
+                .unwrap()
+                .contains("[REDACTED_PATH]/private")
+        );
+        assert!(
+            value["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|warning| warning == "privacy_redactions_applied")
+        );
+        assert!(
+            value["privacy"]["redaction_counts"]["private_path"]
+                .as_u64()
+                .unwrap()
+                >= 3
+        );
+    }
+
+    #[test]
     fn render_redacted_empty_pack_reports_privacy_counts() {
         let mut redacted = candidate("redacted", "local", "/s/redacted.jsonl", 9.0);
         redacted.excerpt = " \n\t ".to_string();
@@ -2476,7 +2787,131 @@ mod tests {
         assert_eq!(value["omitted"]["items"][0]["reason"], "redacted_to_empty");
         assert_eq!(
             value["warnings"],
-            serde_json::json!(["no_evidence_found", "semantic_fallback_lexical"])
+            serde_json::json!([
+                "no_evidence_found",
+                "semantic_fallback_lexical",
+                "privacy_redactions_applied"
+            ])
+        );
+    }
+
+    #[test]
+    fn render_pack_redacts_api_keys_and_bearer_tokens_in_json_and_markdown() {
+        let api_key = format!("sk-{}", "12345678901234567890");
+        let bearer = "Bearer abcdefghijklmnopqrst";
+        let mut secret = candidate("secret", "local", "/s/secret.jsonl", 10.0);
+        secret.excerpt = format!("Use {api_key} and Authorization: {bearer}.");
+        let plan = plan_answer_pack(request(vec![secret])).unwrap();
+        let json_req = render_request(PackRenderFormat::Json);
+        let markdown_req = render_request(PackRenderFormat::Markdown);
+
+        let json_rendered = render_answer_pack(&plan, &json_req).unwrap();
+        let markdown_rendered = render_answer_pack(&plan, &markdown_req).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json_rendered).unwrap();
+
+        assert!(!json_rendered.contains(&api_key));
+        assert!(!json_rendered.contains(bearer));
+        assert!(!markdown_rendered.contains(&api_key));
+        assert!(!markdown_rendered.contains(bearer));
+        assert!(json_rendered.contains(REDACTED_VALUE_MARKER));
+        assert!(markdown_rendered.contains(REDACTED_VALUE_MARKER));
+        assert_eq!(value["privacy"]["redaction_applied"], true);
+        assert_eq!(value["privacy"]["redaction_counts"]["secret"], 1);
+        assert_eq!(value["evidence"][0]["redactions"][0]["kind"], "secret");
+    }
+
+    #[test]
+    fn render_pack_redacts_home_directory_paths_in_evidence_and_omitted_output() {
+        let source_path = "/home/alice/projects/private/session.jsonl";
+        let duplicate_path = "/Users/alice/projects/private/duplicate.jsonl";
+        let mut first = candidate("private-path", "local", source_path, 10.0);
+        first.workspace = "/home/alice/projects/private".to_string();
+        first.workspace_original = Some("/home/alice/projects/private".to_string());
+        first.excerpt = format!("Open {source_path} before reading ~/notes/private.md");
+        let mut duplicate = candidate("duplicate-private-path", "local", duplicate_path, 9.0);
+        duplicate.content_hash = first.content_hash.clone();
+        let plan = plan_answer_pack(request(vec![first, duplicate])).unwrap();
+        let json_req = render_request(PackRenderFormat::Json);
+        let markdown_req = render_request(PackRenderFormat::Markdown);
+
+        let json_rendered = render_answer_pack(&plan, &json_req).unwrap();
+        let markdown_rendered = render_answer_pack(&plan, &markdown_req).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json_rendered).unwrap();
+
+        for raw in ["/home/alice", "/Users/alice", "~/notes"] {
+            assert!(!json_rendered.contains(raw));
+            assert!(!markdown_rendered.contains(raw));
+        }
+        assert_eq!(
+            value["evidence"][0]["citation"]["source_path"],
+            "[REDACTED_PATH]/session.jsonl"
+        );
+        assert_eq!(
+            value["omitted"]["items"][0]["source_path"],
+            "[REDACTED_PATH]/duplicate.jsonl"
+        );
+        assert!(markdown_rendered.contains("[REDACTED_PATH]/session.jsonl"));
+        assert!(markdown_rendered.contains("[REDACTED_PATH]/duplicate.jsonl"));
+        assert_eq!(value["privacy"]["redaction_applied"], true);
+        assert!(
+            value["privacy"]["redaction_counts"]["private_path"]
+                .as_u64()
+                .unwrap()
+                >= 2
+        );
+    }
+
+    #[test]
+    fn render_pack_redacts_remote_host_details_from_citation_contract() {
+        let mut remote = candidate(
+            "remote-host",
+            "alice-workstation.internal",
+            "/s/remote.jsonl",
+            10.0,
+        );
+        remote.origin_kind = "ssh".to_string();
+        remote.origin_host = Some("alice@workstation.internal".to_string());
+        let plan = plan_answer_pack(request(vec![remote])).unwrap();
+        let req = render_request(PackRenderFormat::Json);
+
+        let rendered = render_answer_pack(&plan, &req).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+
+        assert!(!rendered.contains("alice-workstation.internal"));
+        assert!(!rendered.contains("alice@workstation.internal"));
+        assert_eq!(
+            value["evidence"][0]["citation"]["source_id"],
+            REDACTED_SOURCE_MARKER
+        );
+        assert_eq!(
+            value["evidence"][0]["citation"]["origin_host"],
+            REDACTED_REMOTE_HOST_MARKER
+        );
+        assert_eq!(value["privacy"]["redaction_counts"]["remote_host"], 2);
+    }
+
+    #[test]
+    fn render_pack_redacts_encrypted_payload_material() {
+        let payload = "encrypted_payload_material=abcdef0123456789abcdef0123456789";
+        let mut encrypted = candidate("encrypted", "local", "/s/chatgpt.jsonl", 10.0);
+        encrypted.agent = "chatgpt".to_string();
+        encrypted.excerpt = format!("Skipped encrypted ChatGPT block: {payload}.");
+        let plan = plan_answer_pack(request(vec![encrypted])).unwrap();
+        let json_req = render_request(PackRenderFormat::Json);
+        let markdown_req = render_request(PackRenderFormat::Markdown);
+
+        let json_rendered = render_answer_pack(&plan, &json_req).unwrap();
+        let markdown_rendered = render_answer_pack(&plan, &markdown_req).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json_rendered).unwrap();
+
+        assert!(!json_rendered.contains(payload));
+        assert!(!markdown_rendered.contains(payload));
+        assert!(json_rendered.contains(REDACTED_ENCRYPTED_PAYLOAD_MARKER));
+        assert!(markdown_rendered.contains(REDACTED_ENCRYPTED_PAYLOAD_MARKER));
+        assert_eq!(value["privacy"]["redaction_counts"]["encrypted_payload"], 1);
+        assert_eq!(
+            value["evidence"][0]["redactions"][0]["replacement"],
+            REDACTED_ENCRYPTED_PAYLOAD_MARKER
         );
     }
 
