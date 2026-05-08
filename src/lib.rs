@@ -21154,6 +21154,48 @@ fn doctor_sources_config_path(data_dir: &Path) -> PathBuf {
         .join("sources.toml")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DoctorSourcesConfigCheck {
+    status: &'static str,
+    message: String,
+}
+
+fn doctor_sources_config_check(sources_path: &Path) -> DoctorSourcesConfigCheck {
+    if !sources_path.exists() {
+        return DoctorSourcesConfigCheck {
+            status: "pass",
+            message: "No remote sources configured".to_string(),
+        };
+    }
+
+    let content = match std::fs::read_to_string(sources_path) {
+        Ok(content) => content,
+        Err(e) => {
+            return DoctorSourcesConfigCheck {
+                status: "warn",
+                message: format!("Cannot read sources config: {e}"),
+            };
+        }
+    };
+
+    match toml::from_str::<crate::sources::config::SourcesConfig>(&content) {
+        Ok(config) => match config.validate() {
+            Ok(()) => DoctorSourcesConfigCheck {
+                status: "pass",
+                message: "Sources config valid".to_string(),
+            },
+            Err(e) => DoctorSourcesConfigCheck {
+                status: "warn",
+                message: format!("Sources config validation warning: {e}"),
+            },
+        },
+        Err(e) => DoctorSourcesConfigCheck {
+            status: "warn",
+            message: format!("Sources config parse error: {e}"),
+        },
+    }
+}
+
 fn collect_doctor_remote_source_sync_fast_report(
     data_dir: &Path,
     sources_path: &Path,
@@ -47453,6 +47495,55 @@ mod doctor_asset_taxonomy_tests {
     }
 
     #[test]
+    fn doctor_sources_config_check_validates_sources_not_just_toml_syntax() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let sources_path = temp.path().join("sources.toml");
+        std::fs::write(
+            &sources_path,
+            r#"
+[[sources]]
+name = "laptop"
+type = "ssh"
+host = "user@host"
+paths = [" ~/.claude/projects"]
+"#,
+        )
+        .expect("write sources config");
+
+        let check = doctor_sources_config_check(&sources_path);
+        assert_eq!(check.status, "warn");
+        assert!(
+            check.message.contains("Sources config validation warning"),
+            "{check:?}"
+        );
+        assert!(
+            check.message.contains("paths[0] cannot have leading"),
+            "{check:?}"
+        );
+    }
+
+    #[test]
+    fn doctor_sources_config_check_accepts_valid_sources_config() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let sources_path = temp.path().join("sources.toml");
+        std::fs::write(
+            &sources_path,
+            r#"
+[[sources]]
+name = "laptop"
+type = "ssh"
+host = "user@host"
+paths = ["~/.claude/projects"]
+"#,
+        )
+        .expect("write sources config");
+
+        let check = doctor_sources_config_check(&sources_path);
+        assert_eq!(check.status, "pass");
+        assert_eq!(check.message, "Sources config valid");
+    }
+
+    #[test]
     fn doctor_source_inventory_counts_missing_sources_without_calling_them_lost() {
         let temp = tempfile::TempDir::new().expect("tempdir");
         let data_dir = temp.path().join("cass-data");
@@ -54533,38 +54624,13 @@ pub(crate) fn run_doctor_impl(
 
     // 6. Check sources.toml
     let sources_path = doctor_sources_config_path(&data_dir);
-    if sources_path.exists() {
-        match std::fs::read_to_string(&sources_path) {
-            Ok(content) => match toml::from_str::<toml::Value>(&content) {
-                Ok(_) => {
-                    add_check!("sources_config", "pass", "Sources config valid", false);
-                }
-                Err(e) => {
-                    add_check!(
-                        "sources_config",
-                        "warn",
-                        format!("Sources config parse error: {}", e),
-                        false
-                    );
-                }
-            },
-            Err(e) => {
-                add_check!(
-                    "sources_config",
-                    "warn",
-                    format!("Cannot read sources config: {}", e),
-                    false
-                );
-            }
-        }
-    } else {
-        add_check!(
-            "sources_config",
-            "pass",
-            "No remote sources configured",
-            false
-        );
-    }
+    let sources_config_check = doctor_sources_config_check(&sources_path);
+    add_check!(
+        "sources_config",
+        sources_config_check.status,
+        sources_config_check.message,
+        false
+    );
 
     let config_exclusion_risks =
         collect_doctor_config_exclusion_risks(&data_dir, &db_path, &config_path, &sources_path);
