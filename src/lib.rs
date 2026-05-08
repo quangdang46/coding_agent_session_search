@@ -72028,7 +72028,7 @@ fn run_sources_doctor(
     source_filter: Option<&str>,
     output_format: Option<RobotFormat>,
 ) -> CliResult<()> {
-    use crate::sources::config::{SourcesConfig, source_names_equal};
+    use crate::sources::config::{SourcesConfig, source_names_equal, source_path_entry_error};
     use colored::Colorize;
 
     let config = SourcesConfig::load().map_err(|e| CliError {
@@ -72095,9 +72095,17 @@ fn run_sources_doctor(
         checks.push(rsync_check);
 
         // Check 3: Remote paths exist
-        for path in &source.paths {
-            let path_check = check_remote_path(host, path);
-            checks.push(path_check);
+        for (idx, path) in source.paths.iter().enumerate() {
+            if let Some(message) = source_path_entry_error(idx, path) {
+                checks.push(DiagnosticCheck {
+                    name: format!("Remote Path: paths[{idx}]"),
+                    status: "fail".into(),
+                    message: format!("Invalid source path: {message}"),
+                    remediation: Some("Fix or remove this path in sources.toml".into()),
+                });
+            } else {
+                checks.push(check_remote_path(host, path));
+            }
         }
 
         // Check 4: Local storage writable
@@ -72424,7 +72432,7 @@ fn run_sources_sync(
     dry_run: bool,
     output_format: Option<RobotFormat>,
 ) -> CliResult<()> {
-    use crate::sources::config::{SourcesConfig, source_names_equal};
+    use crate::sources::config::{SourcesConfig, source_names_equal, source_path_entry_error};
     use crate::sources::sync::{SyncEngine, SyncReport, SyncStatus, current_unix_ms};
     use colored::Colorize;
 
@@ -72533,22 +72541,47 @@ fn run_sources_sync(
         if dry_run {
             // In dry run, just show what would be synced
             if !is_robot {
-                for path in &source.paths {
-                    println!("  {} {}", "Would sync:".dimmed(), path);
+                for (idx, path) in source.paths.iter().enumerate() {
+                    if let Some(message) = source_path_entry_error(idx, path) {
+                        println!("  {} {}", "Invalid path:".red().bold(), message.red());
+                    } else {
+                        println!("  {} {}", "Would sync:".dimmed(), path);
+                    }
                 }
                 println!();
             } else {
+                let paths = source
+                    .paths
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, path)| {
+                        if let Some(message) = source_path_entry_error(idx, path) {
+                            serde_json::json!({
+                                "path": path,
+                                "success": false,
+                                "files": 0,
+                                "bytes": 0,
+                                "error": format!("Invalid source path: {message}"),
+                            })
+                        } else {
+                            serde_json::json!({
+                                "path": path,
+                                "success": serde_json::Value::Null,
+                                "files": 0,
+                                "bytes": 0,
+                                "error": serde_json::Value::Null,
+                            })
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let has_invalid_paths = paths
+                    .iter()
+                    .any(|path| path["success"].as_bool() == Some(false));
                 all_reports.push(serde_json::json!({
                     "source": source.name,
-                    "status": "dry_run",
+                    "status": if has_invalid_paths { "invalid_config" } else { "dry_run" },
                     "method": "not_run",
-                    "paths": source.paths.iter().map(|path| serde_json::json!({
-                        "path": path,
-                        "success": serde_json::Value::Null,
-                        "files": 0,
-                        "bytes": 0,
-                        "error": serde_json::Value::Null,
-                    })).collect::<Vec<_>>(),
+                    "paths": paths,
                     "total_files": 0,
                     "total_bytes": 0,
                     "duration_ms": 0,

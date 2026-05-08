@@ -190,6 +190,11 @@ impl SourceDefinition {
 
     /// Validate the source definition.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_without_paths()?;
+        self.validate_paths()
+    }
+
+    fn validate_without_paths(&self) -> Result<(), ConfigError> {
         if self.name.trim().is_empty() {
             return Err(ConfigError::Validation(
                 "Source name cannot be empty".into(),
@@ -231,10 +236,6 @@ impl SourceDefinition {
             validate_ssh_host(host)?;
         }
 
-        for (idx, path) in self.paths.iter().enumerate() {
-            validate_source_path_entry(idx, path)?;
-        }
-
         for (idx, mapping) in self.path_mappings.iter().enumerate() {
             if mapping.from.trim().is_empty() {
                 return Err(ConfigError::Validation(format!(
@@ -261,6 +262,14 @@ impl SourceDefinition {
                     )));
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    fn validate_paths(&self) -> Result<(), ConfigError> {
+        for (idx, path) in self.paths.iter().enumerate() {
+            validate_source_path_entry(idx, path)?;
         }
 
         Ok(())
@@ -349,26 +358,29 @@ fn validate_ssh_host(host: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn validate_source_path_entry(index: usize, path: &str) -> Result<(), ConfigError> {
+pub(crate) fn source_path_entry_error(index: usize, path: &str) -> Option<String> {
     if path.trim().is_empty() {
-        return Err(ConfigError::Validation(format!(
-            "paths[{index}] cannot be empty"
-        )));
+        return Some(format!("paths[{index}] cannot be empty"));
     }
 
     if path.trim() != path {
-        return Err(ConfigError::Validation(format!(
+        return Some(format!(
             "paths[{index}] cannot have leading or trailing whitespace"
-        )));
+        ));
     }
 
     if path.chars().any(char::is_control) {
-        return Err(ConfigError::Validation(format!(
-            "paths[{index}] cannot contain control characters"
-        )));
+        return Some(format!("paths[{index}] cannot contain control characters"));
     }
 
-    Ok(())
+    None
+}
+
+fn validate_source_path_entry(index: usize, path: &str) -> Result<(), ConfigError> {
+    match source_path_entry_error(index, path) {
+        Some(message) => Err(ConfigError::Validation(message)),
+        None => Ok(()),
+    }
 }
 
 pub(crate) fn ssh_host_has_safe_token_chars(host: &str) -> bool {
@@ -429,8 +441,7 @@ impl SourcesConfig {
         let content = std::fs::read_to_string(&config_path)?;
         let config: Self = toml::from_str(&content)?;
 
-        // Validate all sources
-        config.validate()?;
+        config.validate_for_load()?;
 
         Ok(config)
     }
@@ -443,7 +454,7 @@ impl SourcesConfig {
 
         let content = std::fs::read_to_string(path)?;
         let config: Self = toml::from_str(&content)?;
-        config.validate()?;
+        config.validate_for_load()?;
 
         Ok(config)
     }
@@ -521,10 +532,22 @@ impl SourcesConfig {
 
     /// Validate all sources in the configuration.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_with_path_entries(true)
+    }
+
+    fn validate_for_load(&self) -> Result<(), ConfigError> {
+        self.validate_with_path_entries(false)
+    }
+
+    fn validate_with_path_entries(&self, validate_paths: bool) -> Result<(), ConfigError> {
         // Check for duplicate names
         let mut seen_names = std::collections::HashSet::new();
         for source in &self.sources {
-            source.validate()?;
+            if validate_paths {
+                source.validate()?;
+            } else {
+                source.validate_without_paths()?;
+            }
 
             if !seen_names.insert(source_name_key(&source.name)) {
                 return Err(ConfigError::Validation(format!(
@@ -1521,6 +1544,54 @@ mod tests {
         let mut source = SourceDefinition::ssh("test", "user@host");
         source.paths = vec!["~/Library/Application Support/Cursor/User/globalStorage".to_string()];
         assert!(source.validate().is_ok());
+    }
+
+    #[test]
+    fn test_load_from_preserves_invalid_paths_for_operation_level_reporting() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("sources.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[[sources]]
+name = "laptop"
+type = "ssh"
+host = "user@host"
+paths = [" ~/.claude/projects", "~/.codex/sessions"]
+"#,
+        )
+        .expect("write config");
+
+        let loaded = SourcesConfig::load_from(&config_path).expect("lenient load");
+        assert_eq!(loaded.sources.len(), 1);
+        assert_eq!(loaded.sources[0].paths[0], " ~/.claude/projects");
+        assert_eq!(loaded.sources[0].paths[1], "~/.codex/sessions");
+        assert!(
+            loaded.validate().is_err(),
+            "strict validation should still reject writing the malformed path"
+        );
+    }
+
+    #[test]
+    fn test_load_from_still_rejects_invalid_source_structure() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("sources.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[[sources]]
+name = "laptop"
+type = "ssh"
+host = "user@host withspace"
+paths = ["~/.claude/projects"]
+"#,
+        )
+        .expect("write config");
+
+        assert!(
+            SourcesConfig::load_from(&config_path).is_err(),
+            "lenient load is only for per-path validation, not unsafe host structure"
+        );
     }
 
     #[test]

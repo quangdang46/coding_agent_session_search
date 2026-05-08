@@ -33,8 +33,8 @@ use thiserror::Error;
 
 use super::{
     config::{
-        SourceDefinition, SyncSchedule, discover_ssh_hosts, ssh_host_has_safe_token_chars,
-        validate_optional_user_host_shape,
+        SourceDefinition, SyncSchedule, discover_ssh_hosts, source_path_entry_error,
+        ssh_host_has_safe_token_chars, validate_optional_user_host_shape,
     },
     host_key_verification_error, is_host_key_verification_failure, strict_ssh_cli_tokens,
     strict_ssh_command_for_rsync, wait_for_child_output_with_timeout,
@@ -167,25 +167,10 @@ fn parse_null_terminated_utf8_paths(bytes: &[u8]) -> Vec<String> {
 }
 
 fn validate_remote_sync_path_entry(index: usize, path: &str) -> Result<(), SyncError> {
-    if path.trim().is_empty() {
-        return Err(SyncError::InvalidPath(format!(
-            "paths[{index}] cannot be empty"
-        )));
+    match source_path_entry_error(index, path) {
+        Some(message) => Err(SyncError::InvalidPath(message)),
+        None => Ok(()),
     }
-
-    if path.trim() != path {
-        return Err(SyncError::InvalidPath(format!(
-            "paths[{index}] cannot have leading or trailing whitespace"
-        )));
-    }
-
-    if path.chars().any(char::is_control) {
-        return Err(SyncError::InvalidPath(format!(
-            "paths[{index}] cannot contain control characters"
-        )));
-    }
-
-    Ok(())
 }
 
 fn invalid_remote_sync_path_result(remote_path: &str, err: SyncError) -> PathSyncResult {
