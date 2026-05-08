@@ -28,6 +28,7 @@ RCH_TARGET_DIR="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_cass_root_e2e_loggi
 # Configuration
 TEST_RESULTS_DIR="test-results/e2e"
 REPORT_FILE="$TEST_RESULTS_DIR/acceptance_report.txt"
+TEST_OUTPUT_FILE=""
 QUICK_MODE=false
 
 # Parse arguments
@@ -86,7 +87,7 @@ archive_prior_logs() {
         moved=$((moved + 1))
     done < <(
         find "$TEST_RESULTS_DIR" \
-            -type f \( -name "*.jsonl" -o -name "cass.log" \) \
+            -type f \( -name "*.jsonl" -o -name "cass.log" -o -name "acceptance_test_output_*.txt" \) \
             ! -name "trace.jsonl" \
             ! -name "combined.jsonl" \
             ! -path "$TEST_RESULTS_DIR/.previous/*" \
@@ -148,6 +149,7 @@ if [[ "$QUICK_MODE" == false ]]; then
     # Generate a unique run ID
     RUN_ID="acceptance_$(date +%Y%m%d_%H%M%S)_$(head -c 6 /dev/urandom | xxd -p)"
     archive_prior_logs "$RUN_ID"
+    TEST_OUTPUT_FILE="$TEST_RESULTS_DIR/acceptance_test_output_$RUN_ID.txt"
 
     # Emit run_start event
     generate_run_event "run_start" "$RUN_ID" > "$RUN_LOG"
@@ -155,7 +157,7 @@ if [[ "$QUICK_MODE" == false ]]; then
     # Run E2E tests with logging through rch - capture exit code
     ensure_rch
     set +e
-    E2E_LOG=1 run_cargo test --test 'e2e_*' -- --test-threads=1 2>&1 | tee /tmp/e2e_test_output.txt
+    E2E_LOG=1 run_cargo test --test 'e2e_*' -- --test-threads=1 2>&1 | tee "$TEST_OUTPUT_FILE"
     TEST_EXIT=$?
     set -e
 
@@ -281,6 +283,7 @@ Test Execution
 --------------
 Exit code: $TEST_EXIT
 Quick mode: $QUICK_MODE
+Test output: ${TEST_OUTPUT_FILE:-n/a}
 
 File Coverage
 -------------
