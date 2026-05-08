@@ -9,6 +9,10 @@
 # Options:
 #   --quick    Run quick validation only (skip full test run, use existing logs)
 #
+# Environment:
+#   RCH_BIN         rch executable (default: rch)
+#   RCH_TARGET_DIR  cargo target dir for offloaded test runs
+#
 # Exit codes:
 #   0 - Acceptance test passed
 #   1 - Acceptance test failed
@@ -18,6 +22,8 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_TARGET_DIR="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_cass_root_e2e_logging_acceptance}"
 
 # Configuration
 TEST_RESULTS_DIR="test-results/e2e"
@@ -43,6 +49,17 @@ if ! command -v jq &>/dev/null; then
     echo "Error: jq is required but not installed"
     exit 1
 fi
+
+ensure_rch() {
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "Error: rch is required for offloaded Cargo test execution"
+        exit 1
+    fi
+}
+
+run_cargo() {
+    "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_TARGET_DIR" cargo "$@"
+}
 
 echo "=== E2E Logging Acceptance Test ==="
 echo "This test verifies the entire E2E logging system works correctly."
@@ -99,9 +116,10 @@ if [[ "$QUICK_MODE" == false ]]; then
     # Emit run_start event
     generate_run_event "run_start" "$RUN_ID" > "$RUN_LOG"
 
-    # Run E2E tests with logging - capture exit code
+    # Run E2E tests with logging through rch - capture exit code
+    ensure_rch
     set +e
-    E2E_LOG=1 cargo test --test 'e2e_*' -- --test-threads=1 2>&1 | tee /tmp/e2e_test_output.txt
+    E2E_LOG=1 run_cargo test --test 'e2e_*' -- --test-threads=1 2>&1 | tee /tmp/e2e_test_output.txt
     TEST_EXIT=$?
     set -e
 
