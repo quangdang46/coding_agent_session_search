@@ -231,6 +231,10 @@ impl SourceDefinition {
             validate_ssh_host(host)?;
         }
 
+        for (idx, path) in self.paths.iter().enumerate() {
+            validate_source_path_entry(idx, path)?;
+        }
+
         for (idx, mapping) in self.path_mappings.iter().enumerate() {
             if mapping.from.trim().is_empty() {
                 return Err(ConfigError::Validation(format!(
@@ -341,6 +345,28 @@ fn validate_ssh_host(host: &str) -> Result<(), ConfigError> {
     }
 
     validate_optional_user_host_shape(host).map_err(ConfigError::Validation)?;
+
+    Ok(())
+}
+
+fn validate_source_path_entry(index: usize, path: &str) -> Result<(), ConfigError> {
+    if path.trim().is_empty() {
+        return Err(ConfigError::Validation(format!(
+            "paths[{index}] cannot be empty"
+        )));
+    }
+
+    if path.trim() != path {
+        return Err(ConfigError::Validation(format!(
+            "paths[{index}] cannot have leading or trailing whitespace"
+        )));
+    }
+
+    if path.chars().any(char::is_control) {
+        return Err(ConfigError::Validation(format!(
+            "paths[{index}] cannot contain control characters"
+        )));
+    }
 
     Ok(())
 }
@@ -1473,6 +1499,28 @@ mod tests {
                 "host should be rejected: {host:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_source_validation_rejects_invalid_paths() {
+        for path in [
+            "",
+            "   ",
+            " ~/.claude/projects",
+            "~/.claude/projects ",
+            "~/.claude\nprojects",
+        ] {
+            let mut source = SourceDefinition::ssh("test", "user@host");
+            source.paths = vec![path.to_string()];
+            assert!(
+                source.validate().is_err(),
+                "path should be rejected: {path:?}"
+            );
+        }
+
+        let mut source = SourceDefinition::ssh("test", "user@host");
+        source.paths = vec!["~/Library/Application Support/Cursor/User/globalStorage".to_string()];
+        assert!(source.validate().is_ok());
     }
 
     #[test]
