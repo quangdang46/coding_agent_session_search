@@ -180,7 +180,15 @@ elif command -v rg &> /dev/null && command -v jq &> /dev/null; then
 
     rm -f "$VIOLATIONS_FILE"
 else
-    echo "  (Skipping no-mock check: rg or jq not found)"
+    MISSING_TOOLS=()
+    command -v rg &> /dev/null || MISSING_TOOLS+=("rg")
+    command -v jq &> /dev/null || MISSING_TOOLS+=("jq")
+    echo "  ERROR: cannot run no-mock check; missing required tool(s): ${MISSING_TOOLS[*]}"
+    echo "  Install the missing tool(s), or set SKIP_NO_MOCK_CHECK=1 for an explicit local bypass."
+    if [ "$NO_MOCK_ONLY" = true ]; then
+        exit 1
+    fi
+    NO_MOCK_FAILED=true
 fi
 
 # Exit early if --no-mock-only flag was passed
