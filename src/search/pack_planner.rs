@@ -8,7 +8,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use super::query::SearchHit;
+use super::query::{MatchType, SearchHit};
 
 const TOKEN_ESTIMATE_CHARS_PER_TOKEN: usize = 4;
 const DEFAULT_FRESHNESS_WINDOW_SECONDS: i64 = 30 * 24 * 60 * 60;
@@ -175,7 +175,7 @@ impl PackCandidate {
             span_hash: content_hash,
             created_at_ms: hit.created_at,
             indexed_at_ms: None,
-            match_type: format!("{:?}", hit.match_type),
+            match_type: match_type_robot_name(hit.match_type).to_string(),
             excerpt: if hit.content.is_empty() {
                 hit.snippet.clone()
             } else {
@@ -196,6 +196,17 @@ impl PackCandidate {
 
     fn session_key(&self) -> (&str, &str) {
         (&self.source_id, &self.source_path)
+    }
+}
+
+fn match_type_robot_name(match_type: MatchType) -> &'static str {
+    match match_type {
+        MatchType::Exact => "exact",
+        MatchType::Prefix => "prefix",
+        MatchType::Suffix => "suffix",
+        MatchType::Substring => "substring",
+        MatchType::Wildcard => "wildcard",
+        MatchType::ImplicitWildcard => "implicit_wildcard",
     }
 }
 
@@ -995,6 +1006,32 @@ mod tests {
     }
 
     #[test]
+    fn from_search_hit_uses_robot_match_type_spelling() {
+        let hit = SearchHit {
+            title: "session".to_string(),
+            snippet: "fallback".to_string(),
+            content: "fallback content".to_string(),
+            content_hash: 42,
+            conversation_id: Some(7),
+            score: 3.5,
+            source_path: "/s/fallback.jsonl".to_string(),
+            agent: "codex".to_string(),
+            workspace: "/work".to_string(),
+            workspace_original: None,
+            created_at: Some(1_000_000),
+            line_number: Some(12),
+            match_type: MatchType::ImplicitWildcard,
+            source_id: "local".to_string(),
+            origin_kind: "local".to_string(),
+            origin_host: None,
+        };
+
+        let candidate = PackCandidate::from_search_hit(&hit, 1, 0);
+
+        assert_eq!(candidate.match_type, "implicit_wildcard");
+    }
+
+    #[test]
     fn empty_corpus_returns_empty_plan() {
         let plan = plan_answer_pack(request(Vec::new())).unwrap();
 
@@ -1100,6 +1137,30 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_and_redacted_empty_candidates_are_omitted_once() {
+        let mut unavailable = candidate("unavailable", "remote", "/s/down.jsonl", 10.0);
+        unavailable.source_readiness = PackSourceReadiness::Unavailable;
+        let mut redacted = candidate("redacted", "local", "/s/redacted.jsonl", 9.0);
+        redacted.excerpt = " \n\t ".to_string();
+
+        let plan = plan_answer_pack(request(vec![unavailable, redacted])).unwrap();
+
+        assert!(plan.evidence.is_empty());
+        let omitted_reasons: Vec<_> = plan
+            .omitted
+            .iter()
+            .map(|omitted| (omitted.candidate_id.as_str(), omitted.reason))
+            .collect();
+        assert_eq!(
+            omitted_reasons,
+            vec![
+                ("unavailable", PackOmittedReason::SourceUnavailable),
+                ("redacted", PackOmittedReason::RedactedToEmpty),
+            ]
+        );
+    }
+
+    #[test]
     fn exact_token_budget_boundary_selects_until_budget_exhausted() {
         let mut first = candidate("a", "local", "/s/a.jsonl", 10.0);
         first.excerpt = "12345678".to_string();
@@ -1158,6 +1219,61 @@ mod tests {
 
         assert_eq!(plan.evidence[0].candidate.candidate_id, "a");
         assert_eq!(plan.evidence[1].candidate.candidate_id, "c");
+    }
+
+    #[test]
+    fn session_cap_omits_new_sessions_but_allows_existing_session_evidence() {
+        let first = candidate("a", "local", "/s/a.jsonl", 10.0);
+        let mut same_session = candidate("b", "local", "/s/a.jsonl", 9.0);
+        same_session.line_start = Some(20);
+        same_session.line_end = Some(22);
+        let new_session = candidate("c", "remote", "/s/c.jsonl", 8.0);
+
+        let mut req = request(vec![first, same_session, new_session]);
+        req.limits.max_sessions = 1;
+        req.limits.max_evidence = 3;
+
+        let plan = plan_answer_pack(req).unwrap();
+
+        let selected_ids: Vec<_> = plan
+            .evidence
+            .iter()
+            .map(|evidence| evidence.candidate.candidate_id.as_str())
+            .collect();
+        assert_eq!(selected_ids, vec!["a", "b"]);
+        assert_eq!(plan.omitted.len(), 1);
+        assert_eq!(plan.omitted[0].candidate_id, "c");
+        assert_eq!(
+            plan.omitted[0].reason,
+            PackOmittedReason::MaxSessionsReached
+        );
+    }
+
+    #[test]
+    fn evidence_cap_omits_remaining_candidates_once() {
+        let first = candidate("a", "local", "/s/a.jsonl", 10.0);
+        let second = candidate("b", "remote", "/s/b.jsonl", 9.0);
+        let third = candidate("c", "remote", "/s/c.jsonl", 8.0);
+
+        let mut req = request(vec![first, second, third]);
+        req.limits.max_evidence = 1;
+
+        let plan = plan_answer_pack(req).unwrap();
+
+        assert_eq!(plan.evidence.len(), 1);
+        assert_eq!(plan.evidence[0].candidate.candidate_id, "a");
+        let omitted_reasons: Vec<_> = plan
+            .omitted
+            .iter()
+            .map(|omitted| (omitted.candidate_id.as_str(), omitted.reason))
+            .collect();
+        assert_eq!(
+            omitted_reasons,
+            vec![
+                ("b", PackOmittedReason::MaxEvidenceReached),
+                ("c", PackOmittedReason::MaxEvidenceReached),
+            ]
+        );
     }
 
     #[test]
