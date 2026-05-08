@@ -119,6 +119,31 @@ fn get_code_block_delimiter(content: &str) -> String {
     "`".repeat(needed)
 }
 
+fn get_code_span_delimiter(content: &str) -> String {
+    let mut max_backticks = 0;
+    let mut current = 0;
+    for c in content.chars() {
+        if c == '`' {
+            current += 1;
+        } else {
+            max_backticks = max_backticks.max(current);
+            current = 0;
+        }
+    }
+    max_backticks = max_backticks.max(current);
+
+    "`".repeat(max_backticks + 1)
+}
+
+fn markdown_code_span(content: &str) -> String {
+    let delim = get_code_span_delimiter(content);
+    if content.starts_with('`') || content.ends_with('`') {
+        format!("{delim} {content} {delim}")
+    } else {
+        format!("{delim}{content}{delim}")
+    }
+}
+
 /// Export to Markdown format
 fn export_markdown(hits: &[SearchHit], options: &ExportOptions) -> String {
     let mut output = String::new();
@@ -127,7 +152,7 @@ fn export_markdown(hits: &[SearchHit], options: &ExportOptions) -> String {
     output.push_str("# Search Results\n\n");
 
     if let Some(query) = &options.query {
-        output.push_str(&format!("**Query:** `{}`\n\n", query.replace('`', "")));
+        output.push_str(&format!("**Query:** {}\n\n", markdown_code_span(query)));
     }
 
     output.push_str(&format!(
@@ -446,6 +471,21 @@ mod tests {
         // underscores are escaped in markdown
         assert!(output.contains("claude\\_code"));
         assert!(output.contains("```"));
+    }
+
+    #[test]
+    fn test_export_markdown_preserves_backticks_in_query() {
+        let options = ExportOptions {
+            query: Some("literal `foo` search".to_string()),
+            ..ExportOptions::default()
+        };
+        let output = export_markdown(&[], &options);
+
+        assert!(output.contains("**Query:** ``literal `foo` search``"));
+        assert!(
+            !output.contains("literal foo search"),
+            "query backticks must not be stripped from Markdown export: {output}"
+        );
     }
 
     #[test]
