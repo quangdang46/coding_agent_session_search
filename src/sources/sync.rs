@@ -2887,7 +2887,9 @@ mod tests {
     fn test_sync_source_preserves_path_result_order_for_mixed_invalid_paths() {
         let temp = TempDir::new().unwrap();
         let engine = SyncEngine::new(temp.path()).with_connection_timeout(1);
-        let mut source = SourceDefinition::ssh("laptop", "bad host");
+        // Use a validation-safe TEST-NET host so source structure checks pass,
+        // but remote-home lookup still fails quickly before path result ordering.
+        let mut source = SourceDefinition::ssh("laptop", "192.0.2.1");
         source.paths = vec![
             "~/.codex/sessions".to_string(),
             " ~/.claude/projects".to_string(),

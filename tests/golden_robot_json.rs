@@ -876,6 +876,34 @@ fn golden_regeneration_hints_do_not_use_bare_cargo() {
     );
 }
 
+#[test]
+fn agents_md_does_not_recommend_bare_cargo_commands() {
+    let agents_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("AGENTS.md");
+    let contents = fs::read_to_string(&agents_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", agents_path.display()));
+    let bare_cargo_line = regex::Regex::new(
+        r"^(UPDATE_GOLDENS=1\s+)?(env\s+CARGO_TARGET_DIR=[^\s]+\s+)?cargo\s+(build|test|check|clippy|fmt)\b",
+    )
+    .expect("compile bare cargo command regex");
+
+    let violations = contents
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let trimmed = line.trim();
+            bare_cargo_line
+                .is_match(trimmed)
+                .then(|| format!("{}:{}", index + 1, trimmed))
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        violations.is_empty(),
+        "AGENTS.md must show rch-offloaded cargo command examples:\n{}",
+        violations.join("\n")
+    );
+}
+
 /// Capture stdout of `cass <args>` in the isolated test home and return
 /// the scrubbed canonical-JSON form (keys-sorted by serde_json's default
 /// `BTreeMap` insertion preservation, pretty-printed, dynamic values
