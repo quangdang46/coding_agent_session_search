@@ -3048,7 +3048,8 @@ fn display_group_name(key: &str) -> String {
 }
 
 fn legacy_agent_color(agent: &str) -> ftui::PackedRgba {
-    match agent.to_ascii_lowercase().as_str() {
+    let slug = agent.to_ascii_lowercase().replace('-', "_");
+    match slug.as_str() {
         "codex" => ftui::PackedRgba::rgb(0, 200, 150), // teal
         "claude" | "claude_code" => ftui::PackedRgba::rgb(204, 119, 34), // amber
         "gemini" | "gemini_cli" => ftui::PackedRgba::rgb(66, 133, 244), // blue
@@ -3059,6 +3060,15 @@ fn legacy_agent_color(agent: &str) -> ftui::PackedRgba {
         "chatgpt" => ftui::PackedRgba::rgb(16, 163, 127), // chatgpt green
         "aider" => ftui::PackedRgba::rgb(255, 165, 0), // orange
         "pi_agent" => ftui::PackedRgba::rgb(255, 140, 0), // dark orange
+        "factory" | "droid" => ftui::PackedRgba::rgb(230, 176, 60), // amber
+        "clawdbot" => ftui::PackedRgba::rgb(140, 130, 240), // indigo
+        "vibe" | "mistral" => ftui::PackedRgba::rgb(220, 100, 160), // rose
+        "openclaw" => ftui::PackedRgba::rgb(130, 190, 210), // slate blue
+        "copilot" => ftui::PackedRgba::rgb(92, 200, 120), // blue-green
+        "copilot_cli" => ftui::PackedRgba::rgb(80, 170, 230), // navy
+        "crush" => ftui::PackedRgba::rgb(255, 120, 80), // coral
+        "kimi" => ftui::PackedRgba::rgb(190, 220, 80), // yellow-green
+        "qwen" => ftui::PackedRgba::rgb(80, 210, 180), // mint
         _ => ftui::PackedRgba::rgb(169, 169, 169),     // gray fallback
     }
 }
@@ -31136,6 +31146,23 @@ not jsonl",
                 "agent autocomplete should include supported provider slug {slug}"
             );
         }
+    }
+
+    #[test]
+    fn input_autocomplete_agent_hints_have_specific_legacy_colors() {
+        let fallback = legacy_agent_color("__unknown_agent__");
+        for slug in INPUT_AUTOCOMPLETE_AGENT_HINTS {
+            assert_ne!(
+                legacy_agent_color(slug),
+                fallback,
+                "supported provider slug {slug} should not use fallback agent color"
+            );
+        }
+        assert_eq!(
+            legacy_agent_color("copilot-cli"),
+            legacy_agent_color("copilot_cli"),
+            "hyphenated provider aliases should share the canonical color"
+        );
     }
 
     #[test]
