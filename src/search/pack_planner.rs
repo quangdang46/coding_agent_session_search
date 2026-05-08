@@ -4,9 +4,10 @@
 //! to search, source health, renderers, and robot docs in later beads.
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::query::{MatchType, SearchHit};
 
@@ -319,6 +320,287 @@ pub enum PackSelectedReason {
     SourceDiversity,
     StrongCitation,
     BudgetFit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackRenderFormat {
+    Json,
+    CompactJson,
+    Jsonl,
+    Toon,
+    Markdown,
+}
+
+impl PackRenderFormat {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::CompactJson => "compact",
+            Self::Jsonl => "jsonl",
+            Self::Toon => "toon",
+            Self::Markdown => "markdown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackRenderRequest {
+    pub query_text: String,
+    pub normalized_query: String,
+    pub generated_at_ms: i64,
+    pub elapsed_ms: u64,
+    pub request_id: Option<String>,
+    pub format: PackRenderFormat,
+    pub limits: PackPlannerLimits,
+    pub search_mode: String,
+    pub fallback_mode: Option<String>,
+    pub semantic_joined: bool,
+    pub freshness_policy: PackFreshnessPolicy,
+    pub freshness_window_seconds: i64,
+    pub redaction_policy: String,
+    pub sensitive_output: bool,
+    pub skill_content_included: bool,
+    pub explain_selection: bool,
+}
+
+impl Default for PackRenderRequest {
+    fn default() -> Self {
+        Self {
+            query_text: String::new(),
+            normalized_query: String::new(),
+            generated_at_ms: 0,
+            elapsed_ms: 0,
+            request_id: None,
+            format: PackRenderFormat::Json,
+            limits: PackPlannerLimits::default(),
+            search_mode: "hybrid".to_string(),
+            fallback_mode: None,
+            semantic_joined: false,
+            freshness_policy: PackFreshnessPolicy::PreferRecent,
+            freshness_window_seconds: DEFAULT_FRESHNESS_WINDOW_SECONDS,
+            redaction_policy: "strict".to_string(),
+            sensitive_output: false,
+            skill_content_included: false,
+            explain_selection: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackRenderError {
+    pub format: &'static str,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct RenderedAnswerPack {
+    schema_version: &'static str,
+    query: RenderedQuery,
+    #[serde(rename = "_meta")]
+    meta: RenderedMeta,
+    limits: RenderedLimits,
+    realized: RenderedRealized,
+    health: RenderedHealth,
+    freshness: RenderedFreshness,
+    pack: RenderedPack,
+    evidence: Vec<RenderedEvidence>,
+    omitted: RenderedOmitted,
+    privacy: RenderedPrivacy,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct RenderedQuery {
+    text: String,
+    normalized: String,
+    filters: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct RenderedMeta {
+    request_id: Option<String>,
+    generated_at_ms: i64,
+    elapsed_ms: u64,
+    partial: bool,
+    format: &'static str,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct RenderedLimits {
+    max_tokens: usize,
+    estimated_tokens: usize,
+    max_sessions: usize,
+    max_evidence: usize,
+    context_lines: usize,
+    max_excerpt_chars: usize,
+    field_mask: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct RenderedRealized {
+    search_mode: String,
+    fallback_mode: Option<String>,
+    semantic_joined: bool,
+    candidate_count: usize,
+    selected_evidence_count: usize,
+    selected_session_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct RenderedHealth {
+    healthy: bool,
+    recommended_action: Option<&'static str>,
+    index_state: &'static str,
+    semantic_state: &'static str,
+    active_rebuild: bool,
+    source_readiness: Vec<RenderedSourceReadiness>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct RenderedSourceReadiness {
+    source_id: String,
+    origin_kind: String,
+    readiness: &'static str,
+    healthy: bool,
+    evidence_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct RenderedFreshness {
+    policy: &'static str,
+    window_seconds: i64,
+    newest_evidence_at_ms: Option<i64>,
+    oldest_evidence_at_ms: Option<i64>,
+    stale_evidence_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct RenderedPack {
+    title: String,
+    answer_outline: Vec<RenderedOutlineItem>,
+    source_summary: Vec<RenderedSourceSummary>,
+    handoff: Vec<RenderedHandoffItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct RenderedOutlineItem {
+    rank: usize,
+    heading: String,
+    evidence_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct RenderedSourceSummary {
+    source_id: String,
+    origin_kind: String,
+    session_count: usize,
+    evidence_count: usize,
+    newest_evidence_at_ms: Option<i64>,
+    healthy: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct RenderedHandoffItem {
+    rank: usize,
+    kind: &'static str,
+    text: String,
+    evidence_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct RenderedEvidence {
+    id: String,
+    rank: usize,
+    excerpt: String,
+    excerpt_truncated: bool,
+    estimated_tokens: usize,
+    citation: RenderedCitation,
+    selection: RenderedSelection,
+    roles: Vec<&'static str>,
+    matched_terms: Vec<String>,
+    redactions: Vec<RenderedRedaction>,
+    #[serde(skip)]
+    source_readiness: PackSourceReadiness,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct RenderedCitation {
+    source_path: String,
+    source_id: String,
+    origin_kind: String,
+    origin_host: Option<String>,
+    workspace: String,
+    workspace_original: Option<String>,
+    agent: String,
+    line_start: Option<usize>,
+    line_end: Option<usize>,
+    message_index: Option<usize>,
+    conversation_id: Option<i64>,
+    content_hash: String,
+    span_hash: String,
+    excerpt_sha256: String,
+    created_at_ms: Option<i64>,
+    indexed_at_ms: Option<i64>,
+    freshness_age_seconds: Option<i64>,
+    match_type: String,
+    verified: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct RenderedSelection {
+    score: f64,
+    token_cost: usize,
+    selected_reason: PackSelectedReason,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relevance_score: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage_score: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    freshness_score: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_diversity_score: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_authority_score: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role_score: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    citation_quality_score: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duplicate_penalty: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct RenderedRedaction {
+    kind: String,
+    start_char: usize,
+    end_char: usize,
+    replacement: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct RenderedOmitted {
+    count: usize,
+    items: Vec<OmittedPackCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct RenderedPrivacy {
+    redaction_policy: String,
+    redaction_applied: bool,
+    sensitive_output: bool,
+    skill_content_included: bool,
+    redaction_counts: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Default)]
+struct SourceAccumulator {
+    origin_kind: String,
+    sessions: BTreeSet<String>,
+    evidence_count: usize,
+    newest_evidence_at_ms: Option<i64>,
+    healthy: bool,
+    worst_readiness: PackSourceReadiness,
 }
 
 pub fn pack_candidate_fetch_limit(
@@ -947,6 +1229,556 @@ fn evidence_id(candidate: &PackCandidate) -> String {
     format!("ev_{}", &hash.to_hex()[..16])
 }
 
+pub fn render_answer_pack(
+    plan: &PlannedAnswerPack,
+    request: &PackRenderRequest,
+) -> Result<String, PackRenderError> {
+    let envelope = rendered_answer_pack(plan, request);
+    match request.format {
+        PackRenderFormat::Json => {
+            serde_json::to_string_pretty(&envelope).map_err(|err| render_error(request, err))
+        }
+        PackRenderFormat::CompactJson => {
+            serde_json::to_string(&envelope).map_err(|err| render_error(request, err))
+        }
+        PackRenderFormat::Jsonl => render_answer_pack_jsonl(&envelope, request),
+        PackRenderFormat::Toon => {
+            let value =
+                serde_json::to_value(&envelope).map_err(|err| render_error(request, err))?;
+            Ok(toon::encode(value, Some(pack_toon_encode_options())))
+        }
+        PackRenderFormat::Markdown => Ok(render_answer_pack_markdown(&envelope)),
+    }
+}
+
+pub fn render_answer_pack_value(
+    plan: &PlannedAnswerPack,
+    request: &PackRenderRequest,
+) -> Result<serde_json::Value, PackRenderError> {
+    serde_json::to_value(rendered_answer_pack(plan, request))
+        .map_err(|err| render_error(request, err))
+}
+
+fn render_error(error: &PackRenderRequest, err: serde_json::Error) -> PackRenderError {
+    PackRenderError {
+        format: error.format.label(),
+        message: err.to_string(),
+    }
+}
+
+fn rendered_answer_pack(
+    plan: &PlannedAnswerPack,
+    request: &PackRenderRequest,
+) -> RenderedAnswerPack {
+    let evidence = plan
+        .evidence
+        .iter()
+        .map(|item| rendered_evidence(item, request))
+        .collect::<Vec<_>>();
+    let source_summary = rendered_source_summary(&evidence);
+    let source_readiness = rendered_source_readiness(&evidence);
+    let stale_evidence_count = evidence
+        .iter()
+        .filter(|item| {
+            !matches!(
+                item.citation_source_readiness(),
+                PackSourceReadiness::Healthy
+            )
+        })
+        .count();
+    let health_is_healthy = source_readiness.iter().all(|source| source.healthy);
+    let redacted_count = plan
+        .omitted
+        .iter()
+        .filter(|omitted| omitted.reason == PackOmittedReason::RedactedToEmpty)
+        .count();
+    let warnings = if evidence.is_empty() {
+        vec!["no_evidence_found".to_string()]
+    } else {
+        Vec::new()
+    };
+
+    RenderedAnswerPack {
+        schema_version: "cass.pack.v1",
+        query: RenderedQuery {
+            text: request.query_text.clone(),
+            normalized: normalized_query(request),
+            filters: BTreeMap::new(),
+        },
+        meta: RenderedMeta {
+            request_id: request.request_id.clone(),
+            generated_at_ms: request.generated_at_ms,
+            elapsed_ms: request.elapsed_ms,
+            partial: false,
+            format: request.format.label(),
+            warnings: warnings.clone(),
+        },
+        limits: RenderedLimits {
+            max_tokens: request.limits.max_tokens,
+            estimated_tokens: plan.estimated_tokens,
+            max_sessions: request.limits.max_sessions,
+            max_evidence: request.limits.max_evidence,
+            context_lines: request.limits.context_lines,
+            max_excerpt_chars: request.limits.max_excerpt_chars,
+            field_mask: "standard",
+        },
+        realized: RenderedRealized {
+            search_mode: request.search_mode.clone(),
+            fallback_mode: request.fallback_mode.clone(),
+            semantic_joined: request.semantic_joined,
+            candidate_count: plan.candidate_count,
+            selected_evidence_count: plan.selected_evidence_count,
+            selected_session_count: plan.selected_session_count,
+        },
+        health: RenderedHealth {
+            healthy: health_is_healthy,
+            recommended_action: (!health_is_healthy)
+                .then_some("inspect cass health --json and source sync status"),
+            index_state: "ready",
+            semantic_state: request
+                .fallback_mode
+                .as_deref()
+                .map(|_| "fallback")
+                .unwrap_or("not_reported"),
+            active_rebuild: false,
+            source_readiness,
+        },
+        freshness: RenderedFreshness {
+            policy: freshness_policy_label(request.freshness_policy),
+            window_seconds: request.freshness_window_seconds,
+            newest_evidence_at_ms: evidence
+                .iter()
+                .filter_map(|item| item.citation.created_at_ms)
+                .max(),
+            oldest_evidence_at_ms: evidence
+                .iter()
+                .filter_map(|item| item.citation.created_at_ms)
+                .min(),
+            stale_evidence_count,
+        },
+        pack: RenderedPack {
+            title: pack_title(request),
+            answer_outline: rendered_outline(&evidence),
+            source_summary,
+            handoff: rendered_handoff(&evidence),
+        },
+        evidence,
+        omitted: RenderedOmitted {
+            count: plan.omitted.len(),
+            items: plan.omitted.clone(),
+        },
+        privacy: RenderedPrivacy {
+            redaction_policy: request.redaction_policy.clone(),
+            redaction_applied: redacted_count > 0,
+            sensitive_output: request.sensitive_output,
+            skill_content_included: request.skill_content_included,
+            redaction_counts: redaction_counts(redacted_count),
+        },
+        warnings,
+    }
+}
+
+fn normalized_query(request: &PackRenderRequest) -> String {
+    if request.normalized_query.trim().is_empty() {
+        request.query_text.trim().to_string()
+    } else {
+        request.normalized_query.trim().to_string()
+    }
+}
+
+fn pack_title(request: &PackRenderRequest) -> String {
+    let normalized = normalized_query(request);
+    if normalized.is_empty() {
+        "answer pack".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn rendered_evidence(item: &PlannedPackEvidence, request: &PackRenderRequest) -> RenderedEvidence {
+    let candidate = &item.candidate;
+    let citation = RenderedCitation {
+        source_path: candidate.source_path.clone(),
+        source_id: candidate.source_id.clone(),
+        origin_kind: candidate.origin_kind.clone(),
+        origin_host: candidate.origin_host.clone(),
+        workspace: candidate.workspace.clone(),
+        workspace_original: candidate.workspace_original.clone(),
+        agent: candidate.agent.clone(),
+        line_start: candidate.line_start,
+        line_end: candidate.line_end,
+        message_index: candidate.message_index,
+        conversation_id: candidate.conversation_id,
+        content_hash: candidate.content_hash.clone(),
+        span_hash: candidate.span_hash.clone(),
+        excerpt_sha256: sha256_hex(&item.excerpt),
+        created_at_ms: candidate.created_at_ms,
+        indexed_at_ms: candidate.indexed_at_ms,
+        freshness_age_seconds: candidate
+            .created_at_ms
+            .map(|created| request.generated_at_ms.saturating_sub(created).max(0) / 1_000),
+        match_type: candidate.match_type.clone(),
+        verified: candidate.line_start.is_some() && !candidate.source_path.trim().is_empty(),
+    };
+    RenderedEvidence {
+        id: item.id.clone(),
+        rank: item.rank,
+        excerpt: item.excerpt.clone(),
+        excerpt_truncated: item.excerpt_truncated,
+        estimated_tokens: item.estimated_tokens,
+        citation,
+        selection: rendered_selection(item.selection, request.explain_selection),
+        roles: rendered_roles(candidate.role),
+        matched_terms: candidate.matched_terms.clone(),
+        redactions: Vec::new(),
+        source_readiness: candidate.source_readiness,
+    }
+}
+
+fn rendered_selection(selection: PackSelectionScore, explain: bool) -> RenderedSelection {
+    RenderedSelection {
+        score: selection.score,
+        token_cost: selection.token_cost,
+        selected_reason: selection.selected_reason,
+        relevance_score: explain.then_some(selection.relevance_score),
+        coverage_score: explain.then_some(selection.coverage_score),
+        freshness_score: explain.then_some(selection.freshness_score),
+        source_diversity_score: explain.then_some(selection.source_diversity_score),
+        source_authority_score: explain.then_some(selection.source_authority_score),
+        role_score: explain.then_some(selection.role_score),
+        citation_quality_score: explain.then_some(selection.citation_quality_score),
+        duplicate_penalty: explain.then_some(selection.duplicate_penalty),
+    }
+}
+
+fn rendered_roles(role: PackEvidenceRole) -> Vec<&'static str> {
+    if matches!(role, PackEvidenceRole::Unknown) {
+        Vec::new()
+    } else {
+        vec![evidence_role_label(role)]
+    }
+}
+
+fn rendered_outline(evidence: &[RenderedEvidence]) -> Vec<RenderedOutlineItem> {
+    evidence
+        .iter()
+        .map(|item| RenderedOutlineItem {
+            rank: item.rank,
+            heading: outline_heading(item),
+            evidence_ids: vec![item.id.clone()],
+        })
+        .collect()
+}
+
+fn outline_heading(item: &RenderedEvidence) -> String {
+    item.matched_terms
+        .first()
+        .map(|term| format!("Evidence for {term}"))
+        .unwrap_or_else(|| {
+            format!(
+                "{} evidence from {}",
+                item.citation.agent, item.citation.source_id
+            )
+        })
+}
+
+fn rendered_handoff(evidence: &[RenderedEvidence]) -> Vec<RenderedHandoffItem> {
+    evidence
+        .iter()
+        .map(|item| RenderedHandoffItem {
+            rank: item.rank,
+            kind: handoff_kind(item),
+            text: compact_excerpt(&item.excerpt, 220),
+            evidence_ids: vec![item.id.clone()],
+        })
+        .collect()
+}
+
+fn handoff_kind(item: &RenderedEvidence) -> &'static str {
+    match item.roles.first().copied() {
+        Some("assistant_conclusion") => "decision",
+        Some("tool_result") => "fact",
+        Some("user_requirement") => "next_step",
+        Some("tool_call_argument") => "fact",
+        _ => "fact",
+    }
+}
+
+fn rendered_source_summary(evidence: &[RenderedEvidence]) -> Vec<RenderedSourceSummary> {
+    let mut sources: BTreeMap<(String, String), SourceAccumulator> = BTreeMap::new();
+    for item in evidence {
+        let key = (
+            item.citation.source_id.clone(),
+            item.citation.origin_kind.clone(),
+        );
+        let entry = sources.entry(key).or_insert_with(|| SourceAccumulator {
+            origin_kind: item.citation.origin_kind.clone(),
+            healthy: true,
+            ..SourceAccumulator::default()
+        });
+        entry.sessions.insert(item.citation.source_path.clone());
+        entry.evidence_count += 1;
+        entry.newest_evidence_at_ms =
+            newer_timestamp(entry.newest_evidence_at_ms, item.citation.created_at_ms);
+        let readiness = item.citation_source_readiness();
+        entry.healthy &= matches!(readiness, PackSourceReadiness::Healthy);
+        if source_readiness_rank(readiness) > source_readiness_rank(entry.worst_readiness) {
+            entry.worst_readiness = readiness;
+        }
+    }
+
+    sources
+        .into_iter()
+        .map(|((source_id, _), source)| RenderedSourceSummary {
+            source_id,
+            origin_kind: source.origin_kind,
+            session_count: source.sessions.len(),
+            evidence_count: source.evidence_count,
+            newest_evidence_at_ms: source.newest_evidence_at_ms,
+            healthy: source.healthy,
+        })
+        .collect()
+}
+
+fn rendered_source_readiness(evidence: &[RenderedEvidence]) -> Vec<RenderedSourceReadiness> {
+    let mut sources: BTreeMap<(String, String), SourceAccumulator> = BTreeMap::new();
+    for item in evidence {
+        let key = (
+            item.citation.source_id.clone(),
+            item.citation.origin_kind.clone(),
+        );
+        let entry = sources.entry(key).or_insert_with(|| SourceAccumulator {
+            origin_kind: item.citation.origin_kind.clone(),
+            healthy: true,
+            ..SourceAccumulator::default()
+        });
+        entry.evidence_count += 1;
+        let readiness = item.citation_source_readiness();
+        entry.healthy &= matches!(readiness, PackSourceReadiness::Healthy);
+        if source_readiness_rank(readiness) > source_readiness_rank(entry.worst_readiness) {
+            entry.worst_readiness = readiness;
+        }
+    }
+
+    sources
+        .into_iter()
+        .map(|((source_id, _), source)| RenderedSourceReadiness {
+            source_id,
+            origin_kind: source.origin_kind,
+            readiness: source_readiness_label(source.worst_readiness),
+            healthy: source.healthy,
+            evidence_count: source.evidence_count,
+        })
+        .collect()
+}
+
+impl RenderedEvidence {
+    fn citation_source_readiness(&self) -> PackSourceReadiness {
+        if !self.citation.verified {
+            PackSourceReadiness::IncompleteMetadata
+        } else {
+            self.source_readiness
+        }
+    }
+}
+
+fn newer_timestamp(left: Option<i64>, right: Option<i64>) -> Option<i64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
+fn redaction_counts(redacted_count: usize) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    if redacted_count > 0 {
+        counts.insert("redacted_to_empty".to_string(), redacted_count);
+    }
+    counts
+}
+
+fn render_answer_pack_jsonl(
+    envelope: &RenderedAnswerPack,
+    request: &PackRenderRequest,
+) -> Result<String, PackRenderError> {
+    let mut lines = Vec::with_capacity(envelope.evidence.len() + 4);
+    lines.push(json_line(
+        serde_json::json!({ "_meta": &envelope.meta }),
+        request,
+    )?);
+    lines.push(json_line(
+        serde_json::json!({ "pack": &envelope.pack }),
+        request,
+    )?);
+    for evidence in &envelope.evidence {
+        lines.push(json_line(
+            serde_json::json!({ "evidence": evidence }),
+            request,
+        )?);
+    }
+    lines.push(json_line(
+        serde_json::json!({ "omitted": &envelope.omitted }),
+        request,
+    )?);
+    lines.push(json_line(
+        serde_json::json!({ "privacy": &envelope.privacy }),
+        request,
+    )?);
+    Ok(lines.join("\n"))
+}
+
+fn json_line(
+    value: serde_json::Value,
+    request: &PackRenderRequest,
+) -> Result<String, PackRenderError> {
+    serde_json::to_string(&value).map_err(|err| render_error(request, err))
+}
+
+fn render_answer_pack_markdown(envelope: &RenderedAnswerPack) -> String {
+    let mut out = String::new();
+    out.push_str("# ");
+    out.push_str(&markdown_line(&envelope.pack.title));
+    out.push_str("\n\n## Handoff\n");
+    if envelope.pack.handoff.is_empty() {
+        out.push_str("- No evidence selected.\n");
+    } else {
+        for item in &envelope.pack.handoff {
+            out.push_str("- ");
+            out.push_str(&markdown_line(&item.text));
+            out.push_str(" [");
+            out.push_str(&item.evidence_ids.join(", "));
+            out.push_str("]\n");
+        }
+    }
+
+    out.push_str("\n## Evidence\n");
+    if envelope.evidence.is_empty() {
+        out.push_str("- No cited evidence.\n");
+    } else {
+        for item in &envelope.evidence {
+            out.push('[');
+            out.push_str(&item.id);
+            out.push_str("] ");
+            out.push_str(&markdown_line(&item.citation.agent));
+            out.push(' ');
+            out.push_str(&markdown_line(&item.citation.source_id));
+            out.push(' ');
+            out.push_str(&markdown_line(&item.citation.source_path));
+            if let Some(line_start) = item.citation.line_start {
+                out.push(':');
+                out.push_str(&line_start.to_string());
+                if item.citation.line_end != item.citation.line_start
+                    && let Some(line_end) = item.citation.line_end
+                {
+                    out.push('-');
+                    out.push_str(&line_end.to_string());
+                }
+            }
+            out.push('\n');
+        }
+    }
+
+    if envelope.omitted.count > 0 {
+        out.push_str("\n## Omitted\n");
+        for item in &envelope.omitted.items {
+            out.push_str("- ");
+            out.push_str(omitted_reason_label(item.reason));
+            out.push_str(": ");
+            out.push_str(&markdown_line(&item.source_path));
+            if let Some(line_start) = item.line_start {
+                out.push(':');
+                out.push_str(&line_start.to_string());
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn compact_excerpt(excerpt: &str, max_chars: usize) -> String {
+    let line = markdown_line(excerpt);
+    if line.chars().count() <= max_chars {
+        return line;
+    }
+    let mut compact = line
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    compact.push_str("...");
+    compact
+}
+
+fn markdown_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn sha256_hex(text: &str) -> String {
+    let digest = Sha256::digest(text.as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn pack_toon_encode_options() -> toon::EncodeOptions {
+    toon::EncodeOptions {
+        indent: None,
+        delimiter: None,
+        key_folding: Some(toon::options::KeyFoldingMode::Off),
+        flatten_depth: None,
+        replacer: None,
+    }
+}
+
+fn freshness_policy_label(policy: PackFreshnessPolicy) -> &'static str {
+    match policy {
+        PackFreshnessPolicy::PreferRecent => "prefer-recent",
+        PackFreshnessPolicy::Strict => "strict",
+        PackFreshnessPolicy::AllowStale => "allow-stale",
+    }
+}
+
+fn evidence_role_label(role: PackEvidenceRole) -> &'static str {
+    match role {
+        PackEvidenceRole::AssistantConclusion => "assistant_conclusion",
+        PackEvidenceRole::ToolResult => "tool_result",
+        PackEvidenceRole::UserRequirement => "user_requirement",
+        PackEvidenceRole::ToolCallArgument => "tool_call_argument",
+        PackEvidenceRole::Unknown => "unknown",
+    }
+}
+
+fn omitted_reason_label(reason: PackOmittedReason) -> &'static str {
+    match reason {
+        PackOmittedReason::TokenBudgetExhausted => "token_budget_exhausted",
+        PackOmittedReason::MaxSessionsReached => "max_sessions_reached",
+        PackOmittedReason::MaxEvidenceReached => "max_evidence_reached",
+        PackOmittedReason::DuplicateContent => "duplicate_content",
+        PackOmittedReason::SameSessionLowerRank => "same_session_lower_rank",
+        PackOmittedReason::StaleUnderStrictPolicy => "stale_under_strict_policy",
+        PackOmittedReason::SourceUnavailable => "source_unavailable",
+        PackOmittedReason::RedactedToEmpty => "redacted_to_empty",
+        PackOmittedReason::FieldMaskExcluded => "field_mask_excluded",
+    }
+}
+
+fn source_readiness_rank(readiness: PackSourceReadiness) -> usize {
+    match readiness {
+        PackSourceReadiness::Healthy => 0,
+        PackSourceReadiness::StaleReadable => 1,
+        PackSourceReadiness::IncompleteMetadata => 2,
+        PackSourceReadiness::Unavailable => 3,
+    }
+}
+
+fn source_readiness_label(readiness: PackSourceReadiness) -> &'static str {
+    match readiness {
+        PackSourceReadiness::Healthy => "healthy",
+        PackSourceReadiness::StaleReadable => "stale_readable",
+        PackSourceReadiness::IncompleteMetadata => "incomplete_metadata",
+        PackSourceReadiness::Unavailable => "unavailable",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1005,6 +1837,33 @@ mod tests {
         }
     }
 
+    fn render_request(format: PackRenderFormat) -> PackRenderRequest {
+        PackRenderRequest {
+            query_text: "pack handoff".to_string(),
+            normalized_query: "pack handoff".to_string(),
+            generated_at_ms: 1_060_000,
+            elapsed_ms: 7,
+            request_id: Some("req-1".to_string()),
+            format,
+            limits: PackPlannerLimits {
+                max_tokens: 1_024,
+                max_sessions: 8,
+                max_evidence: 24,
+                context_lines: 3,
+                max_excerpt_chars: 80,
+            },
+            search_mode: "hybrid".to_string(),
+            fallback_mode: Some("lexical".to_string()),
+            semantic_joined: false,
+            freshness_policy: PackFreshnessPolicy::PreferRecent,
+            freshness_window_seconds: 60,
+            redaction_policy: "strict".to_string(),
+            sensitive_output: false,
+            skill_content_included: false,
+            explain_selection: false,
+        }
+    }
+
     #[test]
     fn from_search_hit_uses_robot_match_type_spelling() {
         let hit = SearchHit {
@@ -1029,6 +1888,141 @@ mod tests {
         let candidate = PackCandidate::from_search_hit(&hit, 1, 0);
 
         assert_eq!(candidate.match_type, "implicit_wildcard");
+    }
+
+    #[test]
+    fn render_compact_json_base_pack_matches_golden_shape() {
+        let mut item = candidate("base", "local", "/s/base.jsonl", 10.0);
+        item.excerpt = "Planner output cites existing evidence.".to_string();
+        item.match_type = "implicit_wildcard".to_string();
+        let plan = plan_answer_pack(request(vec![item])).unwrap();
+        let req = render_request(PackRenderFormat::CompactJson);
+
+        let rendered = render_answer_pack(&plan, &req).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+
+        assert!(!rendered.contains('\n'));
+        assert_eq!(value, render_answer_pack_value(&plan, &req).unwrap());
+        assert_eq!(value["schema_version"], "cass.pack.v1");
+        assert_eq!(value["_meta"]["format"], "compact");
+        assert_eq!(value["query"]["text"], "pack handoff");
+        assert_eq!(value["realized"]["fallback_mode"], "lexical");
+        assert_eq!(
+            value["evidence"][0]["citation"]["source_path"],
+            "/s/base.jsonl"
+        );
+        assert_eq!(
+            value["evidence"][0]["citation"]["match_type"],
+            "implicit_wildcard"
+        );
+        assert_eq!(
+            value["pack"]["handoff"][0]["evidence_ids"][0],
+            value["evidence"][0]["id"]
+        );
+    }
+
+    #[test]
+    fn render_jsonl_empty_pack_matches_golden_line_order() {
+        let plan = plan_answer_pack(request(Vec::new())).unwrap();
+        let req = render_request(PackRenderFormat::Jsonl);
+
+        let rendered = render_answer_pack(&plan, &req).unwrap();
+        let lines: Vec<_> = rendered.lines().collect();
+
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].starts_with("{\"_meta\":"));
+        assert!(lines[1].starts_with("{\"pack\":"));
+        assert!(lines[2].starts_with("{\"omitted\":"));
+        assert!(lines[3].starts_with("{\"privacy\":"));
+        let meta: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        let omitted: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+        assert_eq!(
+            meta["_meta"]["warnings"],
+            serde_json::json!(["no_evidence_found"])
+        );
+        assert_eq!(omitted["omitted"]["count"], 0);
+    }
+
+    #[test]
+    fn render_markdown_duplicate_omission_matches_golden_text() {
+        let first = candidate("a", "local", "/s/a.jsonl", 10.0);
+        let mut duplicate = candidate("b", "local", "/s/b.jsonl", 9.0);
+        duplicate.content_hash = first.content_hash.clone();
+        let plan = plan_answer_pack(request(vec![first, duplicate])).unwrap();
+        let req = render_request(PackRenderFormat::Markdown);
+        let evidence_id = &plan.evidence[0].id;
+
+        let rendered = render_answer_pack(&plan, &req).unwrap();
+
+        assert_eq!(
+            rendered,
+            format!(
+                "# pack handoff\n\n\
+                 ## Handoff\n\
+                 - 0123456789abcdef [{evidence_id}]\n\n\
+                 ## Evidence\n\
+                 [{evidence_id}] codex local /s/a.jsonl:10-12\n\n\
+                 ## Omitted\n\
+                 - duplicate_content: /s/b.jsonl:10\n"
+            )
+        );
+    }
+
+    #[test]
+    fn render_stale_source_pack_marks_health_and_freshness() {
+        let mut stale = candidate("stale", "remote", "/s/stale.jsonl", 10.0);
+        stale.source_readiness = PackSourceReadiness::StaleReadable;
+        let plan = plan_answer_pack(request(vec![stale])).unwrap();
+        let req = render_request(PackRenderFormat::Json);
+
+        let value = render_answer_pack_value(&plan, &req).unwrap();
+
+        assert_eq!(value["health"]["healthy"], false);
+        assert_eq!(
+            value["health"]["recommended_action"],
+            "inspect cass health --json and source sync status"
+        );
+        assert_eq!(
+            value["health"]["source_readiness"][0]["readiness"],
+            "stale_readable"
+        );
+        assert_eq!(value["freshness"]["stale_evidence_count"], 1);
+        assert_eq!(value["pack"]["source_summary"][0]["healthy"], false);
+    }
+
+    #[test]
+    fn render_redacted_empty_pack_reports_privacy_counts() {
+        let mut redacted = candidate("redacted", "local", "/s/redacted.jsonl", 9.0);
+        redacted.excerpt = " \n\t ".to_string();
+        let plan = plan_answer_pack(request(vec![redacted])).unwrap();
+        let req = render_request(PackRenderFormat::Json);
+
+        let value = render_answer_pack_value(&plan, &req).unwrap();
+
+        assert_eq!(value["privacy"]["redaction_applied"], true);
+        assert_eq!(value["privacy"]["redaction_counts"]["redacted_to_empty"], 1);
+        assert_eq!(value["omitted"]["items"][0]["reason"], "redacted_to_empty");
+        assert_eq!(value["warnings"], serde_json::json!(["no_evidence_found"]));
+    }
+
+    #[test]
+    fn render_toon_matches_existing_toon_encoder() {
+        let plan = plan_answer_pack(request(vec![candidate(
+            "toon",
+            "local",
+            "/s/toon.jsonl",
+            10.0,
+        )]))
+        .unwrap();
+        let req = render_request(PackRenderFormat::Toon);
+        let value = render_answer_pack_value(&plan, &req).unwrap();
+
+        let rendered = render_answer_pack(&plan, &req).unwrap();
+
+        assert_eq!(
+            rendered,
+            toon::encode(value, Some(pack_toon_encode_options()))
+        );
     }
 
     #[test]
