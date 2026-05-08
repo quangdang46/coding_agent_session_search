@@ -2751,7 +2751,7 @@ Update check state is stored in the data directory:
 **Build-time validation**
 - `build.rs` validates the active local overrides against the expected package name, package version, patch path, and Cargo feature/default-features contract.
 - If an active sibling checkout has drifted away from the pinned git revision or has a dirty worktree, the build emits a warning instead of silently trusting it.
-- Enable strict enforcement with `cargo check --features strict-path-dep-validation` or `CASS_STRICT_PATH_DEP_VALIDATION=1 cargo check`. Strict mode upgrades drift warnings to hard errors and also validates the optional sibling repos before you switch them to local path overrides.
+- Enable strict enforcement with `rch exec -- env CARGO_TARGET_DIR=/tmp/cass-strict-target cargo check --features strict-path-dep-validation` or `rch exec -- env CARGO_TARGET_DIR=/tmp/cass-strict-target CASS_STRICT_PATH_DEP_VALIDATION=1 cargo check`. Strict mode upgrades drift warnings to hard errors and also validates the optional sibling repos before you switch them to local path overrides.
 
 **Expected interface contract**
 - `frankensqlite` (`fsqlite`): `Connection`, `params!`, and `compat::{ConnectionExt, RowExt}` with `row.get_typed(...)`.
@@ -2779,7 +2779,7 @@ When intentionally updating one of these sibling crates, update the manifest pin
 
 - **Binary not on PATH**: Append `~/.local/bin` (or your `--dest`) to `PATH`; re-open shell.
 
-- **Nightly missing in CI**: Set `RUSTUP_INIT_SKIP=1` if toolchain is preinstalled; otherwise allow installer to run rustup.
+- **Rust toolchain missing in CI**: Set `RUSTUP_INIT_SKIP=1` if the pinned toolchain is preinstalled; otherwise allow installer to run rustup.
 
 - **Watch mode not triggering**: Confirm `watch_state.json` updates and that connector roots are accessible; `notify` relies on OS file events (inotify/FSEvents).
 
@@ -2789,20 +2789,21 @@ When intentionally updating one of these sibling crates, update the manifest pin
 
 ## 🧪 Developer Workflow
 
-We target **Rust Nightly** to leverage the latest optimizations.
+We target **stable Rust** as pinned by `rust-toolchain.toml`. Agents should
+offload build, test, lint, and snapshot commands with `rch`.
 
 ```bash
 # Format & Lint
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-dev-target cargo fmt --check
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-dev-target cargo clippy --all-targets -- -D warnings
 
 # Build & Test
-cargo build --release
-cargo test
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-dev-target cargo build --release
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-dev-target cargo test
 
 # Run End-to-End Tests
-cargo test --test e2e_index_tui
-cargo test --test install_scripts
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-dev-target cargo test --test e2e_index_tui
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-dev-target cargo test --test install_scripts
 ```
 
 ### Snapshot Baseline Workflow (FrankenTUI)
@@ -2811,12 +2812,12 @@ Use targeted snapshot runs; do not blindly bless everything:
 
 ```bash
 # Verify current baselines
-cargo test snapshot_baseline_ -- --nocapture
-cargo test snapshot_search_surface_ -- --nocapture
-cargo test --test ftui_harness_snapshots -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-snapshot-target cargo test snapshot_baseline_ -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-snapshot-target cargo test snapshot_search_surface_ -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-snapshot-target cargo test --test ftui_harness_snapshots -- --nocapture
 
 # Regenerate only the suite you intentionally changed
-BLESS=1 cargo test snapshot_baseline_ -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-snapshot-target BLESS=1 cargo test snapshot_baseline_ -- --nocapture
 ```
 
 The full regeneration/review protocol (required reviewer checklist, behavioral guard tests,
@@ -2875,7 +2876,7 @@ cargo install cargo-llvm-cov
 cargo llvm-cov --all-features --workspace --text
 
 # Run specific e2e tests
-cargo test --test e2e_filters -- --test-threads=1
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-e2e-target cargo test --test e2e_filters -- --test-threads=1
 ```
 
 ## About Contributions
