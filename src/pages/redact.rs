@@ -440,7 +440,7 @@ pub fn swarm_evidence_redaction_config() -> RedactionConfig {
     config.custom_patterns.push(CustomPattern {
         name: "secret_env_assignment".to_string(),
         pattern: Regex::new(
-            r"(?i)\b((?:TOKEN|SECRET|KEY|PASSWORD|PASS|CREDENTIAL|AUTH|[A-Z_][A-Z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD|PASS|CREDENTIAL|AUTH)[A-Z0-9_]*)=)[^\s]+",
+            r#"(?i)\b(?:TOKEN|SECRET|KEY|PASSWORD|PASS|CREDENTIAL|AUTH|[A-Z_][A-Z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD|PASS|CREDENTIAL|AUTH)[A-Z0-9_]*)=(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s]+)"#,
         )
         .expect("swarm secret env redaction regex must compile"),
         replacement: SWARM_SECRET_ENV_ASSIGNMENT_REDACTED.to_string(),
@@ -905,6 +905,37 @@ mod tests {
         assert!(serialized.contains("[REDACTED_PATH]"));
         assert!(serialized.contains("[SECRET_ENV_REDACTED]"));
         assert!(serialized.contains("pack://[REDACTED_PATH]#L44"));
+    }
+
+    #[test]
+    fn swarm_redaction_scrubs_quoted_secret_env_values() {
+        for (command, leaked_fragments) in [
+            (
+                r#"rch exec -- env TOKEN="super secret value" cargo test"#,
+                &["TOKEN=", "super secret value"][..],
+            ),
+            (
+                "rch exec -- env PASSWORD='correct horse battery staple' cargo test",
+                &["PASSWORD=", "correct horse battery staple"][..],
+            ),
+            (
+                r#"API_TOKEN="secret \"quoted\" value" cargo check"#,
+                &["API_TOKEN=", "secret", "quoted"][..],
+            ),
+        ] {
+            let redacted = redact_swarm_text(command);
+
+            assert!(
+                redacted.contains(SWARM_SECRET_ENV_ASSIGNMENT_REDACTED),
+                "secret assignment should be replaced in {redacted:?}"
+            );
+            for fragment in leaked_fragments {
+                assert!(
+                    !redacted.contains(fragment),
+                    "redacted command leaked {fragment:?}: {redacted:?}"
+                );
+            }
+        }
     }
 
     #[test]
