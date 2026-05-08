@@ -6085,6 +6085,12 @@ fn probe_index_run_lock(
     db_path: &Path,
 ) -> crate::search::asset_state::SearchMaintenanceSnapshot {
     let snapshot = read_index_run_lock_snapshot(data_dir);
+    // An active advisory lock is data-dir scoped. Legacy or interrupted
+    // writers may have incomplete db_path metadata, but the held flock is
+    // still the authoritative signal that maintenance is in progress.
+    if snapshot.active {
+        return snapshot;
+    }
     if snapshot
         .db_path
         .as_deref()
@@ -53021,6 +53027,46 @@ mode=index",
         assert_eq!(
             state["rebuild"]["pid"].as_u64(),
             Some(std::process::id() as u64)
+        );
+    }
+
+    #[test]
+    fn state_meta_json_reports_active_data_dir_lock_without_db_path_metadata() {
+        let (temp, db_path) = seed_cli_db();
+        let index_path = crate::search::tantivy::index_dir(temp.path()).expect("index dir");
+        std::fs::create_dir_all(&index_path).expect("create index dir");
+        std::fs::write(index_path.join("meta.json"), b"{}").expect("write meta.json");
+
+        let lock_path = temp.path().join("index-run.lock");
+        let mut lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .expect("open lock file");
+        lock_file.try_lock_exclusive().expect("hold index lock");
+        writeln!(
+            lock_file,
+            "pid={}
+started_at_ms={}
+mode=index",
+            std::process::id(),
+            1_733_000_558_000_i64
+        )
+        .expect("write legacy lock metadata");
+        lock_file.flush().expect("flush lock metadata");
+
+        let state = state_meta_json(temp.path(), &db_path, 60, true);
+        assert_eq!(state["index"]["rebuilding"].as_bool(), Some(true));
+        assert_eq!(state["rebuild"]["active"].as_bool(), Some(true));
+        assert_eq!(
+            state["rebuild"]["pid"].as_u64(),
+            Some(std::process::id() as u64)
+        );
+        assert_eq!(
+            state["rebuild"]["started_at"].as_str(),
+            Some("2024-11-30T21:02:38+00:00")
         );
     }
 
