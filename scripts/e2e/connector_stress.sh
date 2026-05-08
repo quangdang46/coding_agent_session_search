@@ -7,14 +7,21 @@
 #
 # Usage: ./scripts/e2e/connector_stress.sh
 #
+# Environment:
+#   RCH_BIN         rch executable (default: rch)
+#   RCH_TARGET_DIR  cargo target dir for offloaded cass build
+#
 # Part of br-2l5g: Create connector_stress.sh E2E Script
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_TARGET_DIR="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_cass_connector_stress_e2e}"
 
 # Source the E2E logging library
+# shellcheck disable=SC1091
 source "${PROJECT_ROOT}/scripts/lib/e2e_log.sh"
 
 # Initialize logging
@@ -35,10 +42,25 @@ stress_ok=true
 CONNECTORS=(claude codex gemini cline amp aider opencode pi_agent factory cursor)
 SCENARIOS=(truncated invalid_utf8 empty malformed large)
 
+ensure_rch() {
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        e2e_error "rch binary not found; connector stress E2E cass build must be offloaded"
+        exit 1
+    fi
+}
+
+run_cargo() {
+    "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_TARGET_DIR" cargo "$@"
+}
+
 ensure_cass_binary() {
     if [[ ! -x "$CASS_BIN" ]]; then
-        e2e_info "Building cass binary..."
-        (cd "$PROJECT_ROOT" && cargo build --quiet 2>/dev/null)
+        CASS_BIN="${RCH_TARGET_DIR}/debug/cass"
+    fi
+    if [[ ! -x "$CASS_BIN" ]]; then
+        e2e_info "Building cass binary through rch..."
+        ensure_rch
+        (cd "$PROJECT_ROOT" && run_cargo build --quiet --bin cass 2>/dev/null)
     fi
     if [[ ! -x "$CASS_BIN" ]]; then
         e2e_error "cass binary not found at $CASS_BIN"
@@ -173,6 +195,8 @@ run_stress_test() {
 
     local td
     td=$(mktemp -d)
+    # td is fixed once here, so expanding at trap registration is intentional.
+    # shellcheck disable=SC2064
     trap "rm -rf '$td'" RETURN
 
     # Create isolated directory structure
@@ -231,6 +255,8 @@ run_stress_test() {
 run_combined_stress_test() {
     local td
     td=$(mktemp -d)
+    # td is fixed once here, so expanding at trap registration is intentional.
+    # shellcheck disable=SC2064
     trap "rm -rf '$td'" RETURN
 
     local home="$td/home" codex="$td/codex" gemini="$td/gemini"
