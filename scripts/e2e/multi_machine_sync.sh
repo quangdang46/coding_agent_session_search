@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2317
 # scripts/e2e/multi_machine_sync.sh
 # End-to-end test for multi-machine source sync workflows.
 #
@@ -9,6 +10,10 @@
 #   ./scripts/e2e/multi_machine_sync.sh
 #   CASS_BIN=target/debug/cass ./scripts/e2e/multi_machine_sync.sh
 #   ./scripts/e2e/multi_machine_sync.sh --no-build --fail-fast
+#
+# Environment:
+#   RCH_BIN         rch executable (default: rch)
+#   RCH_TARGET_DIR  cargo target dir for offloaded cass build
 #
 # Artifacts:
 #   test-results/e2e/shell_multi_machine_sync_<timestamp>.jsonl
@@ -23,8 +28,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_TARGET_DIR="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_cass_multi_machine_sync_e2e}"
 
 # Source the E2E logging library
+# shellcheck disable=SC1091
 source "${PROJECT_ROOT}/scripts/lib/e2e_log.sh"
 
 # Initialize logging
@@ -69,6 +77,8 @@ SKIPPED_TESTS=0
 # Resolve cass binary
 if [[ -n "${CASS_BIN:-}" ]]; then
     CASS_BIN_RESOLVED="$CASS_BIN"
+elif [[ $NO_BUILD -eq 0 ]]; then
+    CASS_BIN_RESOLVED="${RCH_TARGET_DIR}/debug/cass"
 else
     CASS_BIN_RESOLVED="${PROJECT_ROOT}/target/debug/cass"
 fi
@@ -89,6 +99,23 @@ cass_env() {
 # Run cass with sandbox environment
 run_cass() {
     cass_env "${CASS_BIN_RESOLVED}" "$@"
+}
+
+ensure_rch() {
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        e2e_error "rch binary not found; multi-machine sync E2E cass build must be offloaded"
+        e2e_run_end 0 0 1 0 0
+        exit 1
+    fi
+}
+
+run_cargo() {
+    "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_TARGET_DIR" cargo "$@"
+}
+
+build_cass_binary() {
+    ensure_rch
+    (cd "$PROJECT_ROOT" && run_cargo build --bin cass)
 }
 
 # =============================================================================
@@ -497,7 +524,7 @@ main() {
         local build_start
         build_start=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
 
-        if ! cargo build --bin cass 2>&1; then
+        if ! build_cass_binary 2>&1; then
             e2e_error "Build failed"
             e2e_run_end 0 0 1 0 0
             exit 1
