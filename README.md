@@ -2871,8 +2871,8 @@ The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
 - Retained for 7 days (e2e) / 30 days (coverage)
 
 ```bash
-# Generate coverage locally
-cargo install cargo-llvm-cov
+# Generate coverage through rch
+# Ensure cargo-llvm-cov is already installed before agent-run gates.
 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-coverage-target cargo llvm-cov --all-features --workspace --text
 
 # Run specific e2e tests
