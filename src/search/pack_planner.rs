@@ -2032,12 +2032,34 @@ fn rendered_omitted_items(
         .iter()
         .map(|item| {
             let mut rendered = item.clone();
+            rendered.candidate_id =
+                rendered_omitted_candidate_id(&rendered.candidate_id, &mut redactions);
             rendered.source_path = redact_pack_output_text(&rendered.source_path, &mut redactions);
             rendered.agent = redact_pack_output_text(&rendered.agent, &mut redactions);
             rendered
         })
         .collect();
     (items, redactions)
+}
+
+fn rendered_omitted_candidate_id(
+    candidate_id: &str,
+    redactions: &mut Vec<RenderedRedaction>,
+) -> String {
+    if candidate_id_contains_source_material(candidate_id) {
+        let hash = sha256_hex(candidate_id);
+        let replacement = format!("omitted_{}", &hash[..16]);
+        push_full_redaction(redactions, "candidate_id", candidate_id, &replacement);
+        return replacement;
+    }
+    redact_pack_output_text(candidate_id, redactions)
+}
+
+fn candidate_id_contains_source_material(candidate_id: &str) -> bool {
+    candidate_id.contains(':')
+        || candidate_id.contains('/')
+        || candidate_id.contains('\\')
+        || candidate_id.contains('~')
 }
 
 fn redaction_counts(
@@ -2824,6 +2846,7 @@ mod tests {
         first.workspace_original = Some("/home/alice/projects/private".to_string());
         first.excerpt = format!("Open {source_path} before reading ~/notes/private.md");
         let mut duplicate = candidate("duplicate-private-path", "local", duplicate_path, 9.0);
+        duplicate.candidate_id = format!("old-laptop:{duplicate_path}:10");
         duplicate.content_hash = first.content_hash.clone();
         let plan = plan_answer_pack(request(vec![first, duplicate])).unwrap();
         let json_req = render_request(PackRenderFormat::Json);
@@ -2833,7 +2856,7 @@ mod tests {
         let markdown_rendered = render_answer_pack(&plan, &markdown_req).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json_rendered).unwrap();
 
-        for raw in ["/home/alice", "/Users/alice", "~/notes"] {
+        for raw in ["/home/alice", "/Users/alice", "~/notes", "old-laptop"] {
             assert!(!json_rendered.contains(raw));
             assert!(!markdown_rendered.contains(raw));
         }
@@ -2845,6 +2868,12 @@ mod tests {
             value["omitted"]["items"][0]["source_path"],
             "[REDACTED_PATH]/duplicate.jsonl"
         );
+        assert!(
+            value["omitted"]["items"][0]["candidate_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("omitted_")
+        );
         assert!(markdown_rendered.contains("[REDACTED_PATH]/session.jsonl"));
         assert!(markdown_rendered.contains("[REDACTED_PATH]/duplicate.jsonl"));
         assert_eq!(value["privacy"]["redaction_applied"], true);
@@ -2854,6 +2883,7 @@ mod tests {
                 .unwrap()
                 >= 2
         );
+        assert_eq!(value["privacy"]["redaction_counts"]["candidate_id"], 1);
     }
 
     #[test]
