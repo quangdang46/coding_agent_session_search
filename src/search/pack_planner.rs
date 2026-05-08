@@ -1732,7 +1732,7 @@ fn redacted_source_label(
     origin_kind: &str,
     redactions: &mut Vec<RenderedRedaction>,
 ) -> String {
-    if is_remote_origin(origin_kind) && looks_like_private_host_label(source_id) {
+    if is_remote_origin(origin_kind) && !source_id.trim().is_empty() {
         push_full_redaction(redactions, "remote_host", source_id, REDACTED_SOURCE_MARKER);
         REDACTED_SOURCE_MARKER.to_string()
     } else {
@@ -1755,15 +1755,6 @@ fn rendered_origin_host(
 
 fn is_remote_origin(origin_kind: &str) -> bool {
     !origin_kind.trim().eq_ignore_ascii_case("local")
-}
-
-fn looks_like_private_host_label(value: &str) -> bool {
-    PRIVATE_HOST_LABEL_RE.is_match(value)
-        || value.contains('@')
-        || value.contains('.')
-        || value.contains(':')
-        || value.ends_with(".local")
-        || value.ends_with(".internal")
 }
 
 fn redacted_private_path_marker(path: &str) -> String {
@@ -2705,7 +2696,11 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|warning| warning == "source_sync_gap:old-laptop:source_pruned")
+                .any(|warning| warning == "source_sync_gap:[REDACTED_SOURCE]:source_pruned")
+        );
+        assert_eq!(
+            value["health"]["source_sync_gaps"][1]["source_id"],
+            REDACTED_SOURCE_MARKER
         );
     }
 
