@@ -28,6 +28,7 @@ const REQUIRED_SCENARIOS: &[&str] = &[
     "busy",
     "stale_advisory",
     "reservation_conflict",
+    "unrelated_reservation",
     "build_pressure",
     "no_ready_work",
     "privacy_guardrails",
@@ -84,7 +85,9 @@ fn swarm_status_manifest_hashes_are_current() {
 
         assert_eq!(
             string_field(scenario, "command_shape"),
-            format!("cass swarm status --json --fixture-dir {FIXTURE_ROOT}"),
+            format!(
+                "cass swarm status --json --fixture-dir {FIXTURE_ROOT} --fixture-id {fixture_id}"
+            ),
             "{fixture_id} command shape should stay robot-safe and fixture-backed"
         );
         assert_eq!(
@@ -251,6 +254,13 @@ fn swarm_status_scenario_invariants_are_pinned() {
                 assert_eq!(output["beads"]["ready"][0]["safe_to_claim"], false);
                 assert_eq!(output["reservations"][0]["state"], "conflicting");
                 assert_eq!(output["recommendations"][0]["kind"], "coordinate");
+            }
+            "unrelated_reservation" => {
+                assert_eq!(output["beads"]["ready"][0]["safe_to_claim"], true);
+                assert_eq!(output["reservations"][0]["state"], "active");
+                assert_eq!(output["reservations"][0]["overlaps_dirty_worktree"], false);
+                assert_eq!(output["summary"]["recommended_action"], "claim-ready-bead");
+                assert_eq!(output["recommendations"][0]["kind"], "claim-ready-bead");
             }
             "build_pressure" => {
                 assert_eq!(output["summary"]["build_pressure"], "high");
