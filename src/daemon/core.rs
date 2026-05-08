@@ -429,7 +429,8 @@ impl ModelDaemon {
         });
 
         // Shutdown embedding worker
-        if let Some(handle) = self.worker_handle.lock().take()
+        let worker_handle = self.worker_handle.lock().take();
+        if let Some(handle) = worker_handle
             && let Err(e) = handle.shutdown()
         {
             warn!(error = %e, "Failed to send shutdown to embedding worker");
@@ -689,8 +690,8 @@ impl ModelDaemon {
                     fast_model,
                     quality_model,
                 };
-                let guard = self.worker_handle.lock();
-                match guard.as_ref() {
+                let worker_handle = self.worker_handle.lock().clone();
+                match worker_handle {
                     Some(handle) => match handle.submit(config) {
                         Ok(()) => Response::JobSubmitted {
                             job_id: request_id.clone(),
@@ -747,9 +748,11 @@ impl ModelDaemon {
 
             Request::CancelEmbeddingJob { db_path, model_id } => {
                 // Send cancel to worker
-                let guard = self.worker_handle.lock();
-                if let Some(handle) = guard.as_ref() {
-                    let _ = handle.cancel(db_path.clone(), model_id.clone());
+                let worker_handle = self.worker_handle.lock().clone();
+                if let Some(handle) = worker_handle
+                    && let Err(e) = handle.cancel(db_path.clone(), model_id.clone())
+                {
+                    warn!(error = %e, "Failed to send cancel to embedding worker");
                 }
 
                 // Also cancel in database
