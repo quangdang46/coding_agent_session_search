@@ -8,11 +8,28 @@ NO_MOCK_ONLY=false
 ARTIFACT_HYGIENE_ONLY=false
 NO_MOCK_FAILED=false
 E2E_COMPLIANCE_FAILED=false
+RCH_BIN=${RCH_BIN:-rch}
+RCH_TARGET_DIR=${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_cass_validate_ci}
 
 usage() {
     cat <<'USAGE'
 Usage: scripts/validate_ci.sh [--no-mock-only|--artifact-hygiene-only]
+
+Environment:
+  RCH_BIN=rch         Remote compilation helper binary for heavy Cargo gates
+  RCH_TARGET_DIR=...  Remote Cargo target dir for heavy gates
 USAGE
+}
+
+ensure_rch() {
+    if ! command -v "$RCH_BIN" &> /dev/null; then
+        echo "ERROR: rch binary not found; validate_ci Cargo gates must be offloaded" >&2
+        return 1
+    fi
+}
+
+run_cargo() {
+    "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_TARGET_DIR" cargo "$@"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -212,17 +229,19 @@ else
 fi
 
 echo "3. Running local CI simulation..."
+ensure_rch
+echo "  - Using rch target dir: $RCH_TARGET_DIR"
 echo "  - Checking formatting..."
-cargo fmt --all -- --check
+run_cargo fmt --all -- --check
 
 echo "  - Running Clippy..."
-cargo clippy --all-targets --all-features -- -D warnings
+run_cargo clippy --all-targets --all-features -- -D warnings
 
 echo "  - Running Rust tests..."
-cargo test --all-features
+run_cargo test --all-features
 
 echo "  - Running Crypto Vector tests..."
-cargo test --test crypto_vectors
+run_cargo test --test crypto_vectors
 
 echo "  - Running cargo audit (if installed)..."
 if cargo audit --version >/dev/null 2>&1; then
