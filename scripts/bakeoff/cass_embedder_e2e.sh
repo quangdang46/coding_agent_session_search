@@ -25,6 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 RCH_BIN="${RCH_BIN:-rch}"
 RCH_TARGET_DIR="${RCH_TARGET_DIR:-/tmp/rch_target_cass_embedder_e2e}"
+VERBOSE="${VERBOSE:-0}"
 CASS_BIN="${CASS_BIN:-${REPO_ROOT}/target/release/cass}"
 if [[ ! -f "$CASS_BIN" ]]; then
     CASS_BIN="${REPO_ROOT}/target/debug/cass"
