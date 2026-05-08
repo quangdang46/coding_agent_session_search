@@ -7,14 +7,21 @@
 # correctly by running tests with logging enabled and verifying outputs.
 #
 # br: coding_agent_session_search-3koo
+#
+# Environment:
+#   RCH_BIN         rch executable (default: rch)
+#   RCH_TARGET_DIR  cargo target dir for offloaded test runs
 
 set -euo pipefail
 
 # Get script directory and project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_TARGET_DIR="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_cass_e2e_logging_acceptance}"
 
 # Source the E2E logging library
+# shellcheck disable=SC1091
 source "$PROJECT_ROOT/scripts/lib/e2e_log.sh"
 
 # Initialize logging for this script
@@ -31,6 +38,17 @@ echo ""
 TOTAL_CHECKS=0
 PASSED_CHECKS=0
 FAILED_CHECKS=0
+
+ensure_rch() {
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "  [FAIL] rch binary not found; E2E logging acceptance tests must be offloaded"
+        exit 1
+    fi
+}
+
+run_cargo() {
+    "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_TARGET_DIR" cargo "$@"
+}
 
 check_pass() {
     local name="$1"
@@ -70,10 +88,11 @@ PHASE_START=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
 
 echo ""
 echo "Step 2: Running E2E tests with logging enabled..."
-echo "  Running: E2E_LOG=1 cargo test --test 'e2e_*' -- --test-threads=1"
+echo "  Running through rch: E2E_LOG=1 cargo test --test 'e2e_*' -- --test-threads=1"
 
 TEST_EXIT=0
-E2E_LOG=1 cargo test --test 'e2e_*' -- --test-threads=1 2>&1 | tee /tmp/e2e_test_output.txt || TEST_EXIT=$?
+ensure_rch
+E2E_LOG=1 run_cargo test --test 'e2e_*' -- --test-threads=1 2>&1 | tee /tmp/e2e_test_output.txt || TEST_EXIT=$?
 
 if [ "$TEST_EXIT" -eq 0 ]; then
     echo "  All E2E tests passed"
@@ -123,7 +142,7 @@ echo ""
 echo "Step 4: Validating JSONL schema..."
 
 SCHEMA_EXIT=0
-cargo test --test e2e_jsonl_schema_test 2>&1 | tail -20 || SCHEMA_EXIT=$?
+run_cargo test --test e2e_jsonl_schema_test 2>&1 | tail -20 || SCHEMA_EXIT=$?
 
 if [ "$SCHEMA_EXIT" -eq 0 ]; then
     check_pass "jsonl_schema_valid"
