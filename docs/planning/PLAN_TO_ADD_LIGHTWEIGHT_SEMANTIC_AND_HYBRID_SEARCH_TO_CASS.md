@@ -1,5 +1,14 @@
 # Plan: Lightweight Semantic & Hybrid Search for CASS
 
+> **Status: historical design, superseded for model acquisition.** This plan
+> predates the current shipped model-management contract. Treat any
+> "auto-download", TUI-triggered download, `CASS_SEMANTIC_AUTODOWNLOAD`, or
+> `cass index --semantic --download-model` wording below as historical design
+> context unless a section explicitly says it is current. Current cass behavior
+> is: semantic model acquisition is opt-in only via `cass models install` or
+> `cass models install --from-file <dir>`; cass never auto-downloads models, and
+> missing models degrade to lexical-only behavior with truthful robot metadata.
+
 ## Executive Summary
 
 This plan adds **true semantic search** and **hybrid search with RRF reranking** to `cass`, allowing users to cycle through three search modes via a keyboard shortcut:
@@ -8,10 +17,11 @@ This plan adds **true semantic search** and **hybrid search with RRF reranking**
 2. **Semantic** - Vector similarity using real ML embeddings (MiniLM)
 3. **Hybrid** - RRF fusion of lexical + semantic results
 
-The implementation uses `fastembed` (ONNX, CPU-only) for embeddings. To preserve cass's existing privacy/UX contract ("no surprise network calls"), **model downloads are consent-gated**:
+The implementation uses `fastembed` (ONNX, CPU-only) for embeddings. To preserve cass's existing privacy/UX contract ("no surprise network calls"), **model downloads are explicit operator actions**:
 
 - By default, cass does **not** add new network calls.
-- The semantic model is downloaded **only** after explicit user action (TUI prompt when switching to Semantic/Hybrid, or `cass models install`).
+- The semantic model is downloaded **only** after explicit operator action with `cass models install`.
+- Air-gapped installs use `cass models install --from-file <dir>`.
 - Once installed, semantic search is fully offline.
 
 Key improvements in this revision:
@@ -46,8 +56,8 @@ Key improvements in this revision:
 ### Core Principles
 
 1. **Real Semantic by Default**: Uses actual ML embeddings (MiniLM) - not hash approximations
-2. **No Surprise Network Calls**: Downloads happen only after explicit user opt-in (TUI prompt or CLI command)
-3. **Zero-Drama Setup**: If the user opts in, download/install is automatic with progress + verification
+2. **No Surprise Network Calls**: Downloads happen only after the explicit `cass models install` command
+3. **Zero-Drama Setup**: If the user explicitly runs `cass models install`, download/install reports progress + verification
 4. **Fast Iteration**: Semantic search feels responsive (<100ms query time)
 5. **Offline-First**: Once downloaded, no network required; everything runs locally
 6. **Filter Parity**: Semantic/Hybrid must honor the same filters as Lexical (agent/workspace/source/time)
@@ -66,22 +76,14 @@ Since we're in Rust with access to `fastembed-rs` (pure Rust + ONNX, no Python),
 ### User Experience Flow
 
 ```
-First Run (model not installed):
+First Run (model not installed, current contract):
 ┌─────────────────────────────────────────────────────────────────┐
 │  cass starts → TUI loads immediately                            │
 │  ↓                                                              │
 │  User toggles Semantic/Hybrid (Alt+S)                           │
-│  → Prompt: "Semantic requires 23MB model. [D]ownload / [H]ash / [Esc]"│
+│  → No network call; semantic remains unavailable until install  │
 │  ↓                                                              │
-│  User can keep searching (Lexical works); Semantic not available│
-│  ↓                                                              │
-│  User presses D → Download begins with progress                 │
-│  Status bar: "⬇️ Downloading semantic model... 45%"              │
-│  ↓                                                              │
-│  Download completes → SHA256 verified → Model loaded            │
-│  Toast: "✓ Semantic search ready"                               │
-│  ↓                                                              │
-│  Semantic/Hybrid modes now use real ML embeddings               │
+│  User can keep searching; lexical fallback remains available    │
 └─────────────────────────────────────────────────────────────────┘
 
 Subsequent Runs (model installed):
@@ -92,6 +94,7 @@ Subsequent Runs (model installed):
 CLI Install (for automation / pre-provisioning):
 ┌─────────────────────────────────────────────────────────────────┐
 │  cass models install → Downloads + verifies model               │
+│  cass models install --from-file <dir> → Air-gapped install     │
 │  cass tui → Semantic ready immediately                          │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -179,11 +182,10 @@ This makes HYB feel stable and consistent with the existing UX.
 This feature introduces a new potential network call (model download). To preserve cass's current expectations:
 
 - **Default behavior**: no new network calls.
-- **Download trigger**: only after explicit user action:
-  - TUI: switching to Semantic/Hybrid prompts and offers a single-key "Download" action.
-  - CLI: `cass models install` or `cass index --semantic --download-model`.
-- **Headless/CI**: if `TUI_HEADLESS=1` (or no TTY), cass never prompts; semantic remains unavailable unless the user ran an explicit install command.
-- **Hard offline**: `CASS_OFFLINE=1` forbids downloads (and can also gate the existing update check).
+- **Download trigger**: only after explicit operator command: `cass models install`.
+- **Air-gapped trigger**: `cass models install --from-file <dir>`.
+- **Headless/CI**: cass never prompts and never downloads unless the install command is run directly.
+- **Hard offline**: missing models degrade to lexical-only. Use `--from-file <dir>` to install pre-downloaded assets.
 
 ### 3.1 New CLI Surface: `cass models`
 
@@ -193,6 +195,7 @@ cass models status [--json]
 
 # Install the default model (consent explicitly given via command)
 cass models install [--model all-minilm-l6-v2] [--mirror <url>] [--json]
+cass models install [--model all-minilm-l6-v2] --from-file <dir> [--json]
 
 # Verify checksums / repair if corrupted
 cass models verify [--repair] [--json]
@@ -201,18 +204,21 @@ cass models verify [--repair] [--json]
 cass models remove [--model all-minilm-l6-v2] [-y]
 ```
 
-### 3.2 Consent Modes
+### 3.2 Superseded Consent Modes
 
-`CASS_SEMANTIC_AUTODOWNLOAD` is tri-state:
+The original design proposed a tri-state `CASS_SEMANTIC_AUTODOWNLOAD`. That is
+**not current implementation guidance**. cass does not auto-download semantic
+models from TUI mode, headless mode, indexing, or search. Keep these examples
+only as historical context for why the current contract is stricter:
 
 ```bash
-# default: ask in TUI only, never in headless
+# superseded: do not implement
 CASS_SEMANTIC_AUTODOWNLOAD=ask
 
-# always download when user switches to SEM/HYB in TUI (no prompt)
+# superseded: do not implement
 CASS_SEMANTIC_AUTODOWNLOAD=true
 
-# never download (SEM/HYB requires manual `cass models install`)
+# closest to current behavior, but the env var itself is obsolete
 CASS_SEMANTIC_AUTODOWNLOAD=false
 ```
 
@@ -359,7 +365,8 @@ impl ModelManager {
 ### 3.7 Background Download Integration
 
 ```rust
-/// Spawned when SEM/HYB is requested and policy allows (or CLI install invoked)
+/// Historical sketch. Current implementation should only perform network
+/// acquisition from the explicit `cass models install` command.
 pub async fn ensure_semantic_model(
     data_dir: &Path,
     progress_tx: mpsc::Sender<SemanticModelEvent>,
@@ -376,7 +383,8 @@ pub async fn ensure_semantic_model(
             let _ = progress_tx.send(SemanticModelEvent::NeedsConsent).await;
         }
         ModelState::NotInstalled | ModelState::VerificationFailed { .. } => {
-            // Start background download (consent already granted via CLI or TUI prompt)
+            // Historical design: TUI-triggered background download.
+            // Current contract: do not start this from TUI/search/index paths.
             let _ = progress_tx.send(SemanticModelEvent::DownloadStarted).await;
 
             match manager.download_model().await {
@@ -583,9 +591,14 @@ cass status --json | jq '.semantic_model'
 # → { "state": "ready", "embedder": "minilm-384" }
 ```
 
-Environment variable to disable auto-download:
+Historical environment variable from the superseded auto-download design:
 ```bash
 export CASS_SEMANTIC_AUTODOWNLOAD=false
+```
+
+Current air-gapped install command:
+```bash
+cass models install --model all-minilm-l6-v2 --from-file /path/to/model-dir --json
 ```
 
 ---
@@ -764,7 +777,7 @@ impl Embedder for HashEmbedder {
 }
 ```
 
-**Why hash as fallback**: Hash embeddings provide a reasonable approximation while the ML model downloads:
+**Why hash as fallback**: Hash embeddings can provide an explicit approximate mode when the ML model is absent:
 - Instantaneous (no model loading)
 - Deterministic (reproducible)
 - Zero network dependency
@@ -780,7 +793,7 @@ impl Embedder for HashEmbedder {
 | Embedder | Type | Dimension | Speed | Quality | Use Case |
 |----------|------|-----------|-------|---------|----------|
 | **MiniLM (default)** | Real ML | 384 | ~15ms | Excellent | Primary - after download |
-| **Hash (fallback)** | Approximate | 384 | <1ms | Fair | Temporary - during download |
+| **Hash (fallback)** | Approximate | 384 | <1ms | Fair | Explicit fallback when selected |
 
 **Alternative Models** (can be configured via env var):
 | Model | Dimension | Size | Speed | Quality |
@@ -794,10 +807,10 @@ impl Embedder for HashEmbedder {
 
 Environment variables for advanced users:
 ```bash
-# Disable auto-download (use hash-only mode)
+# Historical no-op from superseded auto-download design; prefer explicit install or hash mode.
 CASS_SEMANTIC_AUTODOWNLOAD=false
 
-# Use a different model (requires manual download or will auto-download)
+# Use a different model after explicit install
 CASS_SEMANTIC_MODEL=BGESmallENV15
 
 # Force hash-only mode (no ML)
@@ -1535,8 +1548,8 @@ cass status --json
     "semantic_search",
     "hybrid_search",
     "rrf_fusion",
-    "model_auto_download",
-    "consent_gated_download",
+    "explicit_model_install",
+    "offline_model_install",
     ...
   ],
   "embedders": {
@@ -1617,10 +1630,10 @@ Like beads_viewer, build semantic index asynchronously:
 - [ ] Create `src/search/embedder.rs` with `Embedder` trait
 - [ ] Implement `HashEmbedder` (fallback)
 - [ ] Implement `FastEmbedder` (primary ML embedder)
-- [ ] Create `src/search/model_manager.rs` for auto-download
+- [ ] Create `src/search/model_manager.rs` for explicit install/verify/status
 - [ ] Add SHA256 verification for model files
-- [ ] Background download with progress reporting
-- [ ] Graceful fallback to hash during download
+- [ ] Explicit install with progress reporting
+- [ ] Graceful lexical/hash fallback while model is absent
 
 ### Phase 2: Vector Index & Storage
 **Persistent vector storage**
@@ -1690,7 +1703,7 @@ src/
 │   ├── tantivy.rs          # Existing (unchanged)
 │   ├── embedder.rs         # NEW: Embedder trait + HashEmbedder
 │   ├── fastembed.rs        # NEW: FastEmbedder (MiniLM integration)
-│   ├── model_manager.rs    # NEW: Auto-download, SHA256 verify, state machine
+│   ├── model_manager.rs    # NEW: Explicit install, SHA256 verify, state machine
 │   ├── vector_index.rs     # NEW: VectorIndex + .cvvi binary format
 │   └── rrf.rs              # NEW: Reciprocal Rank Fusion implementation
 ├── indexer/
@@ -1703,7 +1716,7 @@ src/
 
 Data directory (~/.local/share/coding-agent-search/):
 ├── models/
-│   └── all-MiniLM-L6-v2/   # Auto-downloaded ML model
+│   └── all-MiniLM-L6-v2/   # Explicitly installed ML model
 │       ├── model.onnx
 │       ├── tokenizer.json
 │       ├── config.json
@@ -1842,7 +1855,7 @@ fn bench_canonicalize_long_message(b: &mut Bencher) { ... }
 
 ### Q2: Should we pre-download the model on `cass index`?
 
-**Option A**: Only download when TUI starts (current plan)
+**Option A**: Only download when TUI starts (superseded historical plan)
 - Pro: CLI-only users don't download unnecessarily
 - Con: First TUI launch has download delay
 
@@ -1850,7 +1863,8 @@ fn bench_canonicalize_long_message(b: &mut Bencher) { ... }
 - Pro: Everything ready when TUI opens
 - Con: Slower initial index, larger scope for index command
 
-**Leaning**: Option A, but could add `cass index --download-model` for users who want to pre-download.
+**Current outcome**: no TUI or index-triggered download. Users pre-provision
+with `cass models install` or `cass models install --from-file <dir>`.
 
 ### Q3: RRF constant (k) value?
 
@@ -1884,8 +1898,8 @@ Should users be able to switch between different models (e.g., MiniLM vs BGE)?
 
 This plan adds **real semantic search** and **hybrid search with RRF reranking** to cass with:
 
-1. **Auto-download ML model** on first run (~23MB MiniLM, zero-config)
-2. **Graceful degradation** to hash embeddings while model downloads
+1. **Explicitly install ML model** on operator request (~23MB MiniLM in this historical estimate)
+2. **Graceful degradation** to lexical/hash behavior while model is absent
 3. **Seamless upgrade** when model becomes available
 4. **RRF fusion** for hybrid search (industry-standard k=60)
 5. **Alt+S keyboard shortcut** to cycle modes (LEX → SEM → HYB)
@@ -1897,10 +1911,10 @@ This plan adds **real semantic search** and **hybrid search with RRF reranking**
 
 | Aspect | beads_viewer (Go) | cass (Rust) |
 |--------|-------------------|-------------|
-| Default embedder | Hash (only impl) | MiniLM ML (auto-download) |
+| Default embedder | Hash (only impl) | MiniLM ML (explicit install) |
 | ML support | Planned, not implemented | Built-in via fastembed |
 | Python dependency | Planned for sentence-transformers | None (pure Rust + ONNX) |
-| Model management | Manual | Automatic with verification |
+| Model management | Manual | Explicit install + verification |
 
 The implementation goes beyond beads_viewer's current capabilities by shipping with **real semantic embeddings out of the box**, while maintaining the same graceful degradation pattern for offline/constrained environments.
 
