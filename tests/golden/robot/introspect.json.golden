@@ -27838,31 +27838,188 @@
         },
         "query": {
           "type": "object",
-          "additionalProperties": true
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "normalized": {
+              "type": "string"
+            },
+            "filters": {
+              "type": "object"
+            }
+          }
         },
         "_meta": {
           "type": "object",
-          "additionalProperties": true
+          "properties": {
+            "request_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "generated_at_ms": {
+              "type": "integer"
+            },
+            "elapsed_ms": {
+              "type": "integer"
+            },
+            "partial": {
+              "type": "boolean"
+            },
+            "format": {
+              "type": "string"
+            },
+            "warnings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
         },
         "limits": {
           "type": "object",
-          "additionalProperties": true
+          "properties": {
+            "max_tokens": {
+              "type": "integer"
+            },
+            "estimated_tokens": {
+              "type": "integer"
+            },
+            "max_sessions": {
+              "type": "integer"
+            },
+            "max_evidence": {
+              "type": "integer"
+            },
+            "context_lines": {
+              "type": "integer"
+            },
+            "max_excerpt_chars": {
+              "type": "integer"
+            },
+            "field_mask": {
+              "type": "string"
+            }
+          }
         },
         "realized": {
           "type": "object",
-          "additionalProperties": true
+          "properties": {
+            "search_mode": {
+              "type": "string"
+            },
+            "fallback_mode": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "semantic_joined": {
+              "type": "boolean"
+            },
+            "candidate_count": {
+              "type": "integer"
+            },
+            "selected_evidence_count": {
+              "type": "integer"
+            },
+            "selected_session_count": {
+              "type": "integer"
+            }
+          }
         },
         "health": {
           "type": "object",
-          "additionalProperties": true
+          "properties": {
+            "healthy": {
+              "type": "boolean"
+            },
+            "recommended_action": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "index_state": {
+              "type": "string"
+            },
+            "index_generation": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "lexical_readiness": {
+              "type": "string"
+            },
+            "semantic_state": {
+              "type": "string"
+            },
+            "active_rebuild": {
+              "type": "boolean"
+            },
+            "lock_state": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "missing_database": {
+              "type": "boolean"
+            },
+            "source_sync_gaps": {
+              "type": "array"
+            },
+            "source_readiness": {
+              "type": "array"
+            }
+          }
         },
         "freshness": {
           "type": "object",
-          "additionalProperties": true
+          "properties": {
+            "policy": {
+              "type": "string"
+            },
+            "window_seconds": {
+              "type": "integer"
+            },
+            "newest_evidence_at_ms": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "oldest_evidence_at_ms": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "stale_evidence_count": {
+              "type": "integer"
+            }
+          }
         },
         "pack": {
           "type": "object",
-          "additionalProperties": true
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "answer_outline": {
+              "type": "array"
+            },
+            "source_summary": {
+              "type": "array"
+            },
+            "handoff": {
+              "type": "array"
+            }
+          }
         },
         "evidence": {
           "type": "array",
@@ -27873,11 +28030,34 @@
         },
         "omitted": {
           "type": "object",
-          "additionalProperties": true
+          "properties": {
+            "count": {
+              "type": "integer"
+            },
+            "items": {
+              "type": "array"
+            }
+          }
         },
         "privacy": {
           "type": "object",
-          "additionalProperties": true
+          "properties": {
+            "redaction_policy": {
+              "type": "string"
+            },
+            "redaction_applied": {
+              "type": "boolean"
+            },
+            "sensitive_output": {
+              "type": "boolean"
+            },
+            "skill_content_included": {
+              "type": "boolean"
+            },
+            "redaction_counts": {
+              "type": "object"
+            }
+          }
         },
         "warnings": {
           "type": "array",

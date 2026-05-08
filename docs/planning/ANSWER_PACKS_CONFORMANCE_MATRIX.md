@@ -73,7 +73,7 @@ are clear.
 | AP-CMD-007 | MUST | Input Flags | `--sessions-from <path|->` reads one candidate session path per line, including stdin. | No-mock integration fixture with file and stdin variants. | Planned |
 | AP-CMD-008 | MUST | Input Flags | Pack limits enforce documented minimums and maximums. | Table-driven invalid-limit tests. | Planned |
 | AP-CMD-009 | MUST | Input Flags | `--redaction off` marks `privacy.redaction_policy="off"` and `sensitive_output=true`. | Privacy unit test and JSON golden. | Planned |
-| AP-CMD-010 | MUST | Input Flags | `--require-evidence` turns an empty pack into `pack-no-evidence`. | CLI fixture with no hits. | Planned |
+| AP-CMD-010 | MUST | Input Flags | `--require-evidence` turns an empty pack into `err.kind="not-found"` with code 13. | CLI fixture with no hits. | Planned |
 | AP-CMD-011 | MUST | Input Flags | `--explain-selection` exposes score components and omission diagnostics. | Planner unit test plus full field-mask golden. | Planned |
 | AP-CMD-012 | MUST | Input Flags | `--refresh` runs only the existing safe incremental refresh path before packing. | CLI integration fixture that snapshots index/quarantine state and verifies no hidden repair path runs. | Planned |
 | AP-CMD-013 | MUST | Input Flags | `--timeout <ms>` marks usable partial packs as partial and returns timeout/partial errors truthfully when no usable pack can be emitted. | Timeout fixture covering partial success and no-pack failure. | Planned |

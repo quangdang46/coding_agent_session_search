@@ -7895,13 +7895,15 @@ fn print_robot_help(wrap: WrapConfig) -> CliResult<()> {
         "===============================",
         "",
         "QUICKSTART (for AI agents):",
+        "  cass status --json                   # Readiness before trusted handoffs",
         "  cass search \"your query\" --robot     # Search with JSON output",
         "  cass pack \"your query\" --robot --max-tokens 12000  # Cited handoff pack",
-        "  cass search \"bug fix\" --today        # Search today's sessions only",
-        "  cass search \"api\" --week --agent codex  # Last 7 days, codex only",
+        "  cass pack \"your query\" --robot --max-tokens 4000 --max-evidence 8  # Tight paste budget",
+        "  cass search \"bug fix\" --today --robot  # Search today's sessions only",
+        "  cass search \"api\" --week --agent codex --robot  # Last 7 days, codex only",
         "  cass stats --json                    # Get index statistics",
         "  cass sessions --current --json       # Find current workspace session",
-        "  cass view /path/file.jsonl -n 42    # View file at line 42",
+        "  cass view /path/file.jsonl -n 42 --json  # View file at line 42",
         "  cass robot-docs commands            # Machine-readable command list",
         "  cass --robot-docs=commands          # Also accepted (auto-normalized)",
         "",
@@ -7910,9 +7912,11 @@ fn print_robot_help(wrap: WrapConfig) -> CliResult<()> {
         "  --since YYYY-MM-DD | --until YYYY-MM-DD",
         "",
         "WORKFLOW:",
-        "  1. cass index --full          # First-time setup (index all sessions)",
+        "  1. cass index --full --json   # First-time setup (index all sessions)",
         "  2. cass search \"query\" --robot  # Search with JSON output",
-        "  3. cass view <source_path> -n <line>  # Follow up on search result",
+        "  3. cass pack \"query\" --robot --max-tokens 12000  # Cited handoff evidence",
+        "  4. cass view <source_path> -n <line> --json  # Follow up on a cited result",
+        "  Pack warnings expose freshness, semantic fallback, and privacy redactions.",
         "",
         "OUTPUT:",
         "  --robot | --json   Machine-readable JSON output (auto-quiet enabled)",
@@ -7960,8 +7964,14 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "    Build a deterministic, cited answer pack for agent handoffs without external summarization.".to_string(),
             "    --sessions-from FILE|-  Restrict evidence to newline-delimited session paths; '-' reads stdin.".to_string(),
             "    --fields minimal|summary|all,F1,F2  Select top-level pack fields for JSON/TOON output.".to_string(),
+            "    --max-sessions N  Cap how many sessions can contribute evidence to the pack.".to_string(),
+            "    --max-evidence N  Cap cited evidence items selected into the pack.".to_string(),
+            "    --max-excerpt-chars N  Bound each excerpt before token estimation.".to_string(),
             "    --freshness-policy prefer-recent|strict|allow-stale  Evidence freshness policy.".to_string(),
+            "    --freshness-window-seconds N  Freshness window used for stale-evidence warnings and strict filtering.".to_string(),
             "    --require-evidence  Return a JSON error envelope instead of an empty successful pack.".to_string(),
+            "    --explain-selection  Include score components and omission diagnostics for audits.".to_string(),
+            "    Output includes health, freshness, privacy, evidence, omitted, and warnings fields.".to_string(),
             "  cass stats [--json] [--data-dir DIR]".to_string(),
             "  cass status [--json] [--stale-threshold N] [--data-dir DIR]".to_string(),
             "  cass diag [--json] [--verbose] [--data-dir DIR]".to_string(),
@@ -8084,6 +8094,11 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "  Logging: INFO auto-suppressed in robot mode; add -v to re-enable".to_string(),
             "  Search contract: SQLite is source of truth; lexical is the required self-healing fast path; semantic is opportunistic enrichment.".to_string(),
             "  Pack contract: `cass pack \"query\" --robot` returns extractive, cited handoff evidence selected from search results; it does not call an external model or mutate source logs.".to_string(),
+            "  Pack vs search: use search to explore/paginate/aggregate candidates; use pack once you need a bounded handoff artifact.".to_string(),
+            "  Pack vs export-html: export-html creates a complete browsable session archive; pack creates a token-budgeted evidence bundle.".to_string(),
+            "  Pack vs doctor/status: status/health report readiness before a handoff; doctor diagnoses or repairs derived assets and is not a summarizer.".to_string(),
+            "  Pack warnings: inspect health, freshness, privacy, and warnings for semantic_fallback_lexical, privacy_redactions_applied, and no_evidence_found before copying output; stale evidence is structural via freshness.stale_evidence_count.".to_string(),
+            "  Pack budgets: tune --max-tokens, --max-evidence, --max-sessions, --max-excerpt-chars, and --fields summary/minimal to fit the recipient context.".to_string(),
             "  Default search: hybrid-preferred. With --robot-meta, inspect requested_search_mode, search_mode, semantic_refinement, fallback_tier, and fallback_reason.".to_string(),
             "  Readiness: cass health/status JSON recommended_action is authoritative; lexical-only fallback can be normal while semantic assets catch up.".to_string(),
             "  Doctor outcomes: branch on doctor.operation_outcome.kind (kebab-case) before prose; exit_code_kind says whether the outcome is success, health-failure, usage-error, lock-busy, or repair-failure.".to_string(),
@@ -8121,6 +8136,11 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "# Deterministic handoff pack for another agent".to_string(),
             "  cass pack \"why did checkout fail\" --robot --max-tokens 12000 --limit 40".to_string(),
             "  cass search \"checkout\" --robot-format sessions | cass pack \"checkout failure\" --robot --sessions-from -".to_string(),
+            "  cass pack \"checkout timeout after redirect\" --robot --freshness-policy strict --freshness-window-seconds 604800 --require-evidence".to_string(),
+            "  cass pack \"checkout timeout after redirect\" --robot --max-tokens 4000 --max-evidence 8 --max-sessions 3 --max-excerpt-chars 600".to_string(),
+            "  cass pack \"checkout timeout after redirect\" --robot --fields summary,health,freshness,privacy,warnings --max-tokens 4000".to_string(),
+            "  # Read warnings[] plus health/freshness/privacy before copying a pack into another prompt.".to_string(),
+            "  # Contributor check for docs/goldens: rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_cass_answer_pack_docs cargo test --test golden_robot_docs".to_string(),
             "# Token-budgeted search with cursor + request-id".to_string(),
             "  cass search \"error\" --robot --max-tokens 200 --request-id run-1 --limit 2 --robot-meta".to_string(),
             "  cass search \"error\" --robot --cursor <_meta.next_cursor> --request-id run-1b --robot-meta".to_string(),
@@ -61801,13 +61821,104 @@ fn response_schema_search() -> serde_json::Value {
 fn response_schema_pack() -> serde_json::Value {
     response_schema_object([
         ("schema_version", serde_json::json!({ "type": "string" })),
-        ("query", response_schema_opaque_object()),
-        ("_meta", response_schema_opaque_object()),
-        ("limits", response_schema_opaque_object()),
-        ("realized", response_schema_opaque_object()),
-        ("health", response_schema_opaque_object()),
-        ("freshness", response_schema_opaque_object()),
-        ("pack", response_schema_opaque_object()),
+        (
+            "query",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string" },
+                    "normalized": { "type": "string" },
+                    "filters": { "type": "object" }
+                }
+            }),
+        ),
+        (
+            "_meta",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "request_id": { "type": ["string", "null"] },
+                    "generated_at_ms": { "type": "integer" },
+                    "elapsed_ms": { "type": "integer" },
+                    "partial": { "type": "boolean" },
+                    "format": { "type": "string" },
+                    "warnings": { "type": "array", "items": { "type": "string" } }
+                }
+            }),
+        ),
+        (
+            "limits",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "max_tokens": { "type": "integer" },
+                    "estimated_tokens": { "type": "integer" },
+                    "max_sessions": { "type": "integer" },
+                    "max_evidence": { "type": "integer" },
+                    "context_lines": { "type": "integer" },
+                    "max_excerpt_chars": { "type": "integer" },
+                    "field_mask": { "type": "string" }
+                }
+            }),
+        ),
+        (
+            "realized",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "search_mode": { "type": "string" },
+                    "fallback_mode": { "type": ["string", "null"] },
+                    "semantic_joined": { "type": "boolean" },
+                    "candidate_count": { "type": "integer" },
+                    "selected_evidence_count": { "type": "integer" },
+                    "selected_session_count": { "type": "integer" }
+                }
+            }),
+        ),
+        (
+            "health",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "healthy": { "type": "boolean" },
+                    "recommended_action": { "type": ["string", "null"] },
+                    "index_state": { "type": "string" },
+                    "index_generation": { "type": ["string", "null"] },
+                    "lexical_readiness": { "type": "string" },
+                    "semantic_state": { "type": "string" },
+                    "active_rebuild": { "type": "boolean" },
+                    "lock_state": { "type": ["string", "null"] },
+                    "missing_database": { "type": "boolean" },
+                    "source_sync_gaps": { "type": "array" },
+                    "source_readiness": { "type": "array" }
+                }
+            }),
+        ),
+        (
+            "freshness",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "policy": { "type": "string" },
+                    "window_seconds": { "type": "integer" },
+                    "newest_evidence_at_ms": { "type": ["integer", "null"] },
+                    "oldest_evidence_at_ms": { "type": ["integer", "null"] },
+                    "stale_evidence_count": { "type": "integer" }
+                }
+            }),
+        ),
+        (
+            "pack",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string" },
+                    "answer_outline": { "type": "array" },
+                    "source_summary": { "type": "array" },
+                    "handoff": { "type": "array" }
+                }
+            }),
+        ),
         (
             "evidence",
             serde_json::json!({
@@ -61818,8 +61929,29 @@ fn response_schema_pack() -> serde_json::Value {
                 }
             }),
         ),
-        ("omitted", response_schema_opaque_object()),
-        ("privacy", response_schema_opaque_object()),
+        (
+            "omitted",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "count": { "type": "integer" },
+                    "items": { "type": "array" }
+                }
+            }),
+        ),
+        (
+            "privacy",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "redaction_policy": { "type": "string" },
+                    "redaction_applied": { "type": "boolean" },
+                    "sensitive_output": { "type": "boolean" },
+                    "skill_content_included": { "type": "boolean" },
+                    "redaction_counts": { "type": "object" }
+                }
+            }),
+        ),
         (
             "warnings",
             serde_json::json!({

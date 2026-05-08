@@ -509,7 +509,7 @@ Consumers must branch on `err.kind`, not just numeric code.
 | `pack-unsupported-format` | 2 | false | `--robot-format sessions` or unsupported display format. |
 | `missing-db` | 3 | true | Database is absent. |
 | `missing-index` | 3 | true | Lexical index is absent and cannot be refreshed. |
-| `pack-no-evidence` | 3 | false | No evidence and `--require-evidence` is set. |
+| `not-found` | 13 | false | No evidence and `--require-evidence` is set. |
 | `lock-busy` | 7 | true | Existing lock/busy condition. |
 | `partial-result` | 8 | true | Timeout produced partial evidence. |
 | `timeout` | 10 | true | Timeout before any usable pack could be emitted. |

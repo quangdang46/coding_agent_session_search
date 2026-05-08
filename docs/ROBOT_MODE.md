@@ -3,8 +3,9 @@
 Updated: 2026-04-22
 
 ## TL;DR (copy/paste)
-- First index: `cass index --full`
+- First index: `cass index --full --json`
 - Search JSON: `cass search "query" --robot`
+- Handoff pack: `cass pack "query" --robot --max-tokens 12000 --limit 40`
 - Default search: hybrid-preferred. Lexical is required; semantic refinement joins when ready.
 - Paginate: use `_meta.next_cursor` → `cass search "query" --robot --cursor <value>`
 - Budget tokens: `--max-tokens 200 --robot-meta`
@@ -17,6 +18,7 @@ Updated: 2026-04-22
 | Need | Command |
 | --- | --- |
 | Search with JSON | `cass search "panic" --robot` |
+| Build cited handoff evidence | `cass pack "panic root cause" --robot --max-tokens 12000 --limit 40` |
 | Search today | `cass search "auth" --robot --today` |
 | Wildcards | `cass search "http*" --robot` |
 | Aggregations | `cass search "error" --robot --aggregate agent,workspace` |
@@ -41,6 +43,13 @@ Updated: 2026-04-22
   - `_meta` (with `--robot-meta`): `elapsed_ms, search_mode, requested_search_mode, mode_defaulted, semantic_refinement, fallback_tier, fallback_reason, wildcard_fallback, cache_stats{hits,misses,shortfall}, tokens_estimated, max_tokens, next_cursor, hits_clamped, state{index, database}, index_freshness`
   - `_warning` present when index is stale (age/pending sessions)
   - `aggregations` present when `--aggregate` is used
+- Pack:
+  - top-level: `schema_version, query, _meta, limits, realized, health, freshness, pack, evidence, omitted, privacy, warnings`
+  - `evidence[]`: redacted excerpt, citation, selection reason/score, token cost, roles, matched terms, and redactions
+  - `health`: lexical readiness, semantic state, active rebuild/lock/database flags, source sync gaps, and recommended action
+  - `freshness`: policy, window, newest/oldest evidence times, and stale evidence count
+  - `privacy`: redaction policy, whether redaction was applied, sensitive-output flag, skill-content flag, and redaction counts
+  - `warnings`: machine-readable strings such as `privacy_redactions_applied`, `semantic_fallback_lexical`, or `no_evidence_found`; selected evidence age is structural via `freshness.stale_evidence_count`
 - State/Status: `status, healthy, initialized, recommended_action, index{exists,fresh,last_indexed_at,age_seconds,stale}, database{exists,conversations,messages,path}, pending{sessions,watch_active}, rebuild{active,...}, semantic{status,availability,can_search,fallback_mode,hint}, _meta{timestamp,data_dir,db_path}`
 - Capabilities: `crate_version, api_version, contract_version, documentation_url, features[], connectors[], limits{max_limit,max_content_length,max_fields,max_agg_buckets}`
 
@@ -53,6 +62,9 @@ Updated: 2026-04-22
 - Aggregations: `--aggregate agent,workspace,date,match_type`
 - Output display (humans): `--display table|lines|markdown`
 - Progress: `--progress bars|plain|none|auto`; Color: `--color auto|always|never`
+- Pack budgets: `cass pack "query" --robot --max-tokens N --max-evidence N --max-sessions N --max-excerpt-chars N`
+- Pack freshness: `--freshness-policy prefer-recent|strict|allow-stale --freshness-window-seconds N`
+- Pack input narrowing: `--sessions-from FILE|-`, `--source NAME`, `--agent NAME`, `--workspace DIR`, time filters
 
 ## Best practices for agents
 - Always pass `--robot`/`--json` and `--robot-meta` when you care about freshness or pagination.
@@ -63,6 +75,58 @@ Updated: 2026-04-22
 - Include `--request-id` to correlate retries and logs.
 - Clamp limits to published caps (see `cass capabilities --json`).
 - Prefer `--max-tokens` to keep outputs small in LLM loops.
+- Use `cass pack ... --robot` when another agent or human needs a cited handoff. Do not run bare `cass` in automation.
+- Read pack `health`, `freshness`, `privacy`, and `warnings` before copying evidence into another tool. Treat redaction and stale-evidence warnings as branchable contract fields.
+
+## Pack handoff workflow
+
+Use `pack` after you know the question you want to hand off. It is extractive
+and cited: it selects evidence from the indexed archive, redacts sensitive text,
+reports freshness/readiness, and does not call an external summarizer or mutate
+source logs.
+
+Copy-paste examples:
+
+```bash
+# 1. Pre-flight readiness for freshness-sensitive handoffs
+cass status --json
+
+# 2. Broad exploration
+cass search "checkout timeout after redirect" --robot --robot-meta --fields summary --limit 20
+
+# 3. Cited handoff pack
+cass pack "checkout timeout after redirect" --robot --max-tokens 12000 --limit 40
+
+# 4. Strict freshness window; empty or stale evidence is an error when required
+cass pack "checkout timeout after redirect" --robot \
+  --freshness-policy strict --freshness-window-seconds 604800 --require-evidence
+
+# 5. Tight paste budget for another agent
+cass pack "checkout timeout after redirect" --robot \
+  --max-tokens 4000 --max-evidence 8 --max-sessions 3 --max-excerpt-chars 600
+
+# 6. Privacy-focused summary envelope
+cass pack "checkout timeout after redirect" --robot \
+  --fields summary,health,freshness,privacy,warnings --max-tokens 4000
+
+# 7. Search first, then restrict pack evidence to those sessions
+cass search "checkout timeout" --robot-format sessions \
+  | cass pack "checkout timeout root cause" --robot --sessions-from -
+```
+
+Pack vs search/export-html/doctor/status:
+- Use `search` to discover candidate sessions, paginate, aggregate, or inspect broad result sets.
+- Use `pack` to produce a bounded, cited evidence bundle for a handoff prompt or operator note.
+- Use `export-html` when you need a complete browsable session artifact; it is not token-budgeted.
+- Use `status`/`health` to decide whether freshness and fallback states are trustworthy before handoff.
+- Use `doctor` for diagnostics and safe repair workflows; it is not a summarization or handoff command.
+
+Contributor verification for robot-doc changes:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_cass_answer_pack_docs \
+  cargo test --test golden_robot_docs
+```
 
 ## TUI drill-in contract (operator reference)
 - `Enter` with a selected hit opens the contextual detail modal on the Messages tab.
@@ -101,6 +165,10 @@ cass search "panic" --robot --fields minimal --robot-meta \
 - “not initialized” → run `cass index --full` once
 - Stale warning → read `recommended_action`; wait if rebuild is active, otherwise refresh with `cass index`
 - Hybrid returned lexical → check `_meta.fallback_reason`; this is normal when semantic assets are unavailable or backfilling
+- Pack warning `privacy_redactions_applied` → inspect `privacy.redaction_counts` before copying the pack; the cited excerpt text has been redacted.
+- Nonzero `freshness.stale_evidence_count` → check `health.recommended_action`, rerun with a tighter `--freshness-policy strict`, or refresh/index if status recommends it.
+- Pack warning `semantic_fallback_lexical` → evidence is lexical-only; install/backfill semantic assets only if semantic recall is required for this handoff.
+- `--require-evidence` with no matches → JSON error envelope with `err.kind="not-found"`; broaden the query or remove the requirement.
 - Empty results but expected matches → try `--aggregate agent,workspace` to confirm ingest; check `watch_state.json` pending
 - JSON parsing errors → use `--robot-format compact` to avoid pretty whitespace issues
 

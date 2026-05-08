@@ -2913,15 +2913,64 @@ schemas: (auto-generated from contract)
     - status: string
   pack:
     - _meta: object
+      - elapsed_ms: integer
+      - format: string
+      - generated_at_ms: integer
+      - partial: boolean
+      - request_id: ?
+      - warnings: array
     - evidence: array
     - freshness: object
+      - newest_evidence_at_ms: ?
+      - oldest_evidence_at_ms: ?
+      - policy: string
+      - stale_evidence_count: integer
+      - window_seconds: integer
     - health: object
+      - active_rebuild: boolean
+      - healthy: boolean
+      - index_generation: ?
+      - index_state: string
+      - lexical_readiness: string
+      - lock_state: ?
+      - missing_database: boolean
+      - recommended_action: ?
+      - semantic_state: string
+      - source_readiness: array
+      - source_sync_gaps: array
     - limits: object
+      - context_lines: integer
+      - estimated_tokens: integer
+      - field_mask: string
+      - max_evidence: integer
+      - max_excerpt_chars: integer
+      - max_sessions: integer
+      - max_tokens: integer
     - omitted: object
+      - count: integer
+      - items: array
     - pack: object
+      - answer_outline: array
+      - handoff: array
+      - source_summary: array
+      - title: string
     - privacy: object
+      - redaction_applied: boolean
+      - redaction_counts: object
+      - redaction_policy: string
+      - sensitive_output: boolean
+      - skill_content_included: boolean
     - query: object
+      - filters: object
+      - normalized: string
+      - text: string
     - realized: object
+      - candidate_count: integer
+      - fallback_mode: ?
+      - search_mode: string
+      - selected_evidence_count: integer
+      - selected_session_count: integer
+      - semantic_joined: boolean
     - schema_version: string
     - warnings: array
   search:

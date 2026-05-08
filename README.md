@@ -785,9 +785,36 @@ cass search "error" --robot --robot-meta
 
 # Deterministic answer pack for handoff prompts
 cass pack "why did checkout fail" --robot --max-tokens 12000 --limit 40
+
+# Freshness-sensitive pack: fail if selected evidence is outside the window
+cass pack "checkout timeout after redirect" --robot \
+  --freshness-policy strict --freshness-window-seconds 604800 \
+  --max-tokens 12000 --require-evidence
+
+# Token-budgeted pack for pasting into another agent
+cass pack "checkout timeout after redirect" --robot \
+  --max-tokens 4000 --max-evidence 8 --max-sessions 3 --max-excerpt-chars 600
+
+# Pipeline from broad search to a bounded cited handoff
+cass search "checkout timeout" --robot-format sessions \
+  | cass pack "checkout timeout root cause" --robot --sessions-from -
 ```
 
 **Design principle**: stdout contains only parseable JSON data; all diagnostics, warnings, and progress go to stderr.
+
+Use `search` when you are still exploring candidate sessions. Use `pack` when
+you need a compact, cited, extractive artifact to hand to another agent or a
+human operator. Use `status`/`health` before trusting freshness-sensitive output,
+and use `doctor` only for diagnostics or safe repair workflows. Use
+`export-html` when you need a full browsable session archive; packs are
+token-budgeted evidence bundles, not full exports and not external
+summarization.
+
+Pack robot output includes `health`, `freshness`, `privacy`, and `warnings`.
+Warnings such as `privacy_redactions_applied`, `semantic_fallback_lexical`,
+or `no_evidence_found` are data, not prose; branch on the JSON fields before
+copying the pack into another tool. Stale selected evidence is structural:
+inspect `freshness.stale_evidence_count`.
 
 ### Token Budget Management
 
@@ -804,9 +831,20 @@ LLMs have context limits. `cass` provides multiple levers to control output size
 | `cass pack "query" --robot` | Build a cited handoff pack from selected search evidence |
 | `pack --max-tokens N` | Set the pack planner's soft budget |
 | `pack --max-evidence N` | Cap evidence items selected into the pack |
+| `pack --max-sessions N` | Limit how many sessions can contribute evidence |
+| `pack --max-excerpt-chars N` | Shorten each cited excerpt before token estimation |
+| `pack --fields summary` | Return top-level summary fields for a smaller JSON envelope |
+| `pack --freshness-policy strict --freshness-window-seconds N` | Reject stale evidence instead of silently mixing it into a pack |
 | `pack --sessions-from FILE` | Restrict pack evidence to newline-delimited session paths; use `-` for stdin |
 
 Truncated fields include a `*_truncated: true` indicator so agents know when they're seeing partial content.
+
+Contributor verification for docs or contract changes should use `rch`, for example:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_cass_answer_pack_docs \
+  cargo test --test golden_robot_docs
+```
 
 ### Error Handling for Agents
 
@@ -1102,13 +1140,16 @@ cass introspect --json
  Quick Start
 
  # Check if index is healthy (exit 0=ok, 1=run index first)
- cass health
+ cass health --json
 
  # Search across all agent histories
  cass search "authentication error" --robot --limit 5
 
  # Build a cited handoff pack from search evidence
  cass pack "authentication error root cause" --robot --max-tokens 12000 --limit 40
+
+ # Tight handoff budget with freshness and privacy metadata
+ cass pack "authentication error root cause" --robot --max-tokens 4000 --max-evidence 8 --fields summary
 
  # View a specific result (from search output)
  cass view /path/to/session.jsonl -n 42 --json
@@ -1124,7 +1165,8 @@ cass introspect --json
 
  - Cross-agent knowledge: Find solutions from Codex when using Claude, or vice versa
  - Forgiving syntax: Typos and wrong flags are auto-corrected with teaching notes
- - Token-efficient: --fields minimal returns only essential data
+ - Token-efficient: --fields minimal returns only essential data; pack budgets cite only selected evidence
+ - Copy-safe handoffs: pack warnings include freshness and privacy/redaction status
 
  Key Flags
 
@@ -2373,6 +2415,8 @@ cass index [--full] [--watch] [--data-dir DIR] [--idempotency-key KEY]
 cass search "query" --robot --limit 5 [--timeout 5000] [--explain] [--dry-run]
 cass search "error" --robot --aggregate agent,workspace --fields minimal
 cass pack "query" --robot --max-tokens 12000 [--limit 40] [--sessions-from FILE|-]
+cass pack "query" --robot --freshness-policy strict --freshness-window-seconds 604800 --require-evidence
+cass pack "query" --robot --max-tokens 4000 --max-evidence 8 --max-sessions 3 --max-excerpt-chars 600
 
 # Inspection & Health
 cass status --json                    # Quick health snapshot
@@ -2407,7 +2451,7 @@ cass completions bash > ~/.bash_completion.d/cass
 | `index --full` | Discover sessions and refresh the canonical DB plus derived search assets |
 | `index --watch` | Daemon mode: watch for file changes, reindex automatically |
 | `search --robot` | JSON output for automation pipelines |
-| `pack --robot` | Deterministic cited answer packs for agent handoffs |
+| `pack --robot` | Deterministic cited answer packs for agent/human handoffs; reports health, freshness, privacy, and warnings |
 | `status` / `state` | Health snapshot: index freshness, DB stats, recommended action |
 | `health` | Minimal health check (<50ms), exit 0=healthy, 1=unhealthy |
 | `capabilities` | Discover features, versions, limits (for agent introspection) |

@@ -9,7 +9,7 @@
 //! ## Regenerate
 //!
 //! ```bash
-//! UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-golden-target cargo test --test golden_robot_docs
+//! UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_cass_golden_docs cargo test --test golden_robot_docs
 //! git diff tests/golden/robot_docs/
 //! ```
 
@@ -57,7 +57,7 @@ fn assert_golden(name: &str, actual: &str) {
     let expected = std::fs::read_to_string(&golden_path).unwrap_or_else(|err| {
         panic!(
             "Golden missing: {}\n{err}\n\n\
-             UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-golden-target cargo test --test golden_robot_docs\n\
+             UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=${{TMPDIR:-/tmp}}/rch_target_cass_golden_docs cargo test --test golden_robot_docs\n\
              git diff tests/golden/ && git add tests/golden/",
             golden_path.display(),
         )
@@ -211,36 +211,129 @@ fn pack_robot_docs_contract_matrix_is_current() {
             &[
                 "cass pack <query> [--robot] [--max-tokens N] [--limit N]",
                 "--sessions-from FILE|-",
+                "--freshness-window-seconds N",
+                "--max-excerpt-chars N",
+                "--explain-selection",
             ][..],
         ),
         (
             "examples",
             examples.as_str(),
-            &["cass pack \"why did checkout fail\" --robot --max-tokens 12000 --limit 40"][..],
+            &[
+                "cass pack \"why did checkout fail\" --robot --max-tokens 12000 --limit 40",
+                "--freshness-policy strict --freshness-window-seconds 604800 --require-evidence",
+                "--max-tokens 4000 --max-evidence 8 --max-sessions 3 --max-excerpt-chars 600",
+                "--fields summary,health,freshness,privacy,warnings",
+                "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_cass_answer_pack_docs cargo test --test golden_robot_docs",
+            ][..],
         ),
         (
             "guide",
             guide.as_str(),
-            &["cass pack \"query\" --robot"][..],
+            &[
+                "cass pack \"query\" --robot",
+                "external model",
+                "Pack vs search",
+                "Pack vs export-html",
+                "Pack warnings",
+                "Pack budgets",
+            ][..],
         ),
         (
             "schemas",
             schemas.as_str(),
-            &["pack:", "schema_version:", "evidence:", "warnings:"][..],
+            &[
+                "pack:",
+                "schema_version:",
+                "evidence:",
+                "warnings:",
+                "stale_evidence_count:",
+                "redaction_applied:",
+                "max_excerpt_chars:",
+            ][..],
         ),
         (
             "robot_help",
             robot_help.as_str(),
             &[
                 "cass pack \"your query\" --robot --max-tokens 12000",
+                "cass status --json",
+                "Pack warnings expose freshness, semantic fallback, and privacy redactions.",
                 "Subcommands: search | pack | sessions",
             ][..],
         ),
     ] {
+        assert!(
+            !text.contains("stale_evidence_selected"),
+            "pack robot-docs contract documents nonexistent stale_evidence_selected warning in {surface}"
+        );
+
         for snippet in snippets {
             assert!(
                 text.contains(snippet),
                 "pack robot-docs contract missing `{snippet}` from {surface}"
+            );
+        }
+    }
+}
+
+#[test]
+fn answer_pack_workflow_docs_cover_agent_and_operator_paths() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let docs = [
+        (
+            "README.md",
+            std::fs::read_to_string(root.join("README.md")).expect("read README.md"),
+            &[
+                "cass pack \"checkout timeout after redirect\" --robot",
+                "--freshness-policy strict --freshness-window-seconds 604800",
+                "--max-tokens 4000 --max-evidence 8 --max-sessions 3 --max-excerpt-chars 600",
+                "privacy_redactions_applied",
+                "Use `search` when you are still exploring candidate sessions. Use `pack`",
+                "export-html",
+                "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_cass_answer_pack_docs",
+            ][..],
+        ),
+        (
+            "docs/ROBOT_MODE.md",
+            std::fs::read_to_string(root.join("docs/ROBOT_MODE.md"))
+                .expect("read docs/ROBOT_MODE.md"),
+            &[
+                "## Pack handoff workflow",
+                "Pack vs search/export-html/doctor/status",
+                "does not call an external summarizer",
+                "source logs.",
+                "privacy_redactions_applied",
+                "err.kind=\"not-found\"",
+                "Do not run bare `cass` in automation.",
+            ][..],
+        ),
+        (
+            "docs/planning/ANSWER_PACKS_CONTRACT.md",
+            std::fs::read_to_string(root.join("docs/planning/ANSWER_PACKS_CONTRACT.md"))
+                .expect("read docs/planning/ANSWER_PACKS_CONTRACT.md"),
+            &["| `not-found` | 13 | false | No evidence and `--require-evidence` is set. |"][..],
+        ),
+        (
+            "docs/planning/ANSWER_PACKS_CONFORMANCE_MATRIX.md",
+            std::fs::read_to_string(root.join("docs/planning/ANSWER_PACKS_CONFORMANCE_MATRIX.md"))
+                .expect("read docs/planning/ANSWER_PACKS_CONFORMANCE_MATRIX.md"),
+            &[
+                "`--require-evidence` turns an empty pack into `err.kind=\"not-found\"` with code 13.",
+            ][..],
+        ),
+    ];
+
+    for (surface, text, snippets) in docs {
+        assert!(
+            !text.contains("stale_evidence_selected"),
+            "answer-pack workflow docs document nonexistent stale_evidence_selected warning in {surface}"
+        );
+
+        for snippet in snippets {
+            assert!(
+                text.contains(snippet),
+                "answer-pack workflow docs missing `{snippet}` from {surface}"
             );
         }
     }
