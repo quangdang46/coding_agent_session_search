@@ -54,8 +54,7 @@ fn plans_view_navigation_constants_documented() {
     // The bead notes Plans has selectable rows. Assert the navigation row
     // count constant is present.
     assert!(
-        body.contains("selectable rows in the Plans view")
-            || body.contains("Plans view"),
+        body.contains("selectable rows in the Plans view") || body.contains("Plans view"),
         "Plans view must document its selectable-row navigation"
     );
 }

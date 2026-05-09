@@ -5,9 +5,8 @@
 //! (4.5:1 body, 3:1 large/UI). Other presets get an information-only
 //! lower-bound check (3:1) that does not block.
 
-use coding_agent_search::ui::components::theme::{
-    ThemePalette, ThemePreset, contrast_ratio, PackedRgba,
-};
+use coding_agent_search::ui::components::theme::{ThemePalette, ThemePreset, contrast_ratio};
+use ftui::PackedRgba;
 
 /// All theme presets the project ships, mirroring `ThemePreset::ALL`. Pinned
 /// here so the test fails loudly if a preset is added without considering
@@ -169,7 +168,12 @@ fn high_contrast_focused_unfocused_borders_meet_threshold() {
     ];
     for (label, fg, bg) in pairs {
         let ratio = contrast_ratio(fg, bg);
-        log_measurement(ThemePreset::HighContrast, label, ratio, ratio >= WCAG_AA_LARGE);
+        log_measurement(
+            ThemePreset::HighContrast,
+            label,
+            ratio,
+            ratio >= WCAG_AA_LARGE,
+        );
         assert!(
             ratio >= WCAG_AA_LARGE,
             "HighContrast border/focus ratio for {label} is {ratio:.2}, below 3:1 minimum"
@@ -187,8 +191,18 @@ fn high_contrast_passes_on_inverted_terminal_background() {
     let palette = ThemePreset::HighContrast.to_palette();
     let forward = contrast_ratio(palette.fg, palette.bg);
     let inverted = contrast_ratio(palette.bg, palette.fg);
-    log_measurement(ThemePreset::HighContrast, "fg_on_bg", forward, forward >= WCAG_AA_BODY);
-    log_measurement(ThemePreset::HighContrast, "bg_on_fg", inverted, inverted >= WCAG_AA_BODY);
+    log_measurement(
+        ThemePreset::HighContrast,
+        "fg_on_bg",
+        forward,
+        forward >= WCAG_AA_BODY,
+    );
+    log_measurement(
+        ThemePreset::HighContrast,
+        "bg_on_fg",
+        inverted,
+        inverted >= WCAG_AA_BODY,
+    );
     // contrast_ratio is symmetric — both should produce the same value.
     assert!(
         (forward - inverted).abs() < 1e-9,

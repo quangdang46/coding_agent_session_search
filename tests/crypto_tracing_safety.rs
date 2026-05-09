@@ -13,14 +13,14 @@
 
 use coding_agent_search::encryption::{hkdf_extract, hkdf_extract_expand};
 use serial_test::serial;
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::Layer;
 
 use std::sync::{Arc, Mutex};
 use tracing::field::{Field, Visit};
 use tracing::span::Attributes;
-use tracing::{Event, Subscriber, Id};
+use tracing::{Event, Id, Subscriber};
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
 
@@ -33,7 +33,11 @@ struct CaptureLayer {
 
 #[derive(Debug, Clone)]
 struct CapturedRow {
-    kind: &'static str, // "event" | "span_new" | "span_record"
+    // `kind` distinguishes "event" / "span_new" / "span_record" rows. It is
+    // surfaced via the derived Debug impl in panic messages (dead-code
+    // analysis ignores Debug usage).
+    #[allow(dead_code)]
+    kind: &'static str,
     target: String,
     name: String,
     fields: Vec<(String, String)>,
@@ -160,10 +164,7 @@ fn derive_kek_emits_tracing_on_error() {
         let result = hkdf_extract_expand(b"ikm", b"salt", b"info", 100_000);
         assert!(result.is_err(), "must fail with oversized output length");
     });
-    eprintln!(
-        "[vz9t8_4_test] captured {} rows on error path",
-        rows.len()
-    );
+    eprintln!("[vz9t8_4_test] captured {} rows on error path", rows.len());
     // Even on error, the entry-side tracing should have fired.
     assert!(
         rows.iter().any(|r| r
@@ -184,11 +185,7 @@ fn derive_kek_handles_empty_info_and_salt() {
     });
     let salt_len_rows: Vec<&CapturedRow> = rows
         .iter()
-        .filter(|r| {
-            r.fields
-                .iter()
-                .any(|(k, v)| k == "salt_len" && v == "0")
-        })
+        .filter(|r| r.fields.iter().any(|(k, v)| k == "salt_len" && v == "0"))
         .collect();
     assert!(
         !salt_len_rows.is_empty(),
@@ -205,22 +202,49 @@ fn derive_functions_do_not_log_key_material() {
     let known_ikm = vec![0xCAu8; 32];
     let known_salt = vec![0xDEu8; 16];
     let rows = run_with_capture(|| {
-        let _ = hkdf_extract_expand(&known_ikm, &known_salt, b"vz9t8_4_test_label", 32)
-            .expect("ok");
+        let _ =
+            hkdf_extract_expand(&known_ikm, &known_salt, b"vz9t8_4_test_label", 32).expect("ok");
         let _ = hkdf_extract(&known_salt, &known_ikm);
     });
     // Hex-encode the known patterns so we can grep captured fields for them.
-    let ikm_hex_lower = known_ikm.iter().map(|b| format!("{b:02x}")).collect::<String>();
-    let ikm_hex_upper = known_ikm.iter().map(|b| format!("{b:02X}")).collect::<String>();
-    let salt_hex_lower = known_salt.iter().map(|b| format!("{b:02x}")).collect::<String>();
-    let salt_hex_upper = known_salt.iter().map(|b| format!("{b:02X}")).collect::<String>();
+    let ikm_hex_lower = known_ikm
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let ikm_hex_upper = known_ikm
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<String>();
+    let salt_hex_lower = known_salt
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let salt_hex_upper = known_salt
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<String>();
     // Also check raw byte-string repr that Debug might produce.
     let ikm_dbg = format!("{:?}", known_ikm);
     let salt_dbg = format!("{:?}", known_salt);
 
-    let banned = [&ikm_hex_lower, &ikm_hex_upper, &salt_hex_lower, &salt_hex_upper, &ikm_dbg, &salt_dbg];
+    let banned = [
+        &ikm_hex_lower,
+        &ikm_hex_upper,
+        &salt_hex_lower,
+        &salt_hex_upper,
+        &ikm_dbg,
+        &salt_dbg,
+    ];
     // Forbidden field NAMES: any of these strongly imply leaked key material.
-    let banned_names = ["ikm", "salt", "key", "kek", "password", "secret", "nonce_value"];
+    let banned_names = [
+        "ikm",
+        "salt",
+        "key",
+        "kek",
+        "password",
+        "secret",
+        "nonce_value",
+    ];
 
     let mut leaks = Vec::new();
     for row in &rows {
@@ -231,7 +255,9 @@ fn derive_functions_do_not_log_key_material() {
             let lower = k.to_ascii_lowercase();
             for bn in &banned_names {
                 if lower == *bn {
-                    leaks.push(format!("field name `{k}` is on the banned-name list (in row {row:?})"));
+                    leaks.push(format!(
+                        "field name `{k}` is on the banned-name list (in row {row:?})"
+                    ));
                 }
             }
             // Field-value leak: any banned hex pattern appears in v.
@@ -251,5 +277,8 @@ fn derive_functions_do_not_log_key_material() {
         "potential key-material leaks in tracing output:\n{}",
         leaks.join("\n")
     );
-    eprintln!("[vz9t8_4_test] negative leak check: 0 leaks detected over {} rows", rows.len());
+    eprintln!(
+        "[vz9t8_4_test] negative leak check: 0 leaks detected over {} rows",
+        rows.len()
+    );
 }

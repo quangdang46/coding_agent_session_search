@@ -143,7 +143,10 @@ pub fn hkdf_extract_expand(
     let span = tracing::Span::current();
     let label_safe = info.len() <= 64
         && std::str::from_utf8(info)
-            .map(|s| s.chars().all(|c| c.is_ascii_graphic() || c == ' ' || c == '-' || c == '_' || c == '.'))
+            .map(|s| {
+                s.chars()
+                    .all(|c| c.is_ascii_graphic() || c == ' ' || c == '-' || c == '_' || c == '.')
+            })
             .unwrap_or(false);
     if label_safe {
         // SAFETY for security: only ASCII-graphic short strings reach here.

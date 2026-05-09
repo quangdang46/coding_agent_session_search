@@ -13,7 +13,9 @@ fn project_root() -> PathBuf {
 }
 
 fn log_path() -> PathBuf {
-    project_root().join("test-results").join("connector_edge_cases.log")
+    project_root()
+        .join("test-results")
+        .join("connector_edge_cases.log")
 }
 
 #[test]
@@ -49,7 +51,9 @@ fn log_file_has_commit_header_when_present() {
     let log = log_path();
     if !log.exists() {
         // Skip — covered by log_file_or_regenerate_script_present.
-        eprintln!("[4z5uc_test] log file absent; skipping header check (regenerate via scripts/tests/connector_edge_cases_regenerate_log.sh)");
+        eprintln!(
+            "[4z5uc_test] log file absent; skipping header check (regenerate via scripts/tests/connector_edge_cases_regenerate_log.sh)"
+        );
         return;
     }
     let body = std::fs::read_to_string(&log).expect("readable");

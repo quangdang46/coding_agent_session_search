@@ -79,6 +79,84 @@ fn strip_trailing_comment(line: &str) -> &str {
     line
 }
 
+/// Join logical bash lines that span multiple physical lines via trailing
+/// `\` continuations. Returns a Vec of (first-physical-line-1-indexed,
+/// joined-content). The first-physical-line index lets findings point at the
+/// start of the logical command in error messages.
+fn logical_lines(body: &str) -> Vec<(usize, String)> {
+    let mut out: Vec<(usize, String)> = Vec::new();
+    let mut current = String::new();
+    let mut current_start: Option<usize> = None;
+    for (idx, raw) in body.lines().enumerate() {
+        let line_no = idx + 1;
+        if current_start.is_none() {
+            current_start = Some(line_no);
+        }
+        // A trailing backslash means the next line is a continuation of this
+        // command. We drop the backslash and join with a single space so
+        // tokens stay separated.
+        if let Some(stripped) = raw.strip_suffix('\\') {
+            current.push_str(stripped);
+            current.push(' ');
+            continue;
+        }
+        current.push_str(raw);
+        out.push((current_start.unwrap_or(line_no), std::mem::take(&mut current)));
+        current_start = None;
+    }
+    if !current.is_empty()
+        && let Some(start) = current_start
+    {
+        out.push((start, current));
+    }
+    out
+}
+
+/// Returns the byte indices of `cargo` matches that lie OUTSIDE any
+/// single- or double-quoted span on the line. This catches `echo "cargo
+/// install ..."` and `log INFO "rch cargo test"` style false positives. It
+/// is intentionally bash-naive: nested quotes, $(...) interpolation, and
+/// heredocs are not modeled — these have rare-enough collisions with cargo
+/// invocations that we accept the residual risk.
+fn cargo_spans_outside_quotes(line: &str) -> Vec<(usize, usize)> {
+    let bytes = line.as_bytes();
+    let mut spans = Vec::new();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if !in_single && !in_double && bytes[i..].starts_with(b"cargo")
+            // Boundary check before "cargo"
+            && (i == 0 || !is_word_byte(bytes[i - 1]))
+        {
+            // Boundary check after "cargo" — we want the literal word.
+            let end = i + 5;
+            if end == bytes.len() || !is_word_byte(bytes[end]) {
+                spans.push((i, end));
+                i = end;
+                continue;
+            }
+        }
+        match c {
+            b'\\' => {
+                // Skip the next byte regardless of state (escaped char).
+                i += 2;
+                continue;
+            }
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            _ => {}
+        }
+        i += 1;
+    }
+    spans
+}
+
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
 #[derive(Debug, Clone)]
 struct Finding {
     path: PathBuf,
@@ -93,13 +171,33 @@ fn scan_for_bare_cargo(path: &Path) -> Vec<Finding> {
         Ok(b) => b,
         Err(_) => return Vec::new(),
     };
-    let cargo_re =
+    let cargo_subcmd_re =
         regex::Regex::new(r"\bcargo\s+(build|test|bench|clippy|run|check|fmt|update|install)\b")
             .expect("regex compiles");
     let mut findings = Vec::new();
-    for (idx, raw) in body.lines().enumerate() {
-        let line = strip_trailing_comment(raw);
-        if !cargo_re.is_match(line) {
+    for (start_line, logical) in logical_lines(&body) {
+        let line = strip_trailing_comment(&logical);
+        if !cargo_subcmd_re.is_match(line) {
+            continue;
+        }
+        // Filter out cargo occurrences inside quoted strings — they are echo
+        // text, log messages, --help text, etc., not real invocations.
+        let cargo_positions: Vec<(usize, usize)> = cargo_spans_outside_quotes(line);
+        if cargo_positions.is_empty() {
+            continue;
+        }
+        // For each unquoted `cargo` token, confirm the cargo_subcmd_re actually
+        // matches starting at that position; if all matches were inside
+        // quotes, treat the line as clean.
+        let mut has_real_match = false;
+        for (start, _end) in &cargo_positions {
+            let tail = &line[*start..];
+            if cargo_subcmd_re.is_match(tail) {
+                has_real_match = true;
+                break;
+            }
+        }
+        if !has_real_match {
             continue;
         }
         // Skip lines that ARE the rch-wrapped form. The wrapped form contains
@@ -118,13 +216,16 @@ fn scan_for_bare_cargo(path: &Path) -> Vec<Finding> {
         {
             continue;
         }
-        // Skip lines inside a heredoc that's clearly documenting an example
-        // (heuristic: indented + preceded by a sentence-ending colon two
-        // lines up). Punt on this for v1 — false positives here are rare.
-        let snippet = raw.trim().to_string();
+        // Trim a snippet for reporting; truncate excessively long joined
+        // logical lines so panics stay legible.
+        let mut snippet = logical.trim().to_string();
+        if snippet.len() > 200 {
+            snippet.truncate(197);
+            snippet.push_str("...");
+        }
         findings.push(Finding {
             path: path.to_path_buf(),
-            line: idx + 1,
+            line: start_line,
             snippet,
             rule: "bare_cargo_invocation",
             hint: "wrap via `rch exec -- env CARGO_TARGET_DIR=... cargo ...` or `source scripts/lib/run_cargo.sh && run_cargo ...`",
@@ -138,9 +239,9 @@ fn scan_for_set_e_arithmetic(path: &Path) -> Vec<Finding> {
         Ok(b) => b,
         Err(_) => return Vec::new(),
     };
-    // Need set -e (or set -euo pipefail) AND ((VAR++)) or ((VAR--)) somewhere
-    // after that line.
-    let set_e_re = regex::Regex::new(r"set\s+-(e|euo|euxo|exu|euvo)\b").expect("regex compiles");
+    // Match `set -<flags>` where <flags> contains an `e`. This catches
+    // `-e`, `-eu`, `-eo`, `-ex`, `-eux`, `-euo`, `-euxo`, `-eou`, etc.
+    let set_e_re = regex::Regex::new(r"set\s+-[a-z]*e[a-z]*\b").expect("regex compiles");
     let arith_re = regex::Regex::new(r"\(\(\s*\w+(\+\+|--)\s*\)\)").expect("regex compiles");
     let mut set_e_line: Option<usize> = None;
     let mut findings = Vec::new();
@@ -149,9 +250,7 @@ fn scan_for_set_e_arithmetic(path: &Path) -> Vec<Finding> {
         if set_e_line.is_none() && set_e_re.is_match(line) {
             set_e_line = Some(idx);
         }
-        if let Some(_se) = set_e_line
-            && arith_re.is_match(line)
-        {
+        if set_e_line.is_some() && arith_re.is_match(line) {
             findings.push(Finding {
                 path: path.to_path_buf(),
                 line: idx + 1,
@@ -358,6 +457,108 @@ fn scanner_ignores_cargo_in_comments() {
     assert!(
         findings.is_empty(),
         "cargo mentioned in a leading-# comment must not trigger; got {findings:?}"
+    );
+}
+
+#[test]
+fn scanner_ignores_cargo_in_double_quoted_strings() {
+    tracing::info!(target: "scripts_rch_compliance", check = "synthetic_double_quote_immune");
+    let tmp = tempdir_for_test("rch_compliance_dq");
+    let path = tmp.join("dq.sh");
+    std::fs::write(
+        &path,
+        b"#!/usr/bin/env bash\nset -e\necho \"  cargo install cargo-llvm-cov\"\nlog INFO \"using rch cargo test\"\n",
+    )
+    .unwrap();
+    let findings = scan_for_bare_cargo(&path);
+    assert!(
+        findings.is_empty(),
+        "cargo inside double-quoted strings must not trigger; got {findings:?}"
+    );
+}
+
+#[test]
+fn scanner_ignores_cargo_in_single_quoted_strings() {
+    tracing::info!(target: "scripts_rch_compliance", check = "synthetic_single_quote_immune");
+    let tmp = tempdir_for_test("rch_compliance_sq");
+    let path = tmp.join("sq.sh");
+    std::fs::write(
+        &path,
+        b"#!/usr/bin/env bash\nset -e\necho 'rch cargo test'\n",
+    )
+    .unwrap();
+    let findings = scan_for_bare_cargo(&path);
+    assert!(
+        findings.is_empty(),
+        "cargo inside single-quoted strings must not trigger; got {findings:?}"
+    );
+}
+
+#[test]
+fn scanner_handles_line_continuations_for_rch() {
+    tracing::info!(target: "scripts_rch_compliance", check = "synthetic_continuation");
+    let tmp = tempdir_for_test("rch_compliance_cont");
+    let path = tmp.join("cont.sh");
+    std::fs::write(
+        &path,
+        b"#!/usr/bin/env bash\nset -euo pipefail\nrch exec -- env CARGO_TARGET_DIR=/tmp \\\n    cargo test --test foo -- --nocapture\n",
+    )
+    .unwrap();
+    let findings = scan_for_bare_cargo(&path);
+    assert!(
+        findings.is_empty(),
+        "cargo following an `rch exec --` continuation line must not trigger; got {findings:?}"
+    );
+}
+
+#[test]
+fn scanner_set_e_regex_catches_eo_pipefail() {
+    tracing::info!(target: "scripts_rch_compliance", check = "synthetic_eo_pipefail");
+    let tmp = tempdir_for_test("rch_compliance_eo");
+    let path = tmp.join("eo.sh");
+    // -eo is a real form used in the cass tree (e2e_logging_acceptance_test.sh).
+    // Combined with ((VAR++)) it triggers the abort risk.
+    std::fs::write(
+        &path,
+        b"#!/usr/bin/env bash\nset -eo pipefail\nCOUNT=0\n((COUNT++))\necho ok\n",
+    )
+    .unwrap();
+    let findings = scan_for_set_e_arithmetic(&path);
+    assert_eq!(
+        findings.len(),
+        1,
+        "scanner must catch ((VAR++)) under `set -eo pipefail`; got {findings:?}"
+    );
+}
+
+#[test]
+fn scanner_set_e_regex_catches_eux_combinations() {
+    tracing::info!(target: "scripts_rch_compliance", check = "synthetic_eux");
+    let tmp = tempdir_for_test("rch_compliance_eux");
+    let path = tmp.join("eux.sh");
+    std::fs::write(
+        &path,
+        b"#!/usr/bin/env bash\nset -eux\nCOUNT=0\n((COUNT++))\n",
+    )
+    .unwrap();
+    let findings = scan_for_set_e_arithmetic(&path);
+    assert_eq!(findings.len(), 1, "scanner must catch `set -eux`");
+}
+
+#[test]
+fn scanner_set_e_regex_does_not_match_uo_only() {
+    // `set -uo pipefail` (no `e`) must NOT trigger the gate.
+    let tmp = tempdir_for_test("rch_compliance_uo");
+    let path = tmp.join("uo.sh");
+    std::fs::write(
+        &path,
+        b"#!/usr/bin/env bash\nset -uo pipefail\nCOUNT=0\n((COUNT++))\n",
+    )
+    .unwrap();
+    let findings = scan_for_set_e_arithmetic(&path);
+    assert!(
+        findings.is_empty(),
+        "without `-e` flag the gate must stay quiet; got {findings:?}"
     );
 }
 

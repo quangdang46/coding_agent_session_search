@@ -10,10 +10,25 @@
 
 use assert_cmd::Command;
 use serial_test::serial;
+use std::path::PathBuf;
 
-fn cass_health_with_env(env_pairs: &[(&str, &str)]) -> serde_json::Value {
+fn fresh_data_dir(label: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!("cass-yvv7r-{label}-{nanos}"));
+    std::fs::create_dir_all(&dir).expect("tempdir create");
+    dir
+}
+
+/// Run `cass health --json` with the given env vars (key/value pairs).
+/// `data_dir` is set automatically; the caller passes additional CASS_*
+/// vars under test.
+fn cass_health_with_env(data_dir: &PathBuf, env_pairs: &[(&str, &str)]) -> serde_json::Value {
     let mut cmd = Command::cargo_bin("cass").expect("cass binary built");
     cmd.arg("health").arg("--json");
+    cmd.env("CASS_DATA_DIR", data_dir);
     for (k, v) in env_pairs {
         cmd.env(k, v);
     }
@@ -21,7 +36,8 @@ fn cass_health_with_env(env_pairs: &[(&str, &str)]) -> serde_json::Value {
     // health may exit 1 if the data dir is fresh; we still get JSON on stdout.
     let stdout = String::from_utf8(output.stdout).expect("cass health --json produces UTF-8");
     eprintln!(
-        "[runtime_optimizations_test] env={env_pairs:?} exit={} stdout_len={}",
+        "[runtime_optimizations_test] data_dir={:?} env={env_pairs:?} exit={} stdout_len={}",
+        data_dir,
         output.status.code().unwrap_or(-1),
         stdout.len()
     );
@@ -34,12 +50,8 @@ fn cass_health_with_env(env_pairs: &[(&str, &str)]) -> serde_json::Value {
 #[serial]
 fn health_surface_exposes_runtime_optimizations_with_default_values() {
     tracing::info!(target: "yvv7r_test", scenario = "default_no_env");
-    let val = cass_health_with_env(&[(
-        "CASS_DATA_DIR",
-        &std::env::temp_dir()
-            .join(format!("cass-yvv7r-default-{}", std::process::id()))
-            .to_string_lossy(),
-    )]);
+    let dir = fresh_data_dir("default");
+    let val = cass_health_with_env(&dir, &[]);
     let opts = val.get("runtime_optimizations").unwrap_or_else(|| {
         panic!("cass health --json must include runtime_optimizations; full payload was: {val}")
     });
@@ -62,15 +74,8 @@ fn health_surface_exposes_runtime_optimizations_with_default_values() {
 #[serial]
 fn health_surface_reports_cass_simd_dot_disabled_when_env_zero() {
     tracing::info!(target: "yvv7r_test", scenario = "simd_dot_off");
-    let val = cass_health_with_env(&[
-        (
-            "CASS_DATA_DIR",
-            &std::env::temp_dir()
-                .join(format!("cass-yvv7r-simd0-{}", std::process::id()))
-                .to_string_lossy(),
-        ),
-        ("CASS_SIMD_DOT", "0"),
-    ]);
+    let dir = fresh_data_dir("simd0");
+    let val = cass_health_with_env(&dir, &[("CASS_SIMD_DOT", "0")]);
     let opts = val
         .get("runtime_optimizations")
         .expect("runtime_optimizations must be present");
@@ -85,15 +90,8 @@ fn health_surface_reports_cass_simd_dot_disabled_when_env_zero() {
 #[serial]
 fn health_surface_reports_cass_parallel_search_disabled_when_env_zero() {
     tracing::info!(target: "yvv7r_test", scenario = "parallel_off");
-    let val = cass_health_with_env(&[
-        (
-            "CASS_DATA_DIR",
-            &std::env::temp_dir()
-                .join(format!("cass-yvv7r-par0-{}", std::process::id()))
-                .to_string_lossy(),
-        ),
-        ("CASS_PARALLEL_SEARCH", "0"),
-    ]);
+    let dir = fresh_data_dir("par0");
+    let val = cass_health_with_env(&dir, &[("CASS_PARALLEL_SEARCH", "0")]);
     let opts = val
         .get("runtime_optimizations")
         .expect("runtime_optimizations must be present");
@@ -107,15 +105,8 @@ fn health_surface_reports_cass_parallel_search_disabled_when_env_zero() {
 #[serial]
 fn health_surface_reports_cass_f16_preconvert_disabled_when_env_zero() {
     tracing::info!(target: "yvv7r_test", scenario = "preconvert_off");
-    let val = cass_health_with_env(&[
-        (
-            "CASS_DATA_DIR",
-            &std::env::temp_dir()
-                .join(format!("cass-yvv7r-pre0-{}", std::process::id()))
-                .to_string_lossy(),
-        ),
-        ("CASS_F16_PRECONVERT", "0"),
-    ]);
+    let dir = fresh_data_dir("pre0");
+    let val = cass_health_with_env(&dir, &[("CASS_F16_PRECONVERT", "0")]);
     let opts = val
         .get("runtime_optimizations")
         .expect("runtime_optimizations must be present");
@@ -129,15 +120,8 @@ fn health_surface_reports_cass_f16_preconvert_disabled_when_env_zero() {
 #[serial]
 fn health_surface_handles_invalid_env_value_as_default() {
     tracing::info!(target: "yvv7r_test", scenario = "invalid_value_falls_back");
-    let val = cass_health_with_env(&[
-        (
-            "CASS_DATA_DIR",
-            &std::env::temp_dir()
-                .join(format!("cass-yvv7r-inv-{}", std::process::id()))
-                .to_string_lossy(),
-        ),
-        ("CASS_SIMD_DOT", "banana"),
-    ]);
+    let dir = fresh_data_dir("inv");
+    let val = cass_health_with_env(&dir, &[("CASS_SIMD_DOT", "banana")]);
     let opts = val
         .get("runtime_optimizations")
         .expect("runtime_optimizations must be present");
@@ -149,17 +133,15 @@ fn health_surface_handles_invalid_env_value_as_default() {
 #[serial]
 fn health_surface_combined_env_disables_multiple() {
     tracing::info!(target: "yvv7r_test", scenario = "combined_disable");
-    let val = cass_health_with_env(&[
-        (
-            "CASS_DATA_DIR",
-            &std::env::temp_dir()
-                .join(format!("cass-yvv7r-comb-{}", std::process::id()))
-                .to_string_lossy(),
-        ),
-        ("CASS_SIMD_DOT", "off"),
-        ("CASS_PARALLEL_SEARCH", "no"),
-        ("CASS_F16_PRECONVERT", "0"),
-    ]);
+    let dir = fresh_data_dir("comb");
+    let val = cass_health_with_env(
+        &dir,
+        &[
+            ("CASS_SIMD_DOT", "off"),
+            ("CASS_PARALLEL_SEARCH", "no"),
+            ("CASS_F16_PRECONVERT", "0"),
+        ],
+    );
     let opts = val
         .get("runtime_optimizations")
         .expect("runtime_optimizations must be present");

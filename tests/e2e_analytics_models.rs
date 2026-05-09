@@ -53,7 +53,11 @@ fn analytics_models_empty_data_dir_returns_actionable_response() {
     tracing::info!(target: "vz9t8_6_test", scenario = "empty_data_dir");
     let dir = fresh_data_dir("empty");
     let (exit, stdout, stderr) = run_cass_analytics_models(&dir, &[], &[]);
-    eprintln!("[vz9t8_6_test] exit={exit} stdout_len={} stderr_len={}", stdout.len(), stderr.len());
+    eprintln!(
+        "[vz9t8_6_test] exit={exit} stdout_len={} stderr_len={}",
+        stdout.len(),
+        stderr.len()
+    );
     // Either: success with empty result OR documented error code per
     // AGENTS.md robot-mode contract.
     if exit == 0 {
@@ -66,7 +70,10 @@ fn analytics_models_empty_data_dir_returns_actionable_response() {
         let parsed: Result<serde_json::Value, _> = serde_json::from_str(&stdout);
         if let Ok(v) = parsed {
             let err = v.get("error");
-            assert!(err.is_some(), "non-zero exit with no error envelope: stdout={stdout:?}");
+            assert!(
+                err.is_some(),
+                "non-zero exit with no error envelope: stdout={stdout:?}"
+            );
         }
         // Documented kebab-case kind names per AGENTS.md (codes ≥ 10 require
         // err.kind, not the numeric code).
@@ -134,7 +141,9 @@ fn analytics_models_with_archive_log_env_writes_jsonl() {
             lines = body.lines().filter(|l| !l.trim().is_empty()).count()
         );
     } else {
-        eprintln!("[vz9t8_6_test] CASS_ANALYTICS_E2E_LOG not yet wired — log file absent (acceptable)");
+        eprintln!(
+            "[vz9t8_6_test] CASS_ANALYTICS_E2E_LOG not yet wired — log file absent (acceptable)"
+        );
     }
 }
 
@@ -147,7 +156,10 @@ fn analytics_models_with_limit_flag_parses_cleanly() {
     tracing::info!(target: "vz9t8_6_test", scenario = "limit_flag");
     let dir = fresh_data_dir("limit");
     let (_exit, stdout, stderr) = run_cass_analytics_models(&dir, &["--limit", "3"], &[]);
-    eprintln!("[vz9t8_6_test] limit_flag stderr_first_line={}", stderr.lines().next().unwrap_or(""));
+    eprintln!(
+        "[vz9t8_6_test] limit_flag stderr_first_line={}",
+        stderr.lines().next().unwrap_or("")
+    );
     if !stdout.is_empty() {
         let parsed: Result<serde_json::Value, _> = serde_json::from_str(&stdout);
         assert!(
@@ -162,11 +174,8 @@ fn analytics_models_with_limit_flag_parses_cleanly() {
 fn analytics_models_with_invalid_since_returns_actionable_error() {
     tracing::info!(target: "vz9t8_6_test", scenario = "invalid_since");
     let dir = fresh_data_dir("invalid_since");
-    let (exit, stdout, stderr) = run_cass_analytics_models(
-        &dir,
-        &["--since", "this is not a valid date"],
-        &[],
-    );
+    let (exit, stdout, stderr) =
+        run_cass_analytics_models(&dir, &["--since", "this is not a valid date"], &[]);
     eprintln!("[vz9t8_6_test] invalid_since exit={exit}");
     // Cass should reject the bad date with a non-zero exit AND an actionable
     // hint. Soft-accept exit=0 if cass treats it as no-filter (lenient parsing).

@@ -24,11 +24,15 @@ const VIRTUAL_LIST_SRC = path.resolve(
 
 async function loadVirtualList(page: import('@playwright/test').Page) {
   const moduleSource = fs.readFileSync(VIRTUAL_LIST_SRC, 'utf-8');
-  // The module uses `export class VirtualList` — strip the `export` so we can
-  // inline-eval and stick the class onto window.
+  // The module uses `export class VirtualList` — strip the `export` keywords
+  // so we can inline-eval as a classic script and stick the classes onto
+  // window. Also strip `export default {...}` (would syntax-error in classic
+  // script context) by replacing it with a no-op assignment.
   const stripped = moduleSource
     .replace(/^export class /gm, 'class ')
-    .replace(/^export function /gm, 'function ');
+    .replace(/^export function /gm, 'function ')
+    .replace(/^export const /gm, 'const ')
+    .replace(/^export default /gm, 'const __vl_default__ = ');
   await page.goto('about:blank');
   await page.evaluate((src: string) => {
     const script = document.createElement('script');

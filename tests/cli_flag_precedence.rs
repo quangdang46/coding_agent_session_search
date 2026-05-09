@@ -35,6 +35,28 @@ fn cass_help_exits_zero_and_lists_subcommands() {
     }
 }
 
+/// Compare two paths for "is the same place" without requiring lexical
+/// equality (macOS `/var` → `/private/var`, trailing slashes, etc.). Falls
+/// back to lexical equality when canonicalization fails (e.g. either side
+/// no longer exists).
+fn paths_resolve_equal(a: &std::path::Path, b: &std::path::Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
+}
+
+/// Extract the resolved `data_dir` string from `cass health --json` output.
+/// Returns None if the field is missing, so callers can produce a diagnostic
+/// instead of unwrapping into a confusing panic.
+fn data_dir_from_health(stdout: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(stdout).ok()?;
+    v.get("data_dir")?.as_str().map(|s| s.to_string())
+}
+
 #[test]
 #[serial]
 fn cli_data_dir_flag_takes_precedence_over_env() {
@@ -49,15 +71,24 @@ fn cli_data_dir_flag_takes_precedence_over_env() {
         .arg("--json");
     let output = cmd.output().expect("runs");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let v: Result<serde_json::Value, _> = serde_json::from_str(&stdout);
-    assert!(
-        v.is_ok(),
-        "cass health --json must emit JSON; got: {stdout}"
-    );
     eprintln!(
-        "[d4r65_test] cli_over_env exit={} stdout_len={}",
+        "[d4r65_test] cli_over_env exit={} stdout_len={} env_dir={env_dir:?} cli_dir={cli_dir:?}",
         output.status.code().unwrap_or(-1),
         stdout.len()
+    );
+    let resolved = data_dir_from_health(&stdout).unwrap_or_else(|| {
+        panic!("cass health --json must emit a `data_dir` field; got: {stdout}")
+    });
+    let resolved_path = std::path::Path::new(&resolved);
+    assert!(
+        paths_resolve_equal(resolved_path, &cli_dir),
+        "CLI --data-dir must take precedence over CASS_DATA_DIR; \
+         resolved={resolved:?} cli_dir={cli_dir:?} env_dir={env_dir:?}"
+    );
+    assert!(
+        !paths_resolve_equal(resolved_path, &env_dir),
+        "resolved data_dir unexpectedly matches env value; \
+         resolved={resolved:?} env_dir={env_dir:?}"
     );
 }
 
@@ -72,8 +103,14 @@ fn env_data_dir_used_when_no_flag() {
         .arg("--json");
     let output = cmd.output().expect("runs");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let v: Result<serde_json::Value, _> = serde_json::from_str(&stdout);
-    assert!(v.is_ok(), "stdout must be JSON; got: {stdout}");
+    let resolved = data_dir_from_health(&stdout)
+        .unwrap_or_else(|| panic!("cass health --json must emit a `data_dir` field; got: {stdout}"));
+    let resolved_path = std::path::Path::new(&resolved);
+    assert!(
+        paths_resolve_equal(resolved_path, &env_dir),
+        "CASS_DATA_DIR must be used when no --data-dir flag is set; \
+         resolved={resolved:?} env_dir={env_dir:?}"
+    );
 }
 
 #[test]

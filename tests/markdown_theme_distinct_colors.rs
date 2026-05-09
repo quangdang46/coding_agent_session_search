@@ -14,16 +14,23 @@
 //! detail pane; this PR ships the contract assertion that future renderer
 //! changes won't break.
 
-use coding_agent_search::ui::style_system::{
-    StyleOptions, StyleSystemContext, ThemePresetChoice,
-};
+use coding_agent_search::ui::style_system::{StyleContext, StyleOptions, UiThemePreset};
+use ftui::{PackedRgba, Style, StyleFlags};
 
-fn fg_of(style: &ftui::Style) -> Option<ftui::PackedRgba> {
+fn fg_of(style: &Style) -> Option<PackedRgba> {
     style.fg
 }
 
-fn bg_of(style: &ftui::Style) -> Option<ftui::PackedRgba> {
+fn bg_of(style: &Style) -> Option<PackedRgba> {
     style.bg
+}
+
+fn is_bold(style: &Style) -> bool {
+    style.has_attr(StyleFlags::BOLD)
+}
+
+fn is_underline(style: &Style) -> bool {
+    style.has_attr(StyleFlags::UNDERLINE)
 }
 
 #[test]
@@ -31,10 +38,10 @@ fn markdown_theme_dark_produces_distinct_fg_colors() {
     tracing::info!(target: "3n06q_test", scenario = "dark_distinct_fg");
     let opts = StyleOptions {
         dark_mode: true,
-        preset: ThemePresetChoice::TokyoNight,
+        preset: UiThemePreset::TokyoNight,
         ..StyleOptions::default()
     };
-    let ctx = StyleSystemContext::new(opts);
+    let ctx = StyleContext::from_options(opts);
     let md = ctx.markdown_theme();
     let mut fgs: Vec<ftui::PackedRgba> = vec![
         fg_of(&md.h1),
@@ -67,10 +74,10 @@ fn markdown_theme_light_produces_distinct_fg_colors() {
     tracing::info!(target: "3n06q_test", scenario = "light_distinct_fg");
     let opts = StyleOptions {
         dark_mode: false,
-        preset: ThemePresetChoice::Daylight,
+        preset: UiThemePreset::Daylight,
         ..StyleOptions::default()
     };
-    let ctx = StyleSystemContext::new(opts);
+    let ctx = StyleContext::from_options(opts);
     let md = ctx.markdown_theme();
     let mut fgs: Vec<ftui::PackedRgba> = vec![
         fg_of(&md.h1),
@@ -97,13 +104,16 @@ fn markdown_theme_code_block_has_distinct_background() {
     tracing::info!(target: "3n06q_test", scenario = "code_block_bg");
     let opts = StyleOptions {
         dark_mode: true,
-        preset: ThemePresetChoice::TokyoNight,
+        preset: UiThemePreset::TokyoNight,
         ..StyleOptions::default()
     };
-    let ctx = StyleSystemContext::new(opts);
+    let ctx = StyleContext::from_options(opts);
     let md = ctx.markdown_theme();
     let cb_bg = bg_of(&md.code_block);
-    assert!(cb_bg.is_some(), "code_block must have an explicit background");
+    assert!(
+        cb_bg.is_some(),
+        "code_block must have an explicit background"
+    );
     // Body text should have NO bg (transparent / default).
     assert!(
         bg_of(&md.h1).is_none() || bg_of(&md.h1) != cb_bg,
@@ -116,10 +126,10 @@ fn markdown_theme_h1_through_h6_distinct_or_styled() {
     tracing::info!(target: "3n06q_test", scenario = "heading_levels");
     let opts = StyleOptions {
         dark_mode: true,
-        preset: ThemePresetChoice::TokyoNight,
+        preset: UiThemePreset::TokyoNight,
         ..StyleOptions::default()
     };
-    let ctx = StyleSystemContext::new(opts);
+    let ctx = StyleContext::from_options(opts);
     let md = ctx.markdown_theme();
     // All heading levels must be bold.
     for (level, style) in [
@@ -131,7 +141,7 @@ fn markdown_theme_h1_through_h6_distinct_or_styled() {
         ("h6", &md.h6),
     ] {
         assert!(
-            style.bold,
+            is_bold(style),
             "markdown_theme.{level} must have bold attribute"
         );
     }
@@ -141,10 +151,13 @@ fn markdown_theme_h1_through_h6_distinct_or_styled() {
 fn markdown_theme_link_is_underlined_and_colored() {
     tracing::info!(target: "3n06q_test", scenario = "link_styling");
     let opts = StyleOptions::default();
-    let ctx = StyleSystemContext::new(opts);
+    let ctx = StyleContext::from_options(opts);
     let md = ctx.markdown_theme();
-    assert!(md.link.underline, "link must be underlined");
-    assert!(fg_of(&md.link).is_some(), "link must have explicit fg color");
+    assert!(is_underline(&md.link), "link must be underlined");
+    assert!(
+        fg_of(&md.link).is_some(),
+        "link must have explicit fg color"
+    );
 }
 
 #[test]
@@ -157,7 +170,7 @@ fn markdown_theme_handles_empty_render_input_safely() {
         dark_mode: true,
         ..StyleOptions::default()
     };
-    let _ctx = StyleSystemContext::new(opts);
+    let _ctx = StyleContext::from_options(opts);
     // No assertion needed; the test passes if construction does not panic.
 }
 
@@ -165,11 +178,11 @@ fn markdown_theme_handles_empty_render_input_safely() {
 fn markdown_theme_admonition_colors_match_severity() {
     tracing::info!(target: "3n06q_test", scenario = "admonition_severity");
     let opts = StyleOptions::default();
-    let ctx = StyleSystemContext::new(opts);
+    let ctx = StyleContext::from_options(opts);
     let md = ctx.markdown_theme();
     // admonition_caution (error severity) must differ from admonition_tip
     // (success severity). Both must be bold.
-    assert!(md.admonition_caution.bold && md.admonition_tip.bold);
+    assert!(is_bold(&md.admonition_caution) && is_bold(&md.admonition_tip));
     let caution_fg = fg_of(&md.admonition_caution);
     let tip_fg = fg_of(&md.admonition_tip);
     assert!(
