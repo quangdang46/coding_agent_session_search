@@ -2357,6 +2357,52 @@ fn recover_structured_format_aliases(rest: &mut Vec<String>, corrections: &mut V
     }
 }
 
+fn command_accepts_limit_alias(rest: &[String]) -> bool {
+    match rest.first().map(String::as_str) {
+        Some("analytics") => rest.get(1).is_some_and(|arg| arg == "tools"),
+        Some("context" | "pack" | "search" | "sessions") => true,
+        _ => false,
+    }
+}
+
+fn has_canonical_limit(rest: &[String]) -> bool {
+    rest.iter()
+        .any(|arg| arg == "--limit" || arg.starts_with("--limit="))
+}
+
+fn recover_limit_aliases(rest: &mut Vec<String>, corrections: &mut Vec<String>) {
+    if !command_accepts_limit_alias(rest) || has_canonical_limit(rest) {
+        return;
+    }
+
+    let Some((flag, value)) = take_named_value(
+        rest,
+        &[
+            "--max-results",
+            "--num-results",
+            "--results",
+            "--count",
+            "--top-k",
+            "--topk",
+            "--top_k",
+            "--n",
+            "-n",
+        ],
+    ) else {
+        return;
+    };
+
+    let command = rest
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "command".to_string());
+    rest.push("--limit".to_string());
+    rest.push(value.clone());
+    corrections.push(format!(
+        "'{command} {flag} <value>' → '{command} --limit {value}' (result-count alias)"
+    ));
+}
+
 /// Normalize common robot-mode invocation mistakes to make the CLI more forgiving for AI agents.
 ///
 /// This function applies multiple layers of normalization to maximize acceptance of
@@ -2370,7 +2416,8 @@ fn recover_structured_format_aliases(rest: &mut Vec<String>, corrections: &mut V
 /// 6. **Leading structured-output recovery**: `--json search` → `search --json`
 /// 7. **Named positional recovery**: `search --query foo` → `search foo`
 /// 8. **Structured format alias recovery**: `search foo --format json` → `search foo --robot-format json`
-/// 9. **Global flag hoisting**: Moves global flags to front regardless of position
+/// 9. **Result-count alias recovery**: `search foo --max-results 5` → `search foo --limit 5`
+/// 10. **Global flag hoisting**: Moves global flags to front regardless of position
 ///
 /// Returns normalized argv plus an optional correction note teaching proper syntax.
 fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
@@ -2388,6 +2435,14 @@ fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
         "robot",
         "json",
         "limit",
+        "max-results",
+        "num-results",
+        "results",
+        "count",
+        "top-k",
+        "topk",
+        "top_k",
+        "n",
         "offset",
         "agent",
         "workspace",
@@ -2715,6 +2770,7 @@ fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
         );
     }
     recover_structured_format_aliases(&mut rest, &mut corrections);
+    recover_limit_aliases(&mut rest, &mut corrections);
     recover_named_required_positionals(&mut rest, &mut corrections);
     if rest
         .first()
@@ -11367,6 +11423,7 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "  cass --json search \"auth\"  # leading --json is moved to the search subcommand".to_string(),
             "  cass search --query \"auth\" --json  # --query is accepted and converted to positional syntax".to_string(),
             "  cass search \"auth\" --format json  # --format json is accepted as --robot-format json".to_string(),
+            "  cass search \"auth\" --max-results 5 --json  # result-count aliases become --limit".to_string(),
             "  # Follow next_command when present; use discovery.schemas_command for typed clients.".to_string(),
             String::new(),
             "# Basic search with JSON output for agents".to_string(),
@@ -56587,6 +56644,12 @@ fn run_health(
             "policy_registry": policy_registry,
             "responsiveness": responsiveness,
             "parallel_wal_shadow": parallel_wal_shadow,
+            // [coding_agent_session_search-yvv7r + waijq] Runtime optimization
+            // toggles. Operators can confirm env-var flips (CASS_SIMD_DOT,
+            // CASS_PARALLEL_SEARCH, CASS_F16_PRECONVERT) took effect by
+            // reading this object. config_source = "env" means at least one
+            // toggle is driven by an env var; "default" means none.
+            "runtime_optimizations": crate::search::runtime_optimizations::RuntimeOptimizationsSnapshot::current().to_json_value(),
             "state": state
         });
         output_structured_value(payload, fmt)?;
@@ -62629,6 +62692,18 @@ fn build_mistake_recovery_capabilities() -> Vec<MistakeRecoveryCapability> {
             "cass status --robot-format json",
             true,
             "A leading structured-output format request is moved onto the robot-capable subcommand.",
+        ),
+        mistake_recovery_capability(
+            "cass search auth --max-results 5 --json",
+            "cass search auth --limit 5 --json",
+            true,
+            "A common result-count alias is converted to the canonical limit flag.",
+        ),
+        mistake_recovery_capability(
+            "cass search auth -n 5 --json",
+            "cass search auth --limit 5 --json",
+            true,
+            "A familiar short result-count spelling is converted to the canonical limit flag.",
         ),
     ]
 }

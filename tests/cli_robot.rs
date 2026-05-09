@@ -1786,6 +1786,38 @@ fn search_empty_query_returns_all() {
     );
 }
 
+fn assert_search_limit_alias_limits_to_one(alias_args: &[&str]) {
+    let mut cmd = base_cmd();
+    let mut args = vec!["search", "", "--json"];
+    args.extend(alias_args.iter().copied());
+    args.extend(["--data-dir", "tests/fixtures/search_demo_data"]);
+    cmd.args(args);
+
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    let hits = json["hits"].as_array().expect("hits array");
+
+    assert_eq!(json["limit"].as_u64(), Some(1));
+    assert_eq!(json["count"].as_u64(), Some(1));
+    assert_eq!(hits.len(), 1);
+}
+
+#[test]
+fn search_max_results_alias_attaches_to_limit() {
+    assert_search_limit_alias_limits_to_one(&["--max-results", "1"]);
+}
+
+#[test]
+fn search_count_alias_attaches_to_limit() {
+    assert_search_limit_alias_limits_to_one(&["--count=1"]);
+}
+
+#[test]
+fn search_short_n_alias_attaches_to_limit() {
+    assert_search_limit_alias_limits_to_one(&["-n", "1"]);
+}
+
 #[test]
 fn search_no_match_returns_empty_hits() {
     // E2E test: non-matching query returns empty results (yln.5)

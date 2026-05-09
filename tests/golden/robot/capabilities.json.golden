@@ -3051,6 +3051,18 @@
       "canonical": "cass status --robot-format json",
       "accepted": true,
       "behavior": "A leading structured-output format request is moved onto the robot-capable subcommand."
+    },
+    {
+      "wrong": "cass search auth --max-results 5 --json",
+      "canonical": "cass search auth --limit 5 --json",
+      "accepted": true,
+      "behavior": "A common result-count alias is converted to the canonical limit flag."
+    },
+    {
+      "wrong": "cass search auth -n 5 --json",
+      "canonical": "cass search auth --limit 5 --json",
+      "accepted": true,
+      "behavior": "A familiar short result-count spelling is converted to the canonical limit flag."
     }
   ],
   "limits": {

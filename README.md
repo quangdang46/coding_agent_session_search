@@ -764,6 +764,8 @@ AI agents sometimes make syntax mistakes. `cass` aggressively normalizes input t
 | `cass view --path session.jsonl --line 42 --json` | `cass view session.jsonl --line 42 --json` | Named path option converted to required positional path |
 | `cass search "auth" --format json` | `cass search "auth" --robot-format json` | Familiar format spelling converted to robot format |
 | `cass --format json status` | `cass status --robot-format json` | Leading format request moved to the target subcommand |
+| `cass search "auth" --max-results 5` | `cass search "auth" --limit 5` | Result-count alias converted to canonical limit |
+| `cass search "auth" -n 5` | `cass search "auth" --limit 5` | Familiar short count flag converted to canonical limit |
 | `cass search --limt 5` | `cass search --limit 5` | Flag typos within Levenshtein distance ≤2 corrected |
 
 The CLI applies multiple normalization layers:
@@ -775,7 +777,8 @@ The CLI applies multiple normalization layers:
 6. **Leading structured flag recovery**: `--json`/`--robot` before a robot-capable subcommand is moved onto that subcommand
 7. **Named positional recovery**: `--query` for search/pack and `--path`/`--source-path`/`--file`/`--session` for drill-down/export commands become the required positional argument
 8. **Structured format recovery**: `--format json|jsonl|compact|sessions|toon` is accepted as `--robot-format ...` on robot-capable commands; `export --format ...` keeps its export-format meaning
-9. **Global flag hoisting**: Position-independent flag handling
+9. **Result-count aliases**: `--max-results`, `--num-results`, `--results`, `--count`, `--top-k`, and `-n` become `--limit` on commands with result limits
+10. **Global flag hoisting**: Position-independent flag handling
 
 When corrections are applied, `cass` emits a teaching note to stderr so agents learn the canonical syntax.
 

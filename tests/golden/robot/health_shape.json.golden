@@ -783,6 +783,23 @@
         }
       }
     },
+    "runtime_optimizations": {
+      "type": "object",
+      "properties": {
+        "simd_dot": {
+          "type": "boolean"
+        },
+        "parallel_search": {
+          "type": "boolean"
+        },
+        "preconvert_f16": {
+          "type": "boolean"
+        },
+        "config_source": {
+          "type": "string"
+        }
+      }
+    },
     "state": {
       "type": "object",
       "properties": {

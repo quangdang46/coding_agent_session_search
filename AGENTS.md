@@ -1097,6 +1097,24 @@ git push                # Push to remote
 - Use descriptive titles and set appropriate priority/type
 - Always `br sync --flush-only && git add .beads/` before ending session
 
+### Commit-Message Convention
+
+When closing a bead via `br close`, the corresponding code commit MUST include `(coding_agent_session_search-<id>)` in the commit subject. This makes `git log --grep=<id>` deterministic and unblocks audit-trail tooling.
+
+Example:
+```
+feat(doctor): add raw_mirror capture during indexing (coding_agent_session_search-9dfb0)
+```
+
+Multi-bead commits append all relevant IDs:
+```
+fix(audit): wave-2 bead recoveries (coding_agent_session_search-ifr7) (coding_agent_session_search-lxn5)
+```
+
+Stand-alone bead-tracker commits (e.g. `br sync --flush-only` exports, CI-only changes, dependency bumps) do not need this prefix.
+
+An opt-in pre-push hook at `scripts/git-hooks/pre-push.sh` warns (does not block) when commits being pushed to main lack any bead-ID reference. Install via `bash scripts/git-hooks/install.sh`.
+
 <!-- end-bv-agent-instructions -->
 
 ## Landing the Plane (Session Completion)

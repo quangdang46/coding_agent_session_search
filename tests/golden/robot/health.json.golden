@@ -327,6 +327,12 @@
       ]
     }
   },
+  "runtime_optimizations": {
+    "simd_dot": true,
+    "parallel_search": true,
+    "preconvert_f16": true,
+    "config_source": "default"
+  },
   "state": {
     "index": {
       "exists": false,

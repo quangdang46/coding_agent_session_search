@@ -38,6 +38,7 @@ pub mod query;
 pub(crate) mod readiness;
 pub mod reranker;
 pub mod reranker_registry;
+pub mod runtime_optimizations;
 pub mod semantic_manifest;
 pub mod tantivy;
 pub mod two_tier_search;
