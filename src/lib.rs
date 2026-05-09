@@ -2273,6 +2273,17 @@ fn has_line_arg(rest: &[String]) -> bool {
         .any(|arg| arg == "--line" || arg == "-n" || arg.starts_with("--line="))
 }
 
+fn has_option_alias(rest: &[String], aliases: &[&str]) -> bool {
+    rest.iter().any(|arg| {
+        aliases.iter().any(|alias| {
+            arg == alias
+                || arg
+                    .strip_prefix(alias)
+                    .is_some_and(|suffix| suffix.starts_with('='))
+        })
+    })
+}
+
 fn recover_path_line_positionals(rest: &mut Vec<String>, corrections: &mut Vec<String>) {
     let Some(command) = rest.first().cloned() else {
         return;
@@ -2333,6 +2344,54 @@ fn recover_named_required_positionals(rest: &mut Vec<String>, corrections: &mut 
             }
         }
         _ => {}
+    }
+}
+
+fn drilldown_assignment_flag(
+    command: &str,
+    key: &str,
+) -> Option<(&'static str, &'static [&'static str])> {
+    if !matches!(command, "expand" | "view") {
+        return None;
+    }
+
+    match key {
+        "line" | "n" => Some(("--line", &["--line", "-n"])),
+        "context" | "c" => Some(("--context", &["--context", "-C"])),
+        _ => None,
+    }
+}
+
+fn recover_drilldown_assignment_flags(rest: &mut Vec<String>, corrections: &mut Vec<String>) {
+    let Some(command) = rest.first().cloned() else {
+        return;
+    };
+
+    let mut index = 1;
+    while index < rest.len() {
+        let arg = rest[index].clone();
+        let Some((key, value)) = arg.split_once('=') else {
+            index += 1;
+            continue;
+        };
+        if value.is_empty() {
+            index += 1;
+            continue;
+        }
+        let Some((flag, aliases)) = drilldown_assignment_flag(&command, key) else {
+            index += 1;
+            continue;
+        };
+        if has_option_alias(rest, aliases) {
+            index += 1;
+            continue;
+        }
+
+        rest.splice(index..=index, [flag.to_string(), value.to_string()]);
+        corrections.push(format!(
+            "'{command} {key}=<value>' → '{command} {flag} <value>' (drill-down option)"
+        ));
+        index += 2;
     }
 }
 
@@ -2485,7 +2544,8 @@ fn recover_limit_aliases(rest: &mut Vec<String>, corrections: &mut Vec<String>) 
 /// 7. **Named positional recovery**: `search --query foo` → `search foo`
 /// 8. **Structured format alias recovery**: `search foo --format json` → `search foo --robot-format json`
 /// 9. **Result-count alias recovery**: `search foo --max-results 5` → `search foo --limit 5`
-/// 10. **Global flag hoisting**: Moves global flags to front regardless of position
+/// 10. **Drill-down option recovery**: `view file line=42` → `view file --line 42`
+/// 11. **Global flag hoisting**: Moves global flags to front regardless of position
 ///
 /// Returns normalized argv plus an optional correction note teaching proper syntax.
 fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
@@ -2840,6 +2900,7 @@ fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
     recover_structured_format_aliases(&mut rest, &mut corrections);
     recover_limit_aliases(&mut rest, &mut corrections);
     recover_named_required_positionals(&mut rest, &mut corrections);
+    recover_drilldown_assignment_flags(&mut rest, &mut corrections);
     recover_path_line_positionals(&mut rest, &mut corrections);
     if rest
         .first()
@@ -3187,7 +3248,13 @@ fn format_friendly_parse_error(err: clap::Error, raw: &[String], normalized: &[S
         .any(|s| s == "--json" || s == "--robot" || s == "-robot" || s == "-json");
 
     // Detect what the agent was probably trying to do
-    let raw_str = raw.join(" ").to_lowercase();
+    let raw_str = raw
+        .iter()
+        .skip(1)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
     let intent = detect_command_intent(&raw_str);
 
     if is_robot {
@@ -3298,6 +3365,11 @@ fn get_contextual_examples(intent: &str) -> Vec<&'static str> {
             "cass search \"database\" --robot --since 2024-01-01",
             "cass search \"TODO\" --robot --workspace /path/to/project",
         ]
+    } else if intent.contains("view") {
+        vec![
+            "cass view <session-path> --robot",
+            "cass view <session-path> -n 42 --json",
+        ]
     } else if intent.contains("session") {
         vec![
             "cass sessions --current --json",
@@ -3322,11 +3394,6 @@ fn get_contextual_examples(intent: &str) -> Vec<&'static str> {
             "cass index --robot",
             "cass index --robot --force",
             "cass index --robot --data-dir /custom/path",
-        ]
-    } else if intent.contains("view") {
-        vec![
-            "cass view <session-path> --robot",
-            "cass view <session-path> -n 42 --json",
         ]
     } else if intent.contains("capabilities") {
         vec!["cass capabilities --json", "cass introspect --json"]
@@ -62761,6 +62828,12 @@ fn build_mistake_recovery_capabilities() -> Vec<MistakeRecoveryCapability> {
             "cass view session.jsonl --line 42 --json",
             true,
             "A grep-style path:line argument is split into the positional path plus --line.",
+        ),
+        mistake_recovery_capability(
+            "cass view session.jsonl line=42 --json",
+            "cass view session.jsonl --line 42 --json",
+            true,
+            "A bare line=<value> assignment is converted to the drill-down --line option.",
         ),
         mistake_recovery_capability(
             "cass search auth --format json",

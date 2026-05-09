@@ -3053,6 +3053,12 @@
       "behavior": "A grep-style path:line argument is split into the positional path plus --line."
     },
     {
+      "wrong": "cass view session.jsonl line=42 --json",
+      "canonical": "cass view session.jsonl --line 42 --json",
+      "accepted": true,
+      "behavior": "A bare line=<value> assignment is converted to the drill-down --line option."
+    },
+    {
       "wrong": "cass search auth --format json",
       "canonical": "cass search auth --robot-format json",
       "accepted": true,

@@ -415,6 +415,13 @@ fn capabilities_are_self_describing_for_agents() {
         ),
         "capabilities should advertise path:line drill-down recovery"
     );
+    assert!(
+        recoveries.iter().any(|recovery| recovery["wrong"]
+            == "cass view session.jsonl line=42 --json"
+            && recovery["canonical"] == "cass view session.jsonl --line 42 --json"
+            && recovery["accepted"] == true),
+        "capabilities should advertise drill-down assignment recovery"
+    );
 }
 
 #[test]
@@ -785,6 +792,23 @@ fn view_path_line_shorthand_attaches_to_line_option() {
 
     assert_eq!(json["path"], "README.md");
     assert_eq!(json["target_line"].as_u64(), Some(1));
+}
+
+#[test]
+fn view_line_and_context_assignments_attach_to_options() {
+    let mut cmd = base_cmd();
+    cmd.args(["view", "README.md", "line=1", "context=0", "--json"]);
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid view JSON");
+
+    assert_eq!(json["path"], "README.md");
+    assert_eq!(json["target_line"].as_u64(), Some(1));
+    assert_eq!(
+        json["lines"].as_array().map(Vec::len),
+        Some(1),
+        "context=0 should produce only the target line"
+    );
 }
 
 #[test]
@@ -4603,6 +4627,37 @@ fn error_messages_include_contextual_examples() {
     assert!(
         stderr.contains("examples") || stderr.contains("cass"),
         "Error should include examples to help the agent"
+    );
+}
+
+#[test]
+fn parse_error_intent_ignores_binary_path() {
+    let mut cmd = base_cmd();
+    cmd.args([
+        "view",
+        "README.md",
+        "--definitely-not-a-real-flag",
+        "--json",
+    ]);
+
+    let output = cmd.assert().failure().code(2).get_output().clone();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let json: Value = serde_json::from_str(stderr.trim()).expect("valid JSON error");
+    let examples = json["examples"].as_array().expect("examples array");
+
+    assert!(
+        examples
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|example| example.starts_with("cass view ")),
+        "view parse errors should show view examples, got: {examples:?}"
+    );
+    assert!(
+        !examples
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|example| example.starts_with("cass sessions ")),
+        "binary path should not make view errors look like session-listing intent"
     );
 }
 
