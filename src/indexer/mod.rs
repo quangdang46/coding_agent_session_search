@@ -16314,6 +16314,7 @@ fn classify_paths(
             let ts = Some(i64::try_from(dur.as_millis()).unwrap_or(i64::MAX));
 
             // Find ALL matching roots
+            let mut matched_root = false;
             for (kind, root) in roots {
                 if let Some(hinted_kind) = hinted_kind
                     && *kind != hinted_kind
@@ -16321,6 +16322,7 @@ fn classify_paths(
                     continue;
                 }
                 if p.starts_with(&root.path) {
+                    matched_root = true;
                     let scan_path = if prefer_explicit_paths {
                         p.clone()
                     } else {
@@ -16345,6 +16347,26 @@ fn classify_paths(
                         _ => entry.2,
                     };
                 }
+            }
+            if prefer_explicit_paths
+                && !matched_root
+                && let Some(hinted_kind) = hinted_kind
+            {
+                let mut scan_root = ScanRoot::local(p.clone());
+                scan_root.path = p.clone();
+                let entry = batch_map
+                    .entry((hinted_kind, p.clone()))
+                    .or_insert((scan_root, None, None));
+                entry.1 = match (entry.1, ts) {
+                    (Some(prev), Some(cur)) => Some(prev.min(cur)),
+                    (None, Some(cur)) => Some(cur),
+                    _ => entry.1,
+                };
+                entry.2 = match (entry.2, ts) {
+                    (Some(prev), Some(cur)) => Some(prev.max(cur)),
+                    (None, Some(cur)) => Some(cur),
+                    _ => entry.2,
+                };
             }
         }
     }
@@ -32535,6 +32557,28 @@ mod tests {
         assert_eq!(classified.len(), 1);
         assert_eq!(classified[0].0, ConnectorKind::Codex);
         assert_eq!(classified[0].1.path, session);
+    }
+
+    #[test]
+    fn classify_paths_keeps_explicit_codex_path_without_detected_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = tmp
+            .path()
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("03")
+            .join("rollout-1.jsonl");
+        std::fs::create_dir_all(session.parent().unwrap()).unwrap();
+        std::fs::write(&session, b"{}").unwrap();
+
+        let classified = classify_paths(vec![session.clone()], &[], true);
+
+        assert_eq!(classified.len(), 1);
+        assert_eq!(classified[0].0, ConnectorKind::Codex);
+        assert_eq!(classified[0].1.path, session);
+        assert!(classified[0].2.is_some());
+        assert!(classified[0].3.is_some());
     }
 
     #[test]
