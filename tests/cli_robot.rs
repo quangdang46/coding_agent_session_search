@@ -654,6 +654,27 @@ fn search_named_query_flag_attaches_to_query_positional() {
 }
 
 #[test]
+fn search_query_assignment_attaches_to_query_positional() {
+    let tmp = TempDir::new().unwrap();
+    let mut cmd = base_cmd();
+    cmd.args([
+        "search",
+        "query=dry run sentinel",
+        "--json",
+        "--dry-run",
+        "--data-dir",
+        tmp.path().to_str().unwrap(),
+    ]);
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid dry-run JSON");
+
+    assert_eq!(json["dry_run"].as_bool(), Some(true));
+    assert_eq!(json["valid"].as_bool(), Some(true));
+    assert_eq!(json["query"].as_str(), Some("dry run sentinel"));
+}
+
+#[test]
 fn leading_json_search_named_query_flag_combines_recoveries() {
     let tmp = TempDir::new().unwrap();
     let mut cmd = base_cmd();
@@ -704,6 +725,26 @@ fn view_named_path_flag_attaches_to_path_positional() {
         "view",
         "--path",
         "README.md",
+        "--json",
+        "--line",
+        "1",
+        "--context",
+        "0",
+    ]);
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid view JSON");
+
+    assert_eq!(json["path"], "README.md");
+    assert_eq!(json["target_line"].as_u64(), Some(1));
+}
+
+#[test]
+fn view_path_assignment_attaches_to_path_positional() {
+    let mut cmd = base_cmd();
+    cmd.args([
+        "view",
+        "path=README.md",
         "--json",
         "--line",
         "1",

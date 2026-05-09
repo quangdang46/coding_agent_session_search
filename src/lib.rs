@@ -2240,6 +2240,25 @@ fn take_named_value(rest: &mut Vec<String>, names: &[&str]) -> Option<(String, S
     None
 }
 
+fn rewrite_named_assignment_positional(
+    rest: &mut [String],
+    names: &[&str],
+) -> Option<(String, String)> {
+    for slot in rest.iter_mut().skip(1) {
+        let arg = slot.clone();
+        for name in names {
+            let prefix = format!("{name}=");
+            if let Some(value) = arg.strip_prefix(&prefix)
+                && !value.is_empty()
+            {
+                *slot = value.to_string();
+                return Some(((*name).to_string(), value.to_string()));
+            }
+        }
+    }
+    None
+}
+
 fn recover_named_required_positionals(rest: &mut Vec<String>, corrections: &mut Vec<String>) {
     let Some(command) = rest.first().cloned() else {
         return;
@@ -2252,6 +2271,12 @@ fn recover_named_required_positionals(rest: &mut Vec<String>, corrections: &mut 
                 corrections.push(format!(
                     "'{command} {flag} <value>' → '{command} <query>' (query is positional)"
                 ));
+            } else if let Some((name, _value)) =
+                rewrite_named_assignment_positional(rest, &["query", "q"])
+            {
+                corrections.push(format!(
+                    "'{command} {name}=<value>' → '{command} <value>' (query is positional)"
+                ));
             }
         }
         "context" | "expand" | "export" | "export-html" | "resume" | "view" => {
@@ -2261,6 +2286,13 @@ fn recover_named_required_positionals(rest: &mut Vec<String>, corrections: &mut 
                 rest.insert(1, value);
                 corrections.push(format!(
                     "'{command} {flag} <value>' → '{command} <path>' (path is positional)"
+                ));
+            } else if let Some((name, _value)) = rewrite_named_assignment_positional(
+                rest,
+                &["path", "source-path", "source_path", "file", "session"],
+            ) {
+                corrections.push(format!(
+                    "'{command} {name}=<value>' → '{command} <value>' (path is positional)"
                 ));
             }
         }
