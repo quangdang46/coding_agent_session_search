@@ -762,6 +762,8 @@ AI agents sometimes make syntax mistakes. `cass` aggressively normalizes input t
 | `cass --robot status` | `cass status --json` | Leading robot flag canonicalized to JSON output |
 | `cass search --query "auth" --json` | `cass search "auth" --json` | Named query option converted to required positional query |
 | `cass view --path session.jsonl --line 42 --json` | `cass view session.jsonl --line 42 --json` | Named path option converted to required positional path |
+| `cass search "auth" --format json` | `cass search "auth" --robot-format json` | Familiar format spelling converted to robot format |
+| `cass --format json status` | `cass status --robot-format json` | Leading format request moved to the target subcommand |
 | `cass search --limt 5` | `cass search --limit 5` | Flag typos within Levenshtein distance ≤2 corrected |
 
 The CLI applies multiple normalization layers:
@@ -772,7 +774,8 @@ The CLI applies multiple normalization layers:
 5. **Root robot default**: `cass --json`, `cass --robot`, or `cass --robot-format json` with no subcommand runs read-only `triage`
 6. **Leading structured flag recovery**: `--json`/`--robot` before a robot-capable subcommand is moved onto that subcommand
 7. **Named positional recovery**: `--query` for search/pack and `--path`/`--source-path`/`--file`/`--session` for drill-down/export commands become the required positional argument
-8. **Global flag hoisting**: Position-independent flag handling
+8. **Structured format recovery**: `--format json|jsonl|compact|sessions|toon` is accepted as `--robot-format ...` on robot-capable commands; `export --format ...` keeps its export-format meaning
+9. **Global flag hoisting**: Position-independent flag handling
 
 When corrections are applied, `cass` emits a teaching note to stderr so agents learn the canonical syntax.
 

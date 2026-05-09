@@ -15,12 +15,33 @@ fn env_requests_robot_output() -> bool {
     cass_output_format || toon_default_format
 }
 
+fn is_robot_format_name(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    matches!(
+        value.as_str(),
+        "json" | "jsonl" | "compact" | "sessions" | "toon"
+    )
+}
+
 fn is_robot_mode_args() -> bool {
-    for arg in std::env::args() {
+    let args: Vec<String> = std::env::args().collect();
+    for (index, arg) in args.iter().enumerate() {
         if matches!(arg.as_str(), "--json" | "--robot" | "-json" | "-robot") {
             return true;
         }
         if arg == "--robot-format" || arg.starts_with("--robot-format=") {
+            return true;
+        }
+        if let Some(value) = arg.strip_prefix("--format=")
+            && is_robot_format_name(value)
+        {
+            return true;
+        }
+        if arg == "--format"
+            && args
+                .get(index + 1)
+                .is_some_and(|value| is_robot_format_name(value))
+        {
             return true;
         }
     }

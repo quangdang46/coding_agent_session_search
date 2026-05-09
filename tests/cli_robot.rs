@@ -719,6 +719,94 @@ fn view_named_path_flag_attaches_to_path_positional() {
 }
 
 #[test]
+fn search_format_json_alias_attaches_to_robot_format() {
+    let tmp = TempDir::new().unwrap();
+    let mut cmd = base_cmd();
+    cmd.args([
+        "search",
+        "foo",
+        "--format",
+        "json",
+        "--data-dir",
+        tmp.path().to_str().unwrap(),
+    ]);
+    let output = cmd.assert().failure().get_output().clone();
+    assert_eq!(output.status.code(), Some(3));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let last_line = stderr
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .expect("stderr should contain JSON error");
+    let json: Value = serde_json::from_str(last_line).expect("valid JSON error");
+    assert_eq!(json["error"]["kind"], "missing-index");
+}
+
+#[test]
+fn status_format_json_alias_outputs_status_json() {
+    let tmp = TempDir::new().unwrap();
+    let mut cmd = base_cmd();
+    cmd.args([
+        "status",
+        "--format=json",
+        "--data-dir",
+        tmp.path().to_str().unwrap(),
+    ]);
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid status JSON");
+
+    assert_eq!(json["status"], "not_initialized");
+    assert_eq!(json["initialized"], false);
+}
+
+#[test]
+fn leading_format_json_before_status_attaches_to_status() {
+    let tmp = TempDir::new().unwrap();
+    let mut cmd = base_cmd();
+    cmd.args([
+        "--format",
+        "json",
+        "status",
+        "--data-dir",
+        tmp.path().to_str().unwrap(),
+    ]);
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid status JSON");
+
+    assert_eq!(json["status"], "not_initialized");
+    assert_eq!(json["initialized"], false);
+}
+
+#[test]
+fn root_format_json_defaults_to_triage() {
+    let tmp = TempDir::new().unwrap();
+    let data_dir = tmp.path().to_string_lossy().to_string();
+    let mut cmd = base_cmd();
+    cmd.args(["--format", "json", "--data-dir", &data_dir]);
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid triage JSON");
+
+    assert_eq!(json["surface"], "triage");
+    assert_eq!(json["status"], "not_initialized");
+    assert_not_initialized_recommended_commands(&json, tmp.path());
+}
+
+#[test]
+fn capabilities_format_json_alias_outputs_capabilities_json() {
+    let mut cmd = base_cmd();
+    cmd.args(["capabilities", "--format", "json"]);
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid capabilities JSON");
+
+    assert_eq!(json["contract_version"], "1");
+    assert!(json["mistake_recoveries"].as_array().is_some());
+}
+
+#[test]
 fn leading_json_before_robot_docs_is_removed_as_redundant() {
     let mut cmd = base_cmd();
     cmd.args(["--json", "robot-docs", "commands", "--color=never"]);

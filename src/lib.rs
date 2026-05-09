@@ -2268,6 +2268,95 @@ fn recover_named_required_positionals(rest: &mut Vec<String>, corrections: &mut 
     }
 }
 
+fn is_robot_format_alias_value(value: &str) -> bool {
+    matches!(value, "json" | "jsonl" | "compact" | "sessions" | "toon")
+}
+
+fn can_recover_format_alias_for_command(command: &str) -> bool {
+    command != "export" && command_accepts_leading_structured_flag(command)
+}
+
+fn parse_format_alias_at(rest: &[String], index: usize) -> Option<(usize, String)> {
+    let arg = rest.get(index)?;
+    if arg == "--format" {
+        let value = rest.get(index + 1)?;
+        let value = value.to_ascii_lowercase();
+        if is_robot_format_alias_value(&value) {
+            return Some((2, value));
+        }
+    }
+    if let Some(value) = arg.strip_prefix("--format=") {
+        let value = value.to_ascii_lowercase();
+        if is_robot_format_alias_value(&value) {
+            return Some((1, value));
+        }
+    }
+    None
+}
+
+fn recover_structured_format_aliases(rest: &mut Vec<String>, corrections: &mut Vec<String>) {
+    if let Some((consumed, format)) = parse_format_alias_at(rest, 0) {
+        match rest.get(consumed).cloned() {
+            Some(command) if can_recover_format_alias_for_command(&command) => {
+                rest.drain(0..consumed);
+                rest.push("--robot-format".to_string());
+                rest.push(format.clone());
+                corrections.push(format!(
+                    "Leading '--format {format}' moved to '{command} --robot-format {format}' (structured output format)"
+                ));
+                return;
+            }
+            Some(command) if command.starts_with('-') => {
+                let mut triage_tail = vec!["--json".to_string()];
+                triage_tail.extend(rest[consumed..].iter().cloned());
+                if let Some(mut rewritten) = root_structured_triage_rewrite(&triage_tail) {
+                    if rewritten.last().is_some_and(|arg| arg == "--json") {
+                        rewritten.pop();
+                    }
+                    rewritten.push("--robot-format".to_string());
+                    rewritten.push(format.clone());
+                    *rest = rewritten;
+                    corrections.push(format!(
+                        "Top-level '--format {format}' → 'triage --robot-format {format}' (read-only agent preflight)"
+                    ));
+                    return;
+                }
+            }
+            None => {
+                rest.drain(0..consumed);
+                rest.push("triage".to_string());
+                rest.push("--robot-format".to_string());
+                rest.push(format.clone());
+                corrections.push(format!(
+                    "Top-level '--format {format}' → 'triage --robot-format {format}' (read-only agent preflight)"
+                ));
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    let Some(command) = rest.first().cloned() else {
+        return;
+    };
+    if !can_recover_format_alias_for_command(&command) {
+        return;
+    }
+
+    for index in 1..rest.len() {
+        if let Some((consumed, format)) = parse_format_alias_at(rest, index) {
+            rest.splice(
+                index..index + consumed,
+                ["--robot-format".to_string(), format.clone()],
+            );
+            corrections.push(format!(
+                "'{command} --format {format}' → '{command} --robot-format {format}' (structured output format)"
+            ));
+            return;
+        }
+    }
+}
+
 /// Normalize common robot-mode invocation mistakes to make the CLI more forgiving for AI agents.
 ///
 /// This function applies multiple layers of normalization to maximize acceptance of
@@ -2280,7 +2369,8 @@ fn recover_named_required_positionals(rest: &mut Vec<String>, corrections: &mut 
 /// 5. **Root structured-output default**: `--json`/`--robot` with no command → `triage --json`
 /// 6. **Leading structured-output recovery**: `--json search` → `search --json`
 /// 7. **Named positional recovery**: `search --query foo` → `search foo`
-/// 8. **Global flag hoisting**: Moves global flags to front regardless of position
+/// 8. **Structured format alias recovery**: `search foo --format json` → `search foo --robot-format json`
+/// 9. **Global flag hoisting**: Moves global flags to front regardless of position
 ///
 /// Returns normalized argv plus an optional correction note teaching proper syntax.
 fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
@@ -2624,6 +2714,7 @@ fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
             "Leading --json/--robot moved after the subcommand (structured output flag)".into(),
         );
     }
+    recover_structured_format_aliases(&mut rest, &mut corrections);
     recover_named_required_positionals(&mut rest, &mut corrections);
     if rest
         .first()
@@ -3573,6 +3664,8 @@ pub async fn run_with_parsed(parsed: ParsedCli) -> CliResult<()> {
     let is_robot_mode = raw_args
         .iter()
         .any(|s| s == "--json" || s == "--robot" || s == "-json" || s == "-robot")
+        || cli.robot_format.is_some()
+        || robot_format_from_env().is_some()
         || matches!(&cli.command, Some(Commands::Capabilities { .. }))
         || matches!(&cli.command, Some(Commands::Introspect { .. }));
     let is_doc_mode = cli.robot_help || matches!(&cli.command, Some(Commands::RobotDocs { .. }));
@@ -11273,6 +11366,7 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "  cass --json            # also defaults to triage for zero-context agents".to_string(),
             "  cass --json search \"auth\"  # leading --json is moved to the search subcommand".to_string(),
             "  cass search --query \"auth\" --json  # --query is accepted and converted to positional syntax".to_string(),
+            "  cass search \"auth\" --format json  # --format json is accepted as --robot-format json".to_string(),
             "  # Follow next_command when present; use discovery.schemas_command for typed clients.".to_string(),
             String::new(),
             "# Basic search with JSON output for agents".to_string(),
@@ -62523,6 +62617,18 @@ fn build_mistake_recovery_capabilities() -> Vec<MistakeRecoveryCapability> {
             "cass view session.jsonl --line 42 --json",
             true,
             "A named path option is converted to the required positional path for drill-down commands.",
+        ),
+        mistake_recovery_capability(
+            "cass search auth --format json",
+            "cass search auth --robot-format json",
+            true,
+            "A familiar structured-output spelling is converted to cass's robot-format flag on robot-capable commands.",
+        ),
+        mistake_recovery_capability(
+            "cass --format json status",
+            "cass status --robot-format json",
+            true,
+            "A leading structured-output format request is moved onto the robot-capable subcommand.",
         ),
     ]
 }

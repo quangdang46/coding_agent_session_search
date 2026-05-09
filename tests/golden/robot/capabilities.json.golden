@@ -3039,6 +3039,18 @@
       "canonical": "cass view session.jsonl --line 42 --json",
       "accepted": true,
       "behavior": "A named path option is converted to the required positional path for drill-down commands."
+    },
+    {
+      "wrong": "cass search auth --format json",
+      "canonical": "cass search auth --robot-format json",
+      "accepted": true,
+      "behavior": "A familiar structured-output spelling is converted to cass's robot-format flag on robot-capable commands."
+    },
+    {
+      "wrong": "cass --format json status",
+      "canonical": "cass status --robot-format json",
+      "accepted": true,
+      "behavior": "A leading structured-output format request is moved onto the robot-capable subcommand."
     }
   ],
   "limits": {
