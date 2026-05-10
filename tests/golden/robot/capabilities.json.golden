@@ -3126,6 +3126,12 @@
       "behavior": "Bare filter key/value pairs after a query are converted before remaining words are folded into the query."
     },
     {
+      "wrong": "cass search --agent codex --limit 5 auth error --json",
+      "canonical": "cass search \"auth error\" --agent codex --limit 5 --json",
+      "accepted": true,
+      "behavior": "A query placed after leading search/pack filters is moved back to the required query positional."
+    },
+    {
       "wrong": "cass search auth -n 5 --json",
       "canonical": "cass search auth --limit 5 --json",
       "accepted": true,

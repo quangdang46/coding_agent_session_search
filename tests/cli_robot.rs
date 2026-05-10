@@ -424,6 +424,14 @@ fn capabilities_are_self_describing_for_agents() {
         "capabilities should advertise bare filter pair recovery"
     );
     assert!(
+        recoveries.iter().any(|recovery| recovery["wrong"]
+            == "cass search --agent codex --limit 5 auth error --json"
+            && recovery["canonical"]
+                == "cass search \"auth error\" --agent codex --limit 5 --json"
+            && recovery["accepted"] == true),
+        "capabilities should advertise leading-filter query recovery"
+    );
+    assert!(
         recoveries
             .iter()
             .any(|recovery| recovery["wrong"] == "cass auth error --json"
@@ -4954,6 +4962,34 @@ fn explicit_search_recovers_bare_filter_pairs_after_query_words() {
     let filters = &json["explanation"]["filters_summary"];
     assert_eq!(filters["agent_count"].as_u64(), Some(1));
     assert_eq!(filters["has_time_filter"].as_bool(), Some(true));
+}
+
+#[test]
+fn explicit_search_recovers_query_after_leading_filters() {
+    let mut cmd = base_cmd();
+    cmd.args([
+        "search",
+        "--agent",
+        "codex",
+        "--limit",
+        "5",
+        "authentication",
+        "error",
+        "--robot",
+        "--dry-run",
+    ]);
+
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid dry-run JSON");
+
+    assert_eq!(json["dry_run"].as_bool(), Some(true));
+    assert_eq!(json["valid"].as_bool(), Some(true));
+    assert_eq!(json["query"].as_str(), Some("authentication error"));
+    assert_eq!(
+        json["explanation"]["filters_summary"]["agent_count"].as_u64(),
+        Some(1)
+    );
 }
 
 #[test]

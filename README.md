@@ -763,6 +763,7 @@ AI agents sometimes make syntax mistakes. `cass` aggressively normalizes input t
 | `cass search --query "auth" --json` | `cass search "auth" --json` | Named query option converted to required positional query |
 | `cass search auth error --json` | `cass search "auth error" --json` | Adjacent unquoted query words folded into one search |
 | `cass auth error --json` | `cass search "auth error" --json` | Unquoted robot-mode query words folded into search |
+| `cass search --agent codex --limit 5 auth error --json` | `cass search "auth error" --agent codex --limit 5 --json` | Query moved before leading search filters |
 | `cass view --path session.jsonl --line 42 --json` | `cass view session.jsonl --line 42 --json` | Named path option converted to required positional path |
 | `cass search "auth" --format json` | `cass search "auth" --robot-format json` | Familiar format spelling converted to robot format |
 | `cass --format json status` | `cass status --robot-format json` | Leading format request moved to the target subcommand |
@@ -789,8 +790,9 @@ The CLI applies multiple normalization layers:
 11. **Time-window aliases**: `--last 7`, `--before now`, `last=7d`, and `before=now` become canonical `--since`/`--until` filters
 12. **Provider aliases**: `--provider`, `--tool`, `--connector`, and matching assignments become canonical `--agent` filters on search-like commands
 13. **Bare option pairs**: after at least one search/pack query word, `provider codex`, `limit 5`, and `last 7d` become canonical filter flags before the remaining words are folded into the query
-14. **Implicit robot search**: unquoted top-level words with an explicit robot/JSON output request become a `search` query unless they look like a subcommand typo
-15. **Global flag hoisting**: Position-independent flag handling
+14. **Leading-filter query recovery**: if a search/pack query comes after leading options, the query is moved back to the required positional slot
+15. **Implicit robot search**: unquoted top-level words with an explicit robot/JSON output request become a `search` query unless they look like a subcommand typo
+16. **Global flag hoisting**: Position-independent flag handling
 
 When corrections are applied, `cass` emits a teaching note to stderr so agents learn the canonical syntax.
 

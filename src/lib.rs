@@ -2909,6 +2909,162 @@ fn recover_bare_option_value_pairs(rest: &mut Vec<String>, corrections: &mut Vec
     }
 }
 
+fn search_like_option_value_count(command: &str, arg: &str) -> Option<usize> {
+    let name = arg.strip_prefix("--")?;
+    let (name, inline_value) = name
+        .split_once('=')
+        .map_or((name, false), |(name, _)| (name, true));
+    let name = name.to_ascii_lowercase();
+
+    let takes_value = matches!(
+        name.as_str(),
+        "agent"
+            | "workspace"
+            | "limit"
+            | "offset"
+            | "fields"
+            | "max-content-length"
+            | "max_content_length"
+            | "max-tokens"
+            | "max_tokens"
+            | "request-id"
+            | "request_id"
+            | "cursor"
+            | "display"
+            | "data-dir"
+            | "data_dir"
+            | "days"
+            | "since"
+            | "until"
+            | "aggregate"
+            | "timeout"
+            | "source"
+            | "sessions-from"
+            | "sessions_from"
+            | "mode"
+            | "model"
+            | "reranker"
+            | "robot-format"
+            | "robot_format"
+    ) || matches!(
+        (command, name.as_str()),
+        (
+            "pack",
+            "max-sessions"
+                | "max_sessions"
+                | "max-evidence"
+                | "max_evidence"
+                | "context-lines"
+                | "context_lines"
+                | "max-excerpt-chars"
+                | "max_excerpt_chars"
+                | "freshness-policy"
+                | "freshness_policy"
+                | "freshness-window-seconds"
+                | "freshness_window_seconds"
+        )
+    );
+
+    if takes_value {
+        return Some(if inline_value { 1 } else { 2 });
+    }
+
+    let is_bool = matches!(
+        name.as_str(),
+        "json"
+            | "robot"
+            | "robot-meta"
+            | "robot_meta"
+            | "today"
+            | "yesterday"
+            | "week"
+            | "explain"
+            | "dry-run"
+            | "dry_run"
+            | "highlight"
+            | "approximate"
+            | "rerank"
+            | "daemon"
+            | "no-daemon"
+            | "no_daemon"
+            | "two-tier"
+            | "two_tier"
+            | "fast-only"
+            | "fast_only"
+            | "quality-only"
+            | "quality_only"
+            | "refresh"
+            | "catch-up"
+            | "catch_up"
+    ) || matches!(
+        (command, name.as_str()),
+        (
+            "pack",
+            "require-evidence" | "require_evidence" | "explain-selection" | "explain_selection"
+        )
+    );
+
+    is_bool.then_some(1)
+}
+
+fn recover_query_after_leading_search_options(
+    rest: &mut Vec<String>,
+    corrections: &mut Vec<String>,
+) {
+    let Some(command) = rest.first().cloned() else {
+        return;
+    };
+    if !matches!(command.as_str(), "search" | "pack") || rest.len() < 3 {
+        return;
+    }
+
+    let mut index = 1;
+    let mut saw_leading_option = false;
+    while index < rest.len() {
+        let Some(arg) = rest.get(index) else {
+            return;
+        };
+        if !arg.starts_with('-') {
+            break;
+        }
+        let Some(width) = search_like_option_value_count(&command, arg) else {
+            return;
+        };
+        if width == 2
+            && rest
+                .get(index + 1)
+                .is_none_or(|value| value.starts_with("--"))
+        {
+            return;
+        }
+        saw_leading_option = true;
+        index += width;
+    }
+
+    if !saw_leading_option || index >= rest.len() {
+        return;
+    }
+
+    let query_start = index;
+    let mut query_end = query_start;
+    while let Some(arg) = rest.get(query_end) {
+        if arg.starts_with('-') || is_query_boundary_assignment(&command, arg) {
+            break;
+        }
+        query_end += 1;
+    }
+    if query_end <= query_start {
+        return;
+    }
+
+    let query = rest[query_start..query_end].join(" ");
+    rest.drain(query_start..query_end);
+    rest.insert(1, query.clone());
+    corrections.push(format!(
+        "'{command} <filters> {query}' → '{command} \"{query}\" <filters>' (query moved before leading filters)"
+    ));
+}
+
 fn recover_path_line_positionals(rest: &mut Vec<String>, corrections: &mut Vec<String>) {
     let Some(command) = rest.first().cloned() else {
         return;
@@ -3313,9 +3469,10 @@ fn recover_multiword_query_positionals(rest: &mut Vec<String>, corrections: &mut
 /// 11. **Time-window alias recovery**: `search foo --last 7` → `search foo --since -7d`
 /// 12. **Provider alias recovery**: `search foo --provider codex` → `search foo --agent codex`
 /// 13. **Bare option-pair recovery**: `search foo provider codex` → `search foo --agent codex`
-/// 14. **Implicit robot search recovery**: `foo bar --json` → `search "foo bar" --json`
-/// 15. **Drill-down option recovery**: `view file line=42` → `view file --line 42`
-/// 16. **Global flag hoisting**: Moves global flags to front regardless of position
+/// 14. **Leading-filter query recovery**: `search --agent codex foo bar` → `search "foo bar" --agent codex`
+/// 15. **Implicit robot search recovery**: `foo bar --json` → `search "foo bar" --json`
+/// 16. **Drill-down option recovery**: `view file line=42` → `view file --line 42`
+/// 17. **Global flag hoisting**: Moves global flags to front regardless of position
 ///
 /// Returns normalized argv plus an optional correction note teaching proper syntax.
 fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
@@ -3692,6 +3849,7 @@ fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
     recover_time_alias_flags(&mut rest, &mut corrections);
     recover_agent_filter_alias_flags(&mut rest, &mut corrections);
     recover_named_required_positionals(&mut rest, &mut corrections);
+    recover_query_after_leading_search_options(&mut rest, &mut corrections);
     recover_bare_option_value_pairs(&mut rest, &mut corrections);
     recover_multiword_query_positionals(&mut rest, &mut corrections);
     recover_drilldown_assignment_flags(&mut rest, &mut corrections);
@@ -64905,6 +65063,12 @@ fn build_mistake_recovery_capabilities() -> Vec<MistakeRecoveryCapability> {
             "cass search auth --agent codex --limit 5 --since -7d --json",
             true,
             "Bare filter key/value pairs after a query are converted before remaining words are folded into the query.",
+        ),
+        mistake_recovery_capability(
+            "cass search --agent codex --limit 5 auth error --json",
+            "cass search \"auth error\" --agent codex --limit 5 --json",
+            true,
+            "A query placed after leading search/pack filters is moved back to the required query positional.",
         ),
         mistake_recovery_capability(
             "cass search auth -n 5 --json",
