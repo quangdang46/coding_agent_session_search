@@ -444,6 +444,13 @@ fn capabilities_are_self_describing_for_agents() {
             && recovery["accepted"] == true),
         "capabilities should advertise time-window assignment recovery"
     );
+    assert!(
+        recoveries.iter().any(|recovery| recovery["wrong"]
+            == "cass search auth --last 7 --before now --json"
+            && recovery["canonical"] == "cass search auth --since -7d --until now --json"
+            && recovery["accepted"] == true),
+        "capabilities should advertise time-window alias flag recovery"
+    );
 }
 
 #[test]
@@ -2021,6 +2028,29 @@ fn search_since_now_assignment_filters_to_zero_hits() {
         "",
         "--json",
         "since=now",
+        "limit=1",
+        "data_dir=tests/fixtures/search_demo_data",
+    ]);
+
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    let hits = json["hits"].as_array().expect("hits array");
+
+    assert_eq!(json["count"].as_u64(), Some(0));
+    assert!(hits.is_empty());
+}
+
+#[test]
+fn search_time_window_alias_flags_filter_to_zero_hits() {
+    let mut cmd = base_cmd();
+    cmd.args([
+        "search",
+        "",
+        "--json",
+        "--last",
+        "7",
+        "--before=now",
         "limit=1",
         "data_dir=tests/fixtures/search_demo_data",
     ]);

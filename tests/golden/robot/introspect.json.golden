@@ -365,7 +365,8 @@
             "contracts",
             "wrap",
             "sources",
-            "analytics"
+            "analytics",
+            "doctor"
           ]
         }
       ],

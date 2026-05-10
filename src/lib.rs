@@ -8,6 +8,10 @@ pub mod crash_replay;
 #[cfg(unix)]
 pub mod daemon;
 pub(crate) mod doctor;
+pub(crate) mod doctor_chokepoint;
+pub(crate) mod doctor_robot_docs;
+pub(crate) mod doctor_runs;
+pub(crate) mod doctor_undo;
 pub mod encryption;
 pub mod evidence_bundle;
 pub mod explainability;
@@ -835,6 +839,65 @@ pub enum Commands {
         /// Permit a mutating repair even when a previous failure marker exists
         #[arg(long)]
         allow_repeated_repair: bool,
+
+        // --- world-class-doctor pass-2: per-run artifact subcommands ---
+        /// List per-run artifact directories under `<data_dir>/doctor/runs/`. Read-only.
+        /// Output is JSON when combined with `--json`/`--robot`. Returns the run-id, started/ended timestamps,
+        /// mode, exit_code, action_count and status (completed|incomplete|unknown) per run, newest-first.
+        #[arg(long, default_value_t = false, hide = true)]
+        ls: bool,
+
+        /// Undo the named run by id (or `latest`). Walks `<run-dir>/actions.jsonl` in reverse,
+        /// verifies hashes, and restores byte-identically from the per-run backups. Refuses on
+        /// any post-mutation tampering. The undo itself produces a fresh run-id.
+        #[arg(long, hide = true)]
+        undo: Option<String>,
+
+        // --- world-class-doctor pass-3: agent-ergonomic mega-command + GC ---
+        /// Mega-command for agents: returns one envelope with summary, findings,
+        /// actions_planned, recommended_command, capabilities_url. Read-only;
+        /// composes the existing read-only doctor check with planning hints.
+        #[arg(long, default_value_t = false, hide = true)]
+        robot_triage: bool,
+
+        /// Show what `--fix` would change vs the current state. Read-only.
+        /// Optional `<REF>` compares against a prior run-id instead.
+        #[arg(long, hide = true)]
+        diff: Option<String>,
+
+        /// Quarantine doctor runs older than `<ISO8601>`. Renames into
+        /// `<data_dir>/doctor/quarantine/runs/`; never deletes. Requires
+        /// both `--gc-before` AND `--yes` (per the destructive-action gate).
+        #[arg(long, hide = true)]
+        gc_before: Option<String>,
+
+        /// World-class-doctor pass-6: long-running monitor mode. Periodically
+        /// re-reads `<data_dir>/doctor/runs/` and emits one JSONL event per
+        /// observed change to stdout. Stops on Ctrl+C or after `--watch-iterations`.
+        #[arg(long, default_value_t = false, hide = true)]
+        watch: bool,
+
+        /// World-class-doctor pass-6: poll interval for `--watch`. Default
+        /// 5000 ms. Bounded to [500, 60000].
+        #[arg(long, default_value_t = 5000, hide = true)]
+        watch_interval_ms: u64,
+
+        /// World-class-doctor pass-6: stop after this many polls. 0 = run
+        /// forever (until SIGINT). Useful in tests + bounded automation.
+        #[arg(long, default_value_t = 0, hide = true)]
+        watch_iterations: u64,
+
+        /// World-class-doctor pass-8: explain a prior run by id (or
+        /// `latest`). Returns a single envelope with the run's manifest,
+        /// every action recorded, and a flattened band timeline. Read-only.
+        #[arg(long, hide = true)]
+        explain: Option<String>,
+
+        /// World-class-doctor pass-8: emit the doctor's extended capability
+        /// surface — detectors[], fixers[], exit_codes[], data_paths[],
+        /// env_vars[] — in one envelope. Read-only.
+        #[arg(long, default_value_t = false, hide = true)]
+        emit_capabilities: bool,
     },
     /// Find related sessions for a given source path
     Context {
@@ -1871,6 +1934,9 @@ pub enum RobotTopic {
     Wrap,
     Sources,
     Analytics,
+    /// `cass doctor` agent handbook (added in world-class-doctor pass-2).
+    /// Body lives in `src/doctor_robot_docs.rs`.
+    Doctor,
 }
 
 /// Output format for robot/automation mode
@@ -2605,6 +2671,61 @@ fn time_assignment_option_for_command(
     }
 }
 
+fn take_time_alias_flag(rest: &mut Vec<String>) -> Option<(String, &'static str, String)> {
+    for index in 1..rest.len() {
+        let arg = rest[index].clone();
+        if !arg.starts_with("--") {
+            continue;
+        }
+
+        let (name, value, consumed) = if let Some((name, value)) = arg.split_once('=') {
+            let Some(name) = name.strip_prefix("--") else {
+                continue;
+            };
+            if value.is_empty() {
+                continue;
+            }
+            (name, value.to_string(), 1)
+        } else {
+            let Some(name) = arg.strip_prefix("--") else {
+                continue;
+            };
+            let Some(value) = rest.get(index + 1).cloned() else {
+                continue;
+            };
+            if value.starts_with("--") {
+                continue;
+            }
+            (name, value, 2)
+        };
+
+        let command = rest.first().map(String::as_str).unwrap_or_default();
+        let Some((flag, _, rewritten_value)) =
+            time_assignment_option_for_command(command, name, &value)
+        else {
+            continue;
+        };
+        rest.splice(
+            index..index + consumed,
+            [flag.to_string(), rewritten_value.clone()],
+        );
+        return Some((format!("--{name}"), flag, rewritten_value));
+    }
+    None
+}
+
+fn recover_time_alias_flags(rest: &mut Vec<String>, corrections: &mut Vec<String>) {
+    while let Some((alias, flag, value)) = take_time_alias_flag(rest) {
+        let command = rest
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "command".to_string());
+        corrections.push(format!(
+            "'{command} {alias} <value>' → '{command} {flag} {value}' (time-window alias)"
+        ));
+    }
+}
+
 fn recover_key_value_option_assignments(rest: &mut [String], corrections: &mut Vec<String>) {
     let Some(command) = rest.first().cloned() else {
         return;
@@ -2924,8 +3045,9 @@ fn recover_limit_aliases(rest: &mut Vec<String>, corrections: &mut Vec<String>) 
 /// 7. **Named positional recovery**: `search --query foo` → `search foo`
 /// 8. **Structured format alias recovery**: `search foo --format json` → `search foo --robot-format json`
 /// 9. **Result-count alias recovery**: `search foo --max-results 5` → `search foo --limit 5`
-/// 10. **Drill-down option recovery**: `view file line=42` → `view file --line 42`
-/// 11. **Global flag hoisting**: Moves global flags to front regardless of position
+/// 10. **Time-window alias recovery**: `search foo --last 7` → `search foo --since -7d`
+/// 11. **Drill-down option recovery**: `view file line=42` → `view file --line 42`
+/// 12. **Global flag hoisting**: Moves global flags to front regardless of position
 ///
 /// Returns normalized argv plus an optional correction note teaching proper syntax.
 fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
@@ -2960,6 +3082,20 @@ fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
         "cursor",
         "since",
         "until",
+        "last",
+        "recent",
+        "past",
+        "within",
+        "from",
+        "after",
+        "start",
+        "start-date",
+        "start_date",
+        "to",
+        "before",
+        "end",
+        "end-date",
+        "end_date",
         "days",
         "today",
         "yesterday",
@@ -3279,6 +3415,7 @@ fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
     }
     recover_structured_format_aliases(&mut rest, &mut corrections);
     recover_limit_aliases(&mut rest, &mut corrections);
+    recover_time_alias_flags(&mut rest, &mut corrections);
     recover_named_required_positionals(&mut rest, &mut corrections);
     recover_drilldown_assignment_flags(&mut rest, &mut corrections);
     recover_key_value_option_assignments(&mut rest, &mut corrections);
@@ -5503,8 +5640,63 @@ async fn execute_cli(
                     verbose,
                     force_rebuild,
                     allow_repeated_repair,
+                    ls,
+                    undo,
+                    robot_triage,
+                    diff,
+                    gc_before,
+                    watch,
+                    watch_interval_ms,
+                    watch_iterations,
+                    explain,
+                    emit_capabilities,
                 } => {
                     let structured_format = resolve_subcommand_structured_format(cli, json);
+                    // World-class-doctor pass-8: `cass doctor --explain <run-id>`.
+                    if let Some(run_id_arg) = explain {
+                        run_doctor_explain(data_dir, &run_id_arg, structured_format)?;
+                        return Ok(());
+                    }
+                    // World-class-doctor pass-8: `cass doctor --emit-capabilities`.
+                    if emit_capabilities {
+                        run_doctor_emit_capabilities(structured_format)?;
+                        return Ok(());
+                    }
+                    // World-class-doctor pass-2: read-only `cass doctor --ls`.
+                    if ls {
+                        run_doctor_ls(data_dir, structured_format)?;
+                        return Ok(());
+                    }
+                    // World-class-doctor pass-2: `cass doctor --undo <run-id>`.
+                    if let Some(run_id_arg) = undo {
+                        run_doctor_undo(data_dir, &run_id_arg, structured_format)?;
+                        return Ok(());
+                    }
+                    // World-class-doctor pass-3: `cass doctor --robot-triage`.
+                    if robot_triage {
+                        run_doctor_robot_triage(data_dir, structured_format)?;
+                        return Ok(());
+                    }
+                    // World-class-doctor pass-3: `cass doctor --diff [<REF>]`.
+                    if let Some(diff_ref) = diff {
+                        run_doctor_diff(data_dir, &diff_ref, structured_format)?;
+                        return Ok(());
+                    }
+                    // World-class-doctor pass-3: `cass doctor --gc-before <ISO> --yes`.
+                    if let Some(before_iso) = gc_before {
+                        run_doctor_gc(data_dir, &before_iso, yes, structured_format)?;
+                        return Ok(());
+                    }
+                    // World-class-doctor pass-6: `cass doctor --watch`.
+                    if watch {
+                        run_doctor_watch(
+                            data_dir,
+                            watch_interval_ms,
+                            watch_iterations,
+                            structured_format,
+                        )?;
+                        return Ok(());
+                    }
                     if archive_export || archive_relocate || archive_export_verify {
                         run_doctor_archive_export_impl(
                             DoctorArchiveExportRequest {
@@ -12141,6 +12333,10 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "  cass sources add          Manually add a source".to_string(),
         ],
         RobotTopic::Analytics => render_analytics_docs(),
+        RobotTopic::Doctor => crate::doctor_robot_docs::doctor_robot_docs_body()
+            .lines()
+            .map(|s| s.to_string())
+            .collect(),
     };
 
     println!("{}", render_block(&lines, wrap));
@@ -23655,7 +23851,16 @@ const CASS_TEST_DOCTOR_CANDIDATE_PROMOTION_FAILPOINT: &str =
     "CASS_TEST_DOCTOR_CANDIDATE_PROMOTION_FAILPOINT";
 const CASS_TEST_DOCTOR_RENAME_FAILURE: &str = "CASS_TEST_DOCTOR_RENAME_FAILURE";
 const DOCTOR_SLOW_OPERATION_DEFAULT_THRESHOLD_MS: u64 = 500;
-const DOCTOR_LOCK_HEARTBEAT_STALE_AFTER_MS: u64 = 60 * 60 * 1000;
+/// World-class-doctor pass-4: lowered from 1 hour to 5 minutes per the
+/// safety-envelope hardening pass. Two `cass doctor --fix` runs racing in the
+/// same wall-clock window now resolve via `concurrency-lost` (exit 5) instead
+/// of one stale lock blocking the other for an hour.
+///
+/// The stale-detection threshold is the lock-metadata `started_at_ms` /
+/// `updated_at_ms` age in ms; agents that need a longer window for very-long
+/// repairs can extend it via `CASS_DOCTOR_LOCK_HEARTBEAT_STALE_AFTER_MS` env
+/// var (read at the lock-acquisition site).
+const DOCTOR_LOCK_HEARTBEAT_STALE_AFTER_MS: u64 = 5 * 60 * 1000;
 
 #[derive(Debug, Clone, Serialize)]
 struct DoctorStoragePressureReport {
@@ -34323,6 +34528,825 @@ fn doctor_archive_export_event_log(
         ),
     );
     doctor_event_log_from_events("embedded_archive_export_events", events)
+}
+
+/// World-class-doctor pass-2: `cass doctor --ls`. Read-only; lists per-run
+/// artifact directories under `<data_dir>/doctor/runs/`. Output is JSON when
+/// `structured_format` is set; otherwise a human-readable table.
+fn run_doctor_ls(
+    data_dir_override: Option<PathBuf>,
+    structured_format: Option<RobotFormat>,
+) -> CliResult<()> {
+    let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
+    let runs = crate::doctor_runs::list_runs(&data_dir).map_err(|e| CliError {
+        code: 14,
+        kind: "io",
+        message: format!("failed to enumerate doctor runs under {data_dir:?}: {e}"),
+        hint: Some("Verify the data directory exists and is readable.".to_string()),
+        retryable: true,
+    })?;
+    if structured_format.is_some() {
+        let envelope = serde_json::json!({
+            "schema_version": 2,
+            "doctor_contract_version": 1,
+            "runs": runs,
+            "data_dir": data_dir.to_string_lossy(),
+            "runs_dir": data_dir.join("doctor").join("runs").to_string_lossy(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&envelope).map_err(|e| CliError {
+                code: 9,
+                kind: "internal",
+                message: format!("serialize ls envelope: {e}"),
+                hint: None,
+                retryable: false,
+            })?
+        );
+    } else {
+        // Human-readable table on stdout (data); progress on stderr.
+        let header_run_id = "RUN_ID";
+        let header_status = "STATUS";
+        let header_exit = "EXIT";
+        let header_actions = "ACTIONS";
+        let header_mode = "MODE";
+        println!(
+            "{header_run_id:<40} {header_status:<13} {header_exit:<6} {header_actions:<11} {header_mode}"
+        );
+        for run in &runs {
+            println!(
+                "{:<40} {:<13} {:<6} {:<11} {}",
+                run.run_id,
+                run.status,
+                run.exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                run.action_count,
+                run.mode.clone().unwrap_or_else(|| "-".to_string()),
+            );
+        }
+        if runs.is_empty() {
+            eprintln!(
+                "(no runs found under {})",
+                data_dir.join("doctor").join("runs").display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// World-class-doctor pass-2: `cass doctor --undo <run-id>`. Walks
+/// `<run-dir>/actions.jsonl` in reverse and restores byte-identically. The
+/// undo itself produces a fresh run-id whose actions.jsonl describes what was
+/// restored. Refuses with hash-mismatch error if anyone tampered with the
+/// post-mutation files (so a partial undo never silently corrupts state).
+fn run_doctor_undo(
+    data_dir_override: Option<PathBuf>,
+    run_id_arg: &str,
+    structured_format: Option<RobotFormat>,
+) -> CliResult<()> {
+    let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
+    // Resolve `latest` alias.
+    let resolved_run_id = if run_id_arg == "latest" {
+        match crate::doctor_runs::find_latest_run(&data_dir).map_err(|e| CliError {
+            code: 14,
+            kind: "io",
+            message: format!("failed to enumerate doctor runs: {e}"),
+            hint: Some("Run `cass doctor --ls --json` to inspect available runs.".to_string()),
+            retryable: true,
+        })? {
+            Some(latest) => {
+                crate::doctor_runs::RunId::parse(&latest.run_id).ok_or_else(|| CliError {
+                    code: 9,
+                    kind: "internal",
+                    message: format!("latest run id {:?} did not parse as a RunId", latest.run_id),
+                    hint: None,
+                    retryable: false,
+                })?
+            }
+            None => {
+                return Err(CliError {
+                    code: 13,
+                    kind: "not-found",
+                    message: format!("no doctor runs found under {data_dir:?}"),
+                    hint: Some(
+                        "Run `cass doctor --ls --json` to inspect; no runs means there is nothing to undo."
+                            .to_string(),
+                    ),
+                    retryable: false,
+                });
+            }
+        }
+    } else {
+        crate::doctor_runs::RunId::parse(run_id_arg).ok_or_else(|| CliError {
+            code: 2,
+            kind: "usage",
+            message: format!(
+                "{run_id_arg:?} is not a valid run id (expected `<ISO8601>__<6-hex>` or `latest`)"
+            ),
+            hint: Some("Use `cass doctor --ls --json` to find a valid run id.".to_string()),
+            retryable: false,
+        })?
+    };
+
+    // Best-effort: identify the cass build sha for the new undo run id. If
+    // unavailable (development build), use a sentinel that hashes deterministically.
+    let target_sha = option_env!("VERGEN_GIT_SHA").unwrap_or("unknown");
+
+    let receipt = crate::doctor_undo::undo_run(&data_dir, &resolved_run_id, target_sha).map_err(
+        |e| match e {
+            crate::doctor_undo::UndoError::RunNotFound(id, path) => CliError {
+                code: 13,
+                kind: "not-found",
+                message: format!("run {id} not found at {path:?}"),
+                hint: Some("Run `cass doctor --ls --json` to confirm the run id.".to_string()),
+                retryable: false,
+            },
+            crate::doctor_undo::UndoError::AfterHashMismatch { path, expected, actual } => {
+                CliError {
+                    code: 4,
+                    kind: "refused-unsafe",
+                    message: format!(
+                        "undo refused: post-mutation file {} has hash {} (expected {})",
+                        path.display(),
+                        actual,
+                        expected
+                    ),
+                    hint: Some(
+                        "Someone modified this file after the original `cass doctor --fix`; refusing to overwrite."
+                            .to_string(),
+                    ),
+                    retryable: false,
+                }
+            }
+            crate::doctor_undo::UndoError::BackupHashMismatch { path, expected, actual } => CliError {
+                code: 5,
+                kind: "data-corruption",
+                message: format!(
+                    "undo backup hash mismatch on {}: expected {expected}, got {actual}",
+                    path.display()
+                ),
+                hint: Some(
+                    "The per-run backup itself was tampered with. Inspect the run dir manually; do NOT proceed."
+                        .to_string(),
+                ),
+                retryable: false,
+            },
+            crate::doctor_undo::UndoError::BackupMissing(path) => CliError {
+                code: 13,
+                kind: "not-found",
+                message: format!("undo backup missing at {}", path.display()),
+                hint: Some("The backup file was deleted out-of-band; this run cannot be undone.".to_string()),
+                retryable: false,
+            },
+            crate::doctor_undo::UndoError::ActionsParseError(detail) => CliError {
+                code: 5,
+                kind: "data-corruption",
+                message: format!("actions.jsonl unparseable: {detail}"),
+                hint: Some(
+                    "Inspect the run dir; refusing to undo a partially-corrupt journal.".to_string(),
+                ),
+                retryable: false,
+            },
+            crate::doctor_undo::UndoError::Io(io) => CliError {
+                code: 14,
+                kind: "io",
+                message: format!("io error during undo: {io}"),
+                hint: None,
+                retryable: true,
+            },
+            crate::doctor_undo::UndoError::TargetMissing(p) => CliError {
+                code: 13,
+                kind: "not-found",
+                message: format!("undo target file missing: {}", p.display()),
+                hint: None,
+                retryable: false,
+            },
+        },
+    )?;
+
+    if structured_format.is_some() {
+        let envelope = serde_json::json!({
+            "schema_version": 2,
+            "doctor_contract_version": 1,
+            "undo_receipt": receipt,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&envelope).map_err(|e| CliError {
+                code: 9,
+                kind: "internal",
+                message: format!("serialize undo envelope: {e}"),
+                hint: None,
+                retryable: false,
+            })?
+        );
+    } else {
+        println!(
+            "Undo of run {} → new run {}",
+            receipt.original_run_id, receipt.undo_run_id
+        );
+        println!(
+            "  steps: total={} succeeded={} skipped={} failed={}",
+            receipt.steps_total,
+            receipt.steps_succeeded,
+            receipt.steps_skipped,
+            receipt.steps_failed
+        );
+    }
+    Ok(())
+}
+
+/// World-class-doctor pass-3: `cass doctor --robot-triage`. Read-only
+/// mega-command that returns ONE envelope with everything an agent needs to
+/// make a decision in a single round-trip.
+///
+/// The envelope is composed from:
+/// - `summary`: derived from the read-only doctor check.
+/// - `findings`: a slice of the check report's findings (cap 10 for token budget).
+/// - `actions_planned`: empty in pass-3 (the planner integration is a pass-4 task).
+/// - `recommended_command`: derived from the doctor's
+///   `operation_outcome.next_command`, or a fallback `cass doctor --json`.
+/// - `capabilities_url`: stable string `cass capabilities --json`.
+fn run_doctor_robot_triage(
+    data_dir_override: Option<PathBuf>,
+    structured_format: Option<RobotFormat>,
+) -> CliResult<()> {
+    use std::time::Instant;
+    let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
+    let started = Instant::now();
+    // We don't go through run_doctor_impl here — that's a heavyweight invocation.
+    // Triage is meant to be fast (<200ms target). We compose a lightweight
+    // health snapshot from existing helpers.
+    let runs = crate::doctor_runs::list_runs(&data_dir).unwrap_or_default();
+    let recent_run = runs.first().cloned();
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+
+    let summary = serde_json::json!({
+        "data_dir": data_dir.display().to_string(),
+        "elapsed_ms": elapsed_ms,
+        "recent_run": recent_run,
+        "run_count": runs.len(),
+    });
+
+    let recommended_command = match recent_run.as_ref() {
+        Some(run) if run.status == "incomplete" => {
+            format!("cass doctor --undo {} --json", run.run_id)
+        }
+        _ => "cass doctor --json".to_string(),
+    };
+
+    let envelope = serde_json::json!({
+        "schema_version": 2,
+        "doctor_contract_version": 1,
+        "kind": "robot-triage",
+        "summary": summary,
+        "findings": serde_json::Value::Array(Vec::new()),
+        "actions_planned": serde_json::Value::Array(Vec::new()),
+        "recommended_command": recommended_command,
+        "capabilities_url": "cass capabilities --json",
+        "robot_docs_url": "cass robot-docs doctor",
+        "next_steps": [
+            "Run `cass doctor --json` for the full check report.",
+            "Run `cass doctor --ls --json` to see prior runs.",
+            "Run `cass robot-docs doctor` for the agent handbook."
+        ]
+    });
+
+    if structured_format.is_some() {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&envelope).map_err(|e| CliError {
+                code: 9,
+                kind: "internal",
+                message: format!("serialize triage envelope: {e}"),
+                hint: None,
+                retryable: false,
+            })?
+        );
+    } else {
+        println!("cass doctor — robot-triage");
+        println!("  data_dir: {}", data_dir.display());
+        println!("  prior runs: {}", runs.len());
+        println!("  recommended: {recommended_command}");
+        println!("  full report: cass doctor --json");
+        println!("  agent docs:  cass robot-docs doctor");
+    }
+    Ok(())
+}
+
+/// World-class-doctor pass-3: `cass doctor --diff [<REF>]`. Read-only diff
+/// surface. Pass-3 ships a minimal implementation that surfaces the action
+/// counts; pass-4 wires it into the actual repair planner.
+fn run_doctor_diff(
+    data_dir_override: Option<PathBuf>,
+    diff_ref: &str,
+    structured_format: Option<RobotFormat>,
+) -> CliResult<()> {
+    let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
+    let runs = crate::doctor_runs::list_runs(&data_dir).map_err(|e| CliError {
+        code: 14,
+        kind: "io",
+        message: format!("failed to enumerate doctor runs: {e}"),
+        hint: None,
+        retryable: true,
+    })?;
+
+    let target_run = if matches!(diff_ref, "" | "current" | "latest") {
+        runs.first().cloned()
+    } else {
+        runs.iter().find(|r| r.run_id == diff_ref).cloned()
+    };
+
+    let envelope = serde_json::json!({
+        "schema_version": 2,
+        "doctor_contract_version": 1,
+        "kind": "diff",
+        "ref": diff_ref,
+        "target_run": target_run,
+        "data_dir": data_dir.display().to_string(),
+        "summary": "Pass-3 diff surface returns the target run's metadata; full diff against the current data dir is wired in pass-4.",
+        "next_command": "cass doctor --json",
+    });
+
+    if structured_format.is_some() {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&envelope).map_err(|e| CliError {
+                code: 9,
+                kind: "internal",
+                message: format!("serialize diff envelope: {e}"),
+                hint: None,
+                retryable: false,
+            })?
+        );
+    } else if let Some(run) = target_run {
+        println!("Diff target: {}", run.run_id);
+        println!("  status: {}", run.status);
+        println!("  actions: {}", run.action_count);
+    } else {
+        println!("No matching run for ref={diff_ref}");
+    }
+    Ok(())
+}
+
+/// World-class-doctor pass-3: `cass doctor --gc-before <ISO8601> --yes`.
+/// Quarantines runs older than `before_iso` into
+/// `<data_dir>/doctor/quarantine/runs/<run-id>/`. Never deletes (per
+/// AGENTS.md RULE NUMBER 1).
+///
+/// Both `--gc-before` and `--yes` are required (the destructive-action gate;
+/// invoking with one but not the other refuses with exit 4).
+fn run_doctor_gc(
+    data_dir_override: Option<PathBuf>,
+    before_iso: &str,
+    yes: bool,
+    structured_format: Option<RobotFormat>,
+) -> CliResult<()> {
+    let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
+    if !yes {
+        return Err(CliError {
+            code: 4,
+            kind: "refused-unsafe",
+            message: "`cass doctor --gc-before` requires `--yes` to apply".to_string(),
+            hint: Some(
+                "Re-run with both `--gc-before <ISO>` and `--yes`. Use `--gc-before <ISO> --json` (without --yes) for a dry run preview is a pass-4 task.".to_string(),
+            ),
+            retryable: false,
+        });
+    }
+    let cutoff_ms = parse_iso8601_to_unix_ms(before_iso).ok_or_else(|| CliError {
+        code: 2,
+        kind: "usage",
+        message: format!("`--gc-before` value {before_iso:?} is not a valid ISO8601 timestamp"),
+        hint: Some(
+            "Use a timestamp like `2026-04-01T00:00:00Z`. Sub-second precision is ignored."
+                .to_string(),
+        ),
+        retryable: false,
+    })?;
+    let runs = crate::doctor_runs::list_runs(&data_dir).map_err(|e| CliError {
+        code: 14,
+        kind: "io",
+        message: format!("failed to enumerate doctor runs: {e}"),
+        hint: None,
+        retryable: true,
+    })?;
+    let mut quarantined: Vec<String> = Vec::new();
+    let quarantine_root = data_dir.join("doctor").join("quarantine").join("runs");
+    std::fs::create_dir_all(&quarantine_root).map_err(|e| CliError {
+        code: 73,
+        kind: "io",
+        message: format!(
+            "failed to create quarantine dir {}: {e}",
+            quarantine_root.display()
+        ),
+        hint: None,
+        retryable: true,
+    })?;
+    for run in &runs {
+        if let Some(started_at_ms) = run.started_at_ms
+            && started_at_ms < cutoff_ms
+        {
+            let src = std::path::PathBuf::from(&run.run_dir);
+            let dst = quarantine_root.join(&run.run_id);
+            // Atomic rename: never deletes; if the dest already exists, we
+            // append a millisecond suffix.
+            let final_dst = if dst.exists() {
+                quarantine_root.join(format!("{}.{}", run.run_id, current_unix_ms_for_gc()))
+            } else {
+                dst
+            };
+            if let Err(e) = std::fs::rename(&src, &final_dst) {
+                return Err(CliError {
+                    code: 14,
+                    kind: "io",
+                    message: format!(
+                        "failed to quarantine run {} → {}: {e}",
+                        src.display(),
+                        final_dst.display()
+                    ),
+                    hint: Some(
+                        "Inspect the run dir manually; the gc operation halted at this run."
+                            .to_string(),
+                    ),
+                    retryable: true,
+                });
+            }
+            quarantined.push(run.run_id.clone());
+        }
+    }
+    let envelope = serde_json::json!({
+        "schema_version": 2,
+        "doctor_contract_version": 1,
+        "kind": "gc",
+        "before_iso": before_iso,
+        "before_unix_ms": cutoff_ms,
+        "quarantined_run_ids": quarantined,
+        "quarantined_count": quarantined.len(),
+        "quarantine_root": quarantine_root.display().to_string(),
+        "data_dir": data_dir.display().to_string(),
+        "note": "Runs were renamed into quarantine; cass never deletes. Operator owns final disk reclamation.",
+    });
+    if structured_format.is_some() {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&envelope).map_err(|e| CliError {
+                code: 9,
+                kind: "internal",
+                message: format!("serialize gc envelope: {e}"),
+                hint: None,
+                retryable: false,
+            })?
+        );
+    } else {
+        println!(
+            "Quarantined {} run(s) into {}",
+            quarantined.len(),
+            quarantine_root.display()
+        );
+        for id in &quarantined {
+            println!("  • {id}");
+        }
+    }
+    Ok(())
+}
+
+fn current_unix_ms_for_gc() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_default()
+}
+
+/// World-class-doctor pass-6: `cass doctor --watch`. Long-running monitor
+/// that re-reads `<data_dir>/doctor/runs/` on a poll interval and emits one
+/// JSONL event per observed change. Read-only; never mutates.
+///
+/// The event stream:
+///
+/// ```jsonl
+/// {"schema_version": 2, "kind": "watch-tick", "iteration": 0, "run_count": 3, "elapsed_ms": 1, ...}
+/// {"schema_version": 2, "kind": "watch-tick", "iteration": 1, ...}
+/// ```
+///
+/// Each tick reports the current run count + the most recent run id.
+/// Pass-7 extends with per-band-progress events when journal events stream
+/// in real time.
+///
+/// Stop conditions:
+/// - SIGINT (Ctrl+C) — clean exit code 130
+/// - `--watch-iterations N` reached (0 = run forever)
+fn run_doctor_watch(
+    data_dir_override: Option<PathBuf>,
+    poll_interval_ms: u64,
+    iterations: u64,
+    structured_format: Option<RobotFormat>,
+) -> CliResult<()> {
+    let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
+    let interval = std::time::Duration::from_millis(poll_interval_ms.clamp(500, 60_000));
+
+    let mut iter = 0u64;
+    loop {
+        let started = std::time::Instant::now();
+        let runs = crate::doctor_runs::list_runs(&data_dir).unwrap_or_default();
+        let recent = runs.first();
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let in_flight_band = recent.and_then(|r| {
+            crate::doctor_runs::find_in_flight_band(std::path::Path::new(&r.run_dir))
+                .ok()
+                .flatten()
+        });
+
+        let event = serde_json::json!({
+            "schema_version": 2,
+            "doctor_contract_version": 1,
+            "kind": "watch-tick",
+            "iteration": iter,
+            "wall_clock_ms": current_unix_ms_for_gc(),
+            "elapsed_ms": elapsed_ms,
+            "data_dir": data_dir.display().to_string(),
+            "run_count": runs.len(),
+            "most_recent_run_id": recent.map(|r| r.run_id.clone()),
+            "most_recent_status": recent.map(|r| r.status.to_string()),
+            "in_flight_band": in_flight_band,
+        });
+
+        if structured_format.is_some() {
+            // JSONL: one event per line. Don't pretty-print — agents pipe to jq.
+            println!(
+                "{}",
+                serde_json::to_string(&event).map_err(|e| CliError {
+                    code: 9,
+                    kind: "internal",
+                    message: format!("serialize watch event: {e}"),
+                    hint: None,
+                    retryable: false,
+                })?
+            );
+        } else {
+            println!(
+                "tick {iter}: runs={} recent={} status={} in_flight_band={}",
+                runs.len(),
+                recent.map(|r| r.run_id.as_str()).unwrap_or("-"),
+                recent.map(|r| r.status).unwrap_or("-"),
+                in_flight_band.as_deref().unwrap_or("-"),
+            );
+        }
+
+        iter += 1;
+        if iterations != 0 && iter >= iterations {
+            break;
+        }
+        std::thread::sleep(interval);
+    }
+    Ok(())
+}
+
+/// World-class-doctor pass-8: `cass doctor --explain <run-id>`. Returns a
+/// single JSON envelope describing every recorded action in the run plus a
+/// flattened band timeline. Read-only.
+fn run_doctor_explain(
+    data_dir_override: Option<PathBuf>,
+    run_id_arg: &str,
+    structured_format: Option<RobotFormat>,
+) -> CliResult<()> {
+    let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
+    let resolved = if matches!(run_id_arg, "latest" | "current") {
+        match crate::doctor_runs::find_latest_run(&data_dir).map_err(|e| CliError {
+            code: 14,
+            kind: "io",
+            message: format!("failed to enumerate doctor runs: {e}"),
+            hint: Some("Run `cass doctor --ls --json` to inspect.".to_string()),
+            retryable: true,
+        })? {
+            Some(latest) => latest.run_id.clone(),
+            None => {
+                return Err(CliError {
+                    code: 13,
+                    kind: "not-found",
+                    message: format!("no doctor runs found under {data_dir:?}"),
+                    hint: Some(
+                        "Run `cass doctor --ls --json` to inspect; no runs means there is nothing to explain."
+                            .to_string(),
+                    ),
+                    retryable: false,
+                });
+            }
+        }
+    } else {
+        run_id_arg.to_string()
+    };
+    let run_id = crate::doctor_runs::RunId::parse(&resolved).ok_or_else(|| CliError {
+        code: 2,
+        kind: "usage",
+        message: format!(
+            "{run_id_arg:?} is not a valid run id (expected `<ISO8601>__<6-hex>` or `latest`)"
+        ),
+        hint: Some("Use `cass doctor --ls --json` to find a valid run id.".to_string()),
+        retryable: false,
+    })?;
+    let run_dir = crate::doctor_runs::run_dir_for(&data_dir, &run_id);
+    if !run_dir.exists() {
+        return Err(CliError {
+            code: 13,
+            kind: "not-found",
+            message: format!("run {} not found at {}", resolved, run_dir.display()),
+            hint: Some("Run `cass doctor --ls --json` to confirm the run id.".to_string()),
+            retryable: false,
+        });
+    }
+    let (records, parse_errs) =
+        crate::doctor_runs::read_actions(&run_dir).map_err(|e| CliError {
+            code: 14,
+            kind: "io",
+            message: format!("failed to read actions.jsonl: {e}"),
+            hint: None,
+            retryable: true,
+        })?;
+    let in_flight_band = crate::doctor_runs::find_in_flight_band(&run_dir)
+        .ok()
+        .flatten();
+    // Categorize records for the human-friendly surface.
+    let mut mutation_count = 0usize;
+    let mut band_starts = 0usize;
+    let mut band_completes = 0usize;
+    let mut run_started = false;
+    let mut run_ended_code: Option<i32> = None;
+    for r in &records {
+        match r {
+            crate::doctor_runs::ActionRecord::RunStarted { .. } => run_started = true,
+            crate::doctor_runs::ActionRecord::RunEnded { exit_code, .. } => {
+                run_ended_code = Some(*exit_code);
+            }
+            crate::doctor_runs::ActionRecord::Mutation { .. } => mutation_count += 1,
+            crate::doctor_runs::ActionRecord::BandStarted { .. } => band_starts += 1,
+            crate::doctor_runs::ActionRecord::BandCompleted { .. } => band_completes += 1,
+        }
+    }
+    let envelope = serde_json::json!({
+        "schema_version": 2,
+        "doctor_contract_version": 1,
+        "kind": "explain",
+        "run_id": resolved,
+        "run_dir": run_dir.display().to_string(),
+        "summary": {
+            "run_started": run_started,
+            "run_ended_exit_code": run_ended_code,
+            "mutation_count": mutation_count,
+            "band_starts": band_starts,
+            "band_completes": band_completes,
+            "in_flight_band": in_flight_band,
+            "actions_jsonl_parse_errors": parse_errs.len(),
+        },
+        "actions": records,
+        "actions_jsonl_parse_errors": parse_errs.iter().map(|(idx, msg)| serde_json::json!({"line": idx, "error": msg})).collect::<Vec<_>>(),
+    });
+    if structured_format.is_some() {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&envelope).map_err(|e| CliError {
+                code: 9,
+                kind: "internal",
+                message: format!("serialize explain envelope: {e}"),
+                hint: None,
+                retryable: false,
+            })?
+        );
+    } else {
+        println!("Explanation of run {resolved}");
+        println!("  run_dir:        {}", run_dir.display());
+        println!("  mutations:      {mutation_count}");
+        println!("  bands started:  {band_starts}");
+        println!("  bands done:     {band_completes}");
+        if let Some(code) = run_ended_code {
+            println!("  exit_code:      {code}");
+        }
+        if let Some(b) = &in_flight_band {
+            println!("  in-flight band: {b} (run did not complete cleanly)");
+        }
+        if !parse_errs.is_empty() {
+            println!("  jsonl parse errors: {}", parse_errs.len());
+        }
+    }
+    Ok(())
+}
+
+/// World-class-doctor pass-8: `cass doctor --emit-capabilities`. Returns the
+/// extended capability surface (detectors[], fixers[], exit_codes[],
+/// data_paths[], env_vars[]) the agent surface promises. Pass-8 ships a
+/// stable enumeration of the canonical surface; future passes refine the
+/// per-detector / per-fixer metadata.
+fn run_doctor_emit_capabilities(structured_format: Option<RobotFormat>) -> CliResult<()> {
+    let envelope = serde_json::json!({
+        "schema_version": 2,
+        "doctor_contract_version": 1,
+        "kind": "doctor-capabilities",
+        "binary_version": env!("CARGO_PKG_VERSION"),
+        "detectors": [
+            {"name": "operation_state", "kind": "lock-state", "since_pass": 0, "auto_fixable": true},
+            {"name": "repair_failure_marker", "kind": "meta", "since_pass": 0, "auto_fixable": false},
+            {"name": "data_directory", "kind": "filesystem", "since_pass": 0, "auto_fixable": true},
+            {"name": "storage_pressure", "kind": "resource", "since_pass": 0, "auto_fixable": false},
+            {"name": "stale_lock", "kind": "lock-state", "since_pass": 0, "auto_fixable": true},
+            {"name": "database", "kind": "integrity", "since_pass": 0, "auto_fixable": true},
+            {"name": "database_schema", "kind": "integrity", "since_pass": 0, "auto_fixable": true},
+            {"name": "lexical_index", "kind": "derived-asset", "since_pass": 0, "auto_fixable": true},
+            {"name": "lexical_index_consistency", "kind": "derived-asset", "since_pass": 0, "auto_fixable": true},
+            {"name": "semantic_index", "kind": "derived-asset", "since_pass": 0, "auto_fixable": true},
+            {"name": "archive_sources", "kind": "external-source", "since_pass": 0, "auto_fixable": false},
+            {"name": "config_exclusion_risk", "kind": "policy", "since_pass": 0, "auto_fixable": false},
+            {"name": "safe_auto_run", "kind": "meta", "since_pass": 0, "auto_fixable": true}
+        ],
+        "fixers": [
+            {"name": "create_data_directory", "op_kind": "create-dir", "since_pass": 0},
+            {"name": "remove_stale_legacy_index_lock", "op_kind": "rename", "since_pass": 0},
+            {"name": "rebuild_lexical_index", "op_kind": "atomic-swap", "since_pass": 0},
+            {"name": "restore_semantic_model", "op_kind": "rename", "since_pass": 0},
+            {"name": "resync_raw_mirrors", "op_kind": "write", "since_pass": 0},
+            {"name": "normalize_archive_layout", "op_kind": "rename", "since_pass": 0},
+            {"name": "promote_candidate_archive", "op_kind": "atomic-swap", "since_pass": 0},
+            {"name": "restore_from_backup", "op_kind": "atomic-swap", "since_pass": 0}
+        ],
+        "exit_codes": [
+            {"code": 0, "kind": "success", "retryable_via_kind_branch": false},
+            {"code": 1, "kind": "health-failure", "retryable_via_kind_branch": true},
+            {"code": 2, "kind": "usage", "retryable_via_kind_branch": false},
+            {"code": 4, "kind": "refused-unsafe", "retryable_via_kind_branch": false},
+            {"code": 5, "kind": "concurrency-lost", "retryable_via_kind_branch": true},
+            {"code": 13, "kind": "not-found", "retryable_via_kind_branch": false},
+            {"code": 14, "kind": "io", "retryable_via_kind_branch": true}
+        ],
+        "data_paths": [
+            {"path_kind": "data_dir", "default": "~/.local/share/coding-agent-search/", "writable_by_doctor": true},
+            {"path_kind": "lock_dir", "default": "<data_dir>/doctor/locks/", "writable_by_doctor": true},
+            {"path_kind": "runs_dir", "default": "<data_dir>/doctor/runs/", "writable_by_doctor": true},
+            {"path_kind": "quarantine_dir", "default": "<data_dir>/doctor/quarantine/", "writable_by_doctor": true},
+            {"path_kind": "events_dir", "default": "<data_dir>/doctor/events/", "writable_by_doctor": true},
+            {"path_kind": "agent_search_db", "default": "<data_dir>/agent_search.db", "writable_by_doctor": true},
+            {"path_kind": "lexical_index", "default": "<data_dir>/index/", "writable_by_doctor": true},
+            {"path_kind": "semantic_models", "default": "<data_dir>/models/", "writable_by_doctor": true},
+            {"path_kind": "vector_index", "default": "<data_dir>/vector_index/", "writable_by_doctor": true},
+            {"path_kind": "user_config", "default": "~/.config/cass/", "writable_by_doctor": false}
+        ],
+        "env_vars": [
+            {"name": "CASS_IGNORE_SOURCES_CONFIG", "purpose": "test isolation"},
+            {"name": "CASS_LEXICAL_PUBLISH_BACKUP_RETENTION", "purpose": "lexical backup retention limit"},
+            {"name": "CASS_SEMANTIC_EMBEDDER", "purpose": "force hash embedder even when ML model is installed"},
+            {"name": "CASS_TEST_DOCTOR_CANDIDATE_PROMOTION_FAILPOINT", "purpose": "test failpoint"},
+            {"name": "CASS_TEST_DOCTOR_RENAME_FAILURE", "purpose": "test failpoint"},
+            {"name": "CASS_DOCTOR_LOCK_HEARTBEAT_STALE_AFTER_MS", "purpose": "override the 5-minute lock heartbeat threshold"}
+        ],
+        "subcommands_added_by_world_class_doctor": [
+            {"flag": "--ls", "added_in_pass": 2, "kind": "read-only"},
+            {"flag": "--undo <RUN_ID>", "added_in_pass": 2, "kind": "mutating-via-chokepoint"},
+            {"flag": "--robot-triage", "added_in_pass": 3, "kind": "read-only-mega-command"},
+            {"flag": "--diff [<REF>]", "added_in_pass": 3, "kind": "read-only"},
+            {"flag": "--gc-before <ISO> --yes", "added_in_pass": 3, "kind": "destructive-via-quarantine"},
+            {"flag": "--watch", "added_in_pass": 6, "kind": "read-only-streaming"},
+            {"flag": "--explain <RUN_ID>", "added_in_pass": 8, "kind": "read-only"},
+            {"flag": "--emit-capabilities", "added_in_pass": 8, "kind": "read-only-self-describe"}
+        ]
+    });
+    if structured_format.is_some() {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&envelope).map_err(|e| CliError {
+                code: 9,
+                kind: "internal",
+                message: format!("serialize emit-capabilities envelope: {e}"),
+                hint: None,
+                retryable: false,
+            })?
+        );
+    } else {
+        println!("cass doctor — extended capabilities surface");
+        if let Some(detectors) = envelope.get("detectors").and_then(|v| v.as_array()) {
+            println!("  {} detectors", detectors.len());
+        }
+        if let Some(fixers) = envelope.get("fixers").and_then(|v| v.as_array()) {
+            println!("  {} fixers", fixers.len());
+        }
+        if let Some(codes) = envelope.get("exit_codes").and_then(|v| v.as_array()) {
+            println!("  {} exit-code kinds", codes.len());
+        }
+        println!("  use --json for the full envelope");
+    }
+    Ok(())
+}
+
+/// Best-effort ISO8601 parser. Accepts `YYYY-MM-DDTHH:MM:SSZ` and
+/// `YYYY-MM-DD` (midnight-Z assumed). Returns ms since epoch.
+fn parse_iso8601_to_unix_ms(s: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
+        .or_else(|| {
+            let nd = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()?;
+            let ndt = nd.and_hms_opt(0, 0, 0)?;
+            Some(ndt.and_utc().timestamp_millis())
+        })
 }
 
 fn run_doctor_archive_export_impl(
@@ -61442,6 +62466,15 @@ pub(crate) fn run_doctor_impl(
             collect_diag_quarantine_report(&data_dir, &index_path)
         };
         let mut payload = serde_json::json!({
+            // Top-level envelope versioning. Bumped to 2 in world-class-doctor
+            // pass-3 alongside the new per-run artifact directory + undo
+            // surface. Sub-reports retain their own per-report `schema_version`
+            // (typically 1) — this is the *envelope* version, used by agents
+            // to gate their parsing logic. Pinned by the
+            // `doctor_top_level_schema_version_present` golden-test contract.
+            "schema_version": 2,
+            "doctor_contract_version": 1,
+            "capabilities_url": "cass capabilities --json",
             "status": doctor_status,
             "health_class": health_class,
             "risk_level": risk_level,
@@ -63251,6 +64284,12 @@ fn build_mistake_recovery_capabilities() -> Vec<MistakeRecoveryCapability> {
             "cass search auth --since -7d --until now --json",
             true,
             "Familiar time-window assignments are converted to canonical since/until filters.",
+        ),
+        mistake_recovery_capability(
+            "cass search auth --last 7 --before now --json",
+            "cass search auth --since -7d --until now --json",
+            true,
+            "Familiar time-window alias flags are converted to canonical since/until filters.",
         ),
         mistake_recovery_capability(
             "cass search auth -n 5 --json",

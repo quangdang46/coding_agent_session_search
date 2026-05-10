@@ -1,6 +1,15 @@
 {
   "type": "object",
   "properties": {
+    "schema_version": {
+      "type": "integer"
+    },
+    "doctor_contract_version": {
+      "type": "integer"
+    },
+    "capabilities_url": {
+      "type": "string"
+    },
     "status": {
       "type": "string"
     },

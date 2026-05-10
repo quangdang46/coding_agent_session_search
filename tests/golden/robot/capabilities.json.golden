@@ -420,7 +420,8 @@
             "contracts",
             "wrap",
             "sources",
-            "analytics"
+            "analytics",
+            "doctor"
           ]
         }
       ],
@@ -3093,6 +3094,12 @@
       "canonical": "cass search auth --since -7d --until now --json",
       "accepted": true,
       "behavior": "Familiar time-window assignments are converted to canonical since/until filters."
+    },
+    {
+      "wrong": "cass search auth --last 7 --before now --json",
+      "canonical": "cass search auth --since -7d --until now --json",
+      "accepted": true,
+      "behavior": "Familiar time-window alias flags are converted to canonical since/until filters."
     },
     {
       "wrong": "cass search auth -n 5 --json",

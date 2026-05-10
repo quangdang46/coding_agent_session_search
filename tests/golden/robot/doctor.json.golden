@@ -1,4 +1,7 @@
 {
+  "schema_version": 2,
+  "doctor_contract_version": 1,
+  "capabilities_url": "cass capabilities --json",
   "status": "not_initialized",
   "health_class": "degraded-archive-risk",
   "risk_level": "high",
