@@ -3120,6 +3120,12 @@
       "behavior": "Provider/tool/connector filter aliases are converted to the canonical agent filter."
     },
     {
+      "wrong": "cass search auth provider codex limit 5 last 7d --json",
+      "canonical": "cass search auth --agent codex --limit 5 --since -7d --json",
+      "accepted": true,
+      "behavior": "Bare filter key/value pairs after a query are converted before remaining words are folded into the query."
+    },
+    {
       "wrong": "cass search auth -n 5 --json",
       "canonical": "cass search auth --limit 5 --json",
       "accepted": true,

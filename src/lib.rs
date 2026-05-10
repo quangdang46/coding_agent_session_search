@@ -2837,6 +2837,78 @@ fn recover_key_value_option_assignments(rest: &mut [String], corrections: &mut V
     }
 }
 
+fn bare_option_pair_start_index(command: &str) -> Option<usize> {
+    match command {
+        // Require at least one query token before interpreting bare words as
+        // filters. Otherwise `cass search provider codex --json` would lose a
+        // plausible query instead of producing a useful usage error.
+        "search" | "pack" => Some(2),
+        "sessions" | "timeline" => Some(1),
+        _ => None,
+    }
+}
+
+fn recover_bare_option_value_pairs(rest: &mut Vec<String>, corrections: &mut Vec<String>) {
+    let Some(command) = rest.first().cloned() else {
+        return;
+    };
+    let Some(start_index) = bare_option_pair_start_index(&command) else {
+        return;
+    };
+
+    let mut index = start_index;
+    while index + 1 < rest.len() {
+        let key = rest[index].clone();
+        if key.starts_with('-') || key.contains('=') {
+            index += 1;
+            continue;
+        }
+        let value = rest[index + 1].clone();
+        if value.starts_with("--") {
+            index += 1;
+            continue;
+        }
+
+        let key_lower = key.to_ascii_lowercase();
+        if let Some((flag, aliases, rewritten_value)) =
+            time_assignment_option_for_command(&command, &key_lower, &value)
+        {
+            if !has_option_alias(rest, aliases) {
+                rest.splice(
+                    index..index + 2,
+                    [flag.to_string(), rewritten_value.clone()],
+                );
+                corrections.push(format!(
+                    "'{command} {key} <value>' → '{command} {flag} {rewritten_value}' (bare time-window filter)"
+                ));
+                index += 2;
+                continue;
+            }
+        } else if command_accepts_limit_alias(rest) && is_result_count_assignment_key(&key_lower) {
+            if !has_canonical_limit(rest) {
+                rest.splice(index..index + 2, ["--limit".to_string(), value.clone()]);
+                corrections.push(format!(
+                    "'{command} {key} <value>' → '{command} --limit {value}' (bare result-count filter)"
+                ));
+                index += 2;
+                continue;
+            }
+        } else if let Some(option) = assignment_option_for_command(&command, &key_lower)
+            && (option.repeatable || !has_option_alias(rest, option.aliases))
+        {
+            rest.splice(index..index + 2, [option.flag.to_string(), value.clone()]);
+            corrections.push(format!(
+                "'{command} {key} <value>' → '{command} {} {value}' (bare option filter)",
+                option.flag
+            ));
+            index += 2;
+            continue;
+        }
+
+        index += 1;
+    }
+}
+
 fn recover_path_line_positionals(rest: &mut Vec<String>, corrections: &mut Vec<String>) {
     let Some(command) = rest.first().cloned() else {
         return;
@@ -3240,9 +3312,10 @@ fn recover_multiword_query_positionals(rest: &mut Vec<String>, corrections: &mut
 /// 10. **Result-count alias recovery**: `search foo --max-results 5` → `search foo --limit 5`
 /// 11. **Time-window alias recovery**: `search foo --last 7` → `search foo --since -7d`
 /// 12. **Provider alias recovery**: `search foo --provider codex` → `search foo --agent codex`
-/// 13. **Implicit robot search recovery**: `foo bar --json` → `search "foo bar" --json`
-/// 14. **Drill-down option recovery**: `view file line=42` → `view file --line 42`
-/// 15. **Global flag hoisting**: Moves global flags to front regardless of position
+/// 13. **Bare option-pair recovery**: `search foo provider codex` → `search foo --agent codex`
+/// 14. **Implicit robot search recovery**: `foo bar --json` → `search "foo bar" --json`
+/// 15. **Drill-down option recovery**: `view file line=42` → `view file --line 42`
+/// 16. **Global flag hoisting**: Moves global flags to front regardless of position
 ///
 /// Returns normalized argv plus an optional correction note teaching proper syntax.
 fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
@@ -3619,6 +3692,7 @@ fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
     recover_time_alias_flags(&mut rest, &mut corrections);
     recover_agent_filter_alias_flags(&mut rest, &mut corrections);
     recover_named_required_positionals(&mut rest, &mut corrections);
+    recover_bare_option_value_pairs(&mut rest, &mut corrections);
     recover_multiword_query_positionals(&mut rest, &mut corrections);
     recover_drilldown_assignment_flags(&mut rest, &mut corrections);
     recover_key_value_option_assignments(&mut rest, &mut corrections);
@@ -4009,7 +4083,7 @@ fn format_friendly_parse_error(err: clap::Error, raw: &[String], normalized: &[S
             "flag_syntax".into(),
             serde_json::json!({
                 "correct": ["--limit 5", "--robot", "--json"],
-                "incorrect": ["-limit 5", "limit=5", "--Limit"]
+                "incorrect": ["--limt 5", "-limit 5", "--Limit"]
             }),
         );
 
@@ -4184,11 +4258,6 @@ fn get_common_mistakes(intent: &str) -> Option<serde_json::Value> {
         vec![
             // query="foo" without subcommand - normalization adds "search" but the syntax is wrong
             ("cass query=\"foo\" --robot", "cass search \"foo\" --robot"),
-            // Bare limit= without dashes
-            (
-                "cass search \"query\" limit=5",
-                "cass search \"query\" --limit 5",
-            ),
             // Missing query entirely
             (
                 "cass search --robot --limit 5",
@@ -64732,6 +64801,12 @@ fn build_mistake_recovery_capabilities() -> Vec<MistakeRecoveryCapability> {
             "cass search auth --agent codex --json",
             true,
             "Provider/tool/connector filter aliases are converted to the canonical agent filter.",
+        ),
+        mistake_recovery_capability(
+            "cass search auth provider codex limit 5 last 7d --json",
+            "cass search auth --agent codex --limit 5 --since -7d --json",
+            true,
+            "Bare filter key/value pairs after a query are converted before remaining words are folded into the query.",
         ),
         mistake_recovery_capability(
             "cass search auth -n 5 --json",
