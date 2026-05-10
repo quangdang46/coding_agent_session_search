@@ -429,6 +429,14 @@ fn capabilities_are_self_describing_for_agents() {
             && recovery["accepted"] == true),
         "capabilities should advertise result-count assignment recovery"
     );
+    assert!(
+        recoveries.iter().any(|recovery| recovery["wrong"]
+            == "cass search auth agent=codex days=7 fields=minimal --json"
+            && recovery["canonical"]
+                == "cass search auth --agent codex --days 7 --fields minimal --json"
+            && recovery["accepted"] == true),
+        "capabilities should advertise search filter assignment recovery"
+    );
 }
 
 #[test]
@@ -1940,6 +1948,40 @@ fn search_limit_assignment_attaches_to_limit() {
 #[test]
 fn search_max_results_assignment_attaches_to_limit() {
     assert_search_limit_alias_limits_to_one(&["max_results=1"]);
+}
+
+#[test]
+fn search_filter_assignments_attach_to_options() {
+    let mut cmd = base_cmd();
+    cmd.args([
+        "search",
+        "",
+        "--json",
+        "limit=1",
+        "agent=aider",
+        "fields=minimal",
+        "mode=lexical",
+        "data_dir=tests/fixtures/search_demo_data",
+    ]);
+
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    let hits = json["hits"].as_array().expect("hits array");
+
+    assert_eq!(json["limit"].as_u64(), Some(1));
+    assert_eq!(hits.len(), 1);
+    let hit = &hits[0];
+    assert!(
+        hit["source_path"].is_string(),
+        "minimal preset keeps source_path"
+    );
+    assert!(
+        hit["line_number"].is_number(),
+        "minimal preset keeps line_number"
+    );
+    assert_eq!(hit["agent"].as_str(), Some("aider"));
+    assert!(hit["content"].is_null(), "minimal preset omits content");
 }
 
 #[test]

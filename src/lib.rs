@@ -2300,6 +2300,263 @@ fn has_option_alias(rest: &[String], aliases: &[&str]) -> bool {
     })
 }
 
+struct AssignmentOption {
+    flag: &'static str,
+    aliases: &'static [&'static str],
+    repeatable: bool,
+}
+
+fn assignment_option_for_command(command: &str, key: &str) -> Option<AssignmentOption> {
+    match command {
+        "search" => match key {
+            "agent" => Some(AssignmentOption {
+                flag: "--agent",
+                aliases: &["--agent"],
+                repeatable: true,
+            }),
+            "workspace" => Some(AssignmentOption {
+                flag: "--workspace",
+                aliases: &["--workspace"],
+                repeatable: true,
+            }),
+            "fields" => Some(AssignmentOption {
+                flag: "--fields",
+                aliases: &["--fields"],
+                repeatable: false,
+            }),
+            "max-content-length" | "max_content_length" => Some(AssignmentOption {
+                flag: "--max-content-length",
+                aliases: &["--max-content-length"],
+                repeatable: false,
+            }),
+            "max-tokens" | "max_tokens" => Some(AssignmentOption {
+                flag: "--max-tokens",
+                aliases: &["--max-tokens"],
+                repeatable: false,
+            }),
+            "request-id" | "request_id" => Some(AssignmentOption {
+                flag: "--request-id",
+                aliases: &["--request-id"],
+                repeatable: false,
+            }),
+            "cursor" => Some(AssignmentOption {
+                flag: "--cursor",
+                aliases: &["--cursor"],
+                repeatable: false,
+            }),
+            "data-dir" | "data_dir" => Some(AssignmentOption {
+                flag: "--data-dir",
+                aliases: &["--data-dir"],
+                repeatable: false,
+            }),
+            "offset" => Some(AssignmentOption {
+                flag: "--offset",
+                aliases: &["--offset"],
+                repeatable: false,
+            }),
+            "days" => Some(AssignmentOption {
+                flag: "--days",
+                aliases: &["--days"],
+                repeatable: false,
+            }),
+            "since" => Some(AssignmentOption {
+                flag: "--since",
+                aliases: &["--since"],
+                repeatable: false,
+            }),
+            "until" => Some(AssignmentOption {
+                flag: "--until",
+                aliases: &["--until"],
+                repeatable: false,
+            }),
+            "display" => Some(AssignmentOption {
+                flag: "--display",
+                aliases: &["--display"],
+                repeatable: false,
+            }),
+            "mode" => Some(AssignmentOption {
+                flag: "--mode",
+                aliases: &["--mode"],
+                repeatable: false,
+            }),
+            _ => None,
+        },
+        "pack" => match key {
+            "agent" => Some(AssignmentOption {
+                flag: "--agent",
+                aliases: &["--agent"],
+                repeatable: true,
+            }),
+            "workspace" => Some(AssignmentOption {
+                flag: "--workspace",
+                aliases: &["--workspace"],
+                repeatable: true,
+            }),
+            "fields" => Some(AssignmentOption {
+                flag: "--fields",
+                aliases: &["--fields"],
+                repeatable: false,
+            }),
+            "max-tokens" | "max_tokens" => Some(AssignmentOption {
+                flag: "--max-tokens",
+                aliases: &["--max-tokens"],
+                repeatable: false,
+            }),
+            "max-sessions" | "max_sessions" => Some(AssignmentOption {
+                flag: "--max-sessions",
+                aliases: &["--max-sessions"],
+                repeatable: false,
+            }),
+            "max-evidence" | "max_evidence" => Some(AssignmentOption {
+                flag: "--max-evidence",
+                aliases: &["--max-evidence"],
+                repeatable: false,
+            }),
+            "context-lines" | "context_lines" => Some(AssignmentOption {
+                flag: "--context-lines",
+                aliases: &["--context-lines"],
+                repeatable: false,
+            }),
+            "max-excerpt-chars" | "max_excerpt_chars" => Some(AssignmentOption {
+                flag: "--max-excerpt-chars",
+                aliases: &["--max-excerpt-chars"],
+                repeatable: false,
+            }),
+            "request-id" | "request_id" => Some(AssignmentOption {
+                flag: "--request-id",
+                aliases: &["--request-id"],
+                repeatable: false,
+            }),
+            "data-dir" | "data_dir" => Some(AssignmentOption {
+                flag: "--data-dir",
+                aliases: &["--data-dir"],
+                repeatable: false,
+            }),
+            "days" => Some(AssignmentOption {
+                flag: "--days",
+                aliases: &["--days"],
+                repeatable: false,
+            }),
+            "since" => Some(AssignmentOption {
+                flag: "--since",
+                aliases: &["--since"],
+                repeatable: false,
+            }),
+            "until" => Some(AssignmentOption {
+                flag: "--until",
+                aliases: &["--until"],
+                repeatable: false,
+            }),
+            "source" => Some(AssignmentOption {
+                flag: "--source",
+                aliases: &["--source"],
+                repeatable: false,
+            }),
+            "sessions-from" | "sessions_from" => Some(AssignmentOption {
+                flag: "--sessions-from",
+                aliases: &["--sessions-from"],
+                repeatable: false,
+            }),
+            "mode" => Some(AssignmentOption {
+                flag: "--mode",
+                aliases: &["--mode"],
+                repeatable: false,
+            }),
+            "freshness-policy" | "freshness_policy" => Some(AssignmentOption {
+                flag: "--freshness-policy",
+                aliases: &["--freshness-policy"],
+                repeatable: false,
+            }),
+            "freshness-window-seconds" | "freshness_window_seconds" => Some(AssignmentOption {
+                flag: "--freshness-window-seconds",
+                aliases: &["--freshness-window-seconds"],
+                repeatable: false,
+            }),
+            "timeout" => Some(AssignmentOption {
+                flag: "--timeout",
+                aliases: &["--timeout"],
+                repeatable: false,
+            }),
+            _ => None,
+        },
+        "sessions" => match key {
+            "workspace" => Some(AssignmentOption {
+                flag: "--workspace",
+                aliases: &["--workspace"],
+                repeatable: false,
+            }),
+            "data-dir" | "data_dir" => Some(AssignmentOption {
+                flag: "--data-dir",
+                aliases: &["--data-dir"],
+                repeatable: false,
+            }),
+            _ => None,
+        },
+        "timeline" => match key {
+            "agent" => Some(AssignmentOption {
+                flag: "--agent",
+                aliases: &["--agent"],
+                repeatable: true,
+            }),
+            "data-dir" | "data_dir" => Some(AssignmentOption {
+                flag: "--data-dir",
+                aliases: &["--data-dir"],
+                repeatable: false,
+            }),
+            "since" => Some(AssignmentOption {
+                flag: "--since",
+                aliases: &["--since"],
+                repeatable: false,
+            }),
+            "until" => Some(AssignmentOption {
+                flag: "--until",
+                aliases: &["--until"],
+                repeatable: false,
+            }),
+            "group-by" | "group_by" => Some(AssignmentOption {
+                flag: "--group-by",
+                aliases: &["--group-by"],
+                repeatable: false,
+            }),
+            "source" => Some(AssignmentOption {
+                flag: "--source",
+                aliases: &["--source"],
+                repeatable: false,
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn recover_key_value_option_assignments(rest: &mut [String], corrections: &mut Vec<String>) {
+    let Some(command) = rest.first().cloned() else {
+        return;
+    };
+
+    for index in 1..rest.len() {
+        let arg = rest[index].clone();
+        let Some((key, value)) = arg.split_once('=') else {
+            continue;
+        };
+        if value.is_empty() {
+            continue;
+        }
+        let Some(option) = assignment_option_for_command(&command, key) else {
+            continue;
+        };
+        if !option.repeatable && has_option_alias(rest, option.aliases) {
+            continue;
+        }
+
+        rest[index] = format!("{}={value}", option.flag);
+        corrections.push(format!(
+            "'{command} {key}=<value>' → '{command} {} <value>' (known option assignment)",
+            option.flag
+        ));
+    }
+}
+
 fn recover_path_line_positionals(rest: &mut Vec<String>, corrections: &mut Vec<String>) {
     let Some(command) = rest.first().cloned() else {
         return;
@@ -2937,6 +3194,7 @@ fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
     recover_limit_aliases(&mut rest, &mut corrections);
     recover_named_required_positionals(&mut rest, &mut corrections);
     recover_drilldown_assignment_flags(&mut rest, &mut corrections);
+    recover_key_value_option_assignments(&mut rest, &mut corrections);
     recover_path_line_positionals(&mut rest, &mut corrections);
     if rest
         .first()
@@ -62894,6 +63152,12 @@ fn build_mistake_recovery_capabilities() -> Vec<MistakeRecoveryCapability> {
             "cass search auth --limit 5 --json",
             true,
             "A bare result-count assignment is converted to the canonical limit flag.",
+        ),
+        mistake_recovery_capability(
+            "cass search auth agent=codex days=7 fields=minimal --json",
+            "cass search auth --agent codex --days 7 --fields minimal --json",
+            true,
+            "Known bare filter assignments are converted to canonical long flags.",
         ),
         mistake_recovery_capability(
             "cass search auth -n 5 --json",

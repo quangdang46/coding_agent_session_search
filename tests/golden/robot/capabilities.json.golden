@@ -3083,6 +3083,12 @@
       "behavior": "A bare result-count assignment is converted to the canonical limit flag."
     },
     {
+      "wrong": "cass search auth agent=codex days=7 fields=minimal --json",
+      "canonical": "cass search auth --agent codex --days 7 --fields minimal --json",
+      "accepted": true,
+      "behavior": "Known bare filter assignments are converted to canonical long flags."
+    },
+    {
       "wrong": "cass search auth -n 5 --json",
       "canonical": "cass search auth --limit 5 --json",
       "accepted": true,
