@@ -432,6 +432,13 @@ fn capabilities_are_self_describing_for_agents() {
     );
     assert!(
         recoveries.iter().any(|recovery| recovery["wrong"]
+            == "cass auth failed --json --max-evidence 3"
+            && recovery["canonical"] == "cass pack \"auth failed\" --json --max-evidence 3"
+            && recovery["accepted"] == true),
+        "capabilities should advertise pack-only flag intent recovery"
+    );
+    assert!(
+        recoveries.iter().any(|recovery| recovery["wrong"]
             == "cass search auth provider codex limit 5 last 7d --json"
             && recovery["canonical"]
                 == "cass search auth --agent codex --limit 5 --since -7d --json"
@@ -4994,6 +5001,33 @@ fn implicit_robot_search_folds_unquoted_query_words() {
     assert_eq!(json["dry_run"].as_bool(), Some(true));
     assert_eq!(json["valid"].as_bool(), Some(true));
     assert_eq!(json["query"].as_str(), Some("authentication error"));
+}
+
+#[test]
+fn implicit_robot_pack_query_uses_pack_when_pack_only_flags_present() {
+    let mut cmd = base_cmd();
+    cmd.args([
+        "auth",
+        "failed",
+        "--json",
+        "--data-dir",
+        "tests/fixtures/search_demo_data",
+        "--limit",
+        "1",
+        "--max-evidence",
+        "1",
+        "--max-sessions",
+        "1",
+    ]);
+
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid pack JSON");
+
+    assert_eq!(json["schema_version"].as_str(), Some("cass.pack.v1"));
+    assert_eq!(json["query"]["text"].as_str(), Some("auth failed"));
+    assert_eq!(json["limits"]["max_evidence"].as_u64(), Some(1));
+    assert_eq!(json["limits"]["max_sessions"].as_u64(), Some(1));
 }
 
 #[test]

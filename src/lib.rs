@@ -3385,6 +3385,50 @@ fn looks_like_top_level_command_or_typo(arg: &str) -> bool {
         || closest_top_level_command(&lower).is_some()
 }
 
+fn arg_marks_implicit_pack_intent(arg: &str) -> bool {
+    if let Some(flag) = arg.strip_prefix("--") {
+        let name = flag.split_once('=').map_or(flag, |(name, _)| name);
+        return matches!(
+            name,
+            "max-sessions"
+                | "max-evidence"
+                | "max-excerpt-chars"
+                | "freshness-policy"
+                | "freshness-window-seconds"
+                | "require-evidence"
+                | "explain-selection"
+        );
+    }
+
+    let Some((key, value)) = arg.split_once('=') else {
+        return false;
+    };
+    if value.is_empty() {
+        return false;
+    }
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "max-sessions"
+            | "max_sessions"
+            | "max-evidence"
+            | "max_evidence"
+            | "max-excerpt-chars"
+            | "max_excerpt_chars"
+            | "freshness-policy"
+            | "freshness_policy"
+            | "freshness-window-seconds"
+            | "freshness_window_seconds"
+    )
+}
+
+fn implicit_robot_query_command(rest: &[String]) -> &'static str {
+    if rest.iter().any(|arg| arg_marks_implicit_pack_intent(arg)) {
+        "pack"
+    } else {
+        "search"
+    }
+}
+
 fn recover_implicit_robot_search_query(rest: &mut Vec<String>, corrections: &mut Vec<String>) {
     let Some(first) = rest.first().cloned() else {
         return;
@@ -3396,17 +3440,18 @@ fn recover_implicit_robot_search_query(rest: &mut Vec<String>, corrections: &mut
         return;
     }
 
+    let command = implicit_robot_query_command(rest);
     if is_query_assignment(&first) {
-        rest.insert(0, "search".to_string());
-        corrections.push(
-            "'query=<value> --json' → 'search <value> --json' (implicit robot search query)".into(),
-        );
+        rest.insert(0, command.to_string());
+        corrections.push(format!(
+            "'query=<value> --json' → '{command} <value> --json' (implicit robot query)"
+        ));
         return;
     }
 
     let mut query_token_count = 0;
     for arg in rest.iter() {
-        if arg.starts_with('-') || is_query_boundary_assignment("search", arg) {
+        if arg.starts_with('-') || is_query_boundary_assignment(command, arg) {
             break;
         }
         query_token_count += 1;
@@ -3416,9 +3461,9 @@ fn recover_implicit_robot_search_query(rest: &mut Vec<String>, corrections: &mut
     }
 
     let query = rest[..query_token_count].join(" ");
-    rest.splice(0..query_token_count, ["search".to_string(), query.clone()]);
+    rest.splice(0..query_token_count, [command.to_string(), query.clone()]);
     corrections.push(format!(
-        "'{query}' → 'search \"{query}\"' (implicit robot search query)"
+        "'{query}' → '{command} \"{query}\"' (implicit robot query)"
     ));
 }
 
@@ -65119,6 +65164,12 @@ fn build_mistake_recovery_capabilities() -> Vec<MistakeRecoveryCapability> {
             "cass pack \"auth failed\" --json --max-evidence 3",
             true,
             "Question/RC prompt aliases route answer intent to pack, so pack-only evidence flags do not get misparsed as search flags.",
+        ),
+        mistake_recovery_capability(
+            "cass auth failed --json --max-evidence 3",
+            "cass pack \"auth failed\" --json --max-evidence 3",
+            true,
+            "A bare robot query with pack-only flags is treated as answer-pack intent instead of implicit search.",
         ),
         mistake_recovery_capability(
             "cass auth error --json",

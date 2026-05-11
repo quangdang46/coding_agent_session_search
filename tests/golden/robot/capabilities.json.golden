@@ -3054,6 +3054,12 @@
       "behavior": "Question/RC prompt aliases route answer intent to pack, so pack-only evidence flags do not get misparsed as search flags."
     },
     {
+      "wrong": "cass auth failed --json --max-evidence 3",
+      "canonical": "cass pack \"auth failed\" --json --max-evidence 3",
+      "accepted": true,
+      "behavior": "A bare robot query with pack-only flags is treated as answer-pack intent instead of implicit search."
+    },
+    {
       "wrong": "cass auth error --json",
       "canonical": "cass search \"auth error\" --json",
       "accepted": true,
