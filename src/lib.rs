@@ -6118,6 +6118,40 @@ async fn execute_cli(
                     emit_capabilities,
                 } => {
                     let structured_format = resolve_subcommand_structured_format(cli, json);
+                    // Pass-12 fix (P2): the new pass-1+ flags have no clap-level
+                    // `conflicts_with` wiring, so passing multiple at once
+                    // would silently dispatch only the first match. That made
+                    // `cass doctor --fix --ls` silently drop `--fix`. Detect
+                    // and refuse multiple new flags at the dispatch boundary
+                    // so agents get a clean usage error rather than silent
+                    // precedence behavior.
+                    let pass1plus_flag_count = [
+                        explain.is_some(),
+                        emit_capabilities,
+                        ls,
+                        undo.is_some(),
+                        robot_triage,
+                        diff.is_some(),
+                        gc_before.is_some(),
+                        watch,
+                    ]
+                    .iter()
+                    .filter(|x| **x)
+                    .count();
+                    if pass1plus_flag_count > 1 {
+                        return Err(CliError {
+                            code: 2,
+                            kind: "usage",
+                            message:
+                                "multiple world-class-doctor flags specified; only one allowed per invocation"
+                                    .to_string(),
+                            hint: Some(
+                                "Pass exactly one of --ls, --undo, --robot-triage, --diff, --gc-before, --watch, --explain, --emit-capabilities at a time."
+                                    .to_string(),
+                            ),
+                            retryable: false,
+                        });
+                    }
                     // World-class-doctor pass-8: `cass doctor --explain <run-id>`.
                     if let Some(run_id_arg) = explain {
                         run_doctor_explain(data_dir, &run_id_arg, structured_format)?;
@@ -35197,6 +35231,23 @@ fn run_doctor_undo(
                 kind: "not-found",
                 message: format!("undo target file missing: {}", p.display()),
                 hint: None,
+                retryable: false,
+            },
+            // Pass-12 fix: Op::Rename is unsafe to undo because the rename
+            // destination isn't recorded in actions.jsonl. Maps to code 4
+            // (refused-unsafe). Operator can still inspect via `--explain`
+            // and restore manually if needed.
+            crate::doctor_undo::UndoError::OpRenameNotReversible { path } => CliError {
+                code: 4,
+                kind: "refused-unsafe",
+                message: format!(
+                    "undo refused: Op::Rename on {} is not reversible in the pass-1+ schema (the rename destination is not recorded)",
+                    path.display()
+                ),
+                hint: Some(
+                    "Use `cass doctor --explain <run-id> --json` to inspect the rename, then restore manually if needed."
+                        .to_string(),
+                ),
                 retryable: false,
             },
         },

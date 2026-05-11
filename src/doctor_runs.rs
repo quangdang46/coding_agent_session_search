@@ -90,9 +90,23 @@ impl RunId {
 
     /// Parse a run-id from its string form. Returns `None` if the string does
     /// not look like a run-id (no `__` separator, hex too short, etc.).
+    ///
+    /// **Pass-12 fix (P2):** the iso prefix is now strictly validated against
+    /// the canonical alphabet `[0-9-TZ]`. Previously only length was checked,
+    /// which allowed strings like `2026-01-01T00-00-00Z/../../etc/passwd__abcdef`
+    /// to parse — those then constructed path-traversal-shaped run directories
+    /// when concatenated with `<data_dir>/doctor/runs/`. Existence checks
+    /// downstream prevented actual harm but the parser is now a strict gate.
     pub(crate) fn parse(raw: &str) -> Option<Self> {
         let (iso, suffix) = raw.split_once("__")?;
         if iso.len() < 19 {
+            return None;
+        }
+        // Canonical iso form: YYYY-MM-DDTHH-MM-SSZ — digits, dashes, 'T', 'Z'.
+        if !iso
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '-' || c == 'T' || c == 'Z')
+        {
             return None;
         }
         if suffix.len() != 6 {
@@ -581,6 +595,22 @@ mod tests {
         assert!(RunId::parse("2026-01-01T00-00-00Z__zzzz").is_none()); // not hex
         assert!(RunId::parse("2026-01-01T00-00-00Z__abcde").is_none()); // 5 not 6
         assert!(RunId::parse("short__abcdef").is_none()); // iso too short
+    }
+
+    /// Pass-12 regression: the iso prefix must not contain path-traversal
+    /// characters. Pre-fix, the parser accepted these strings; the existence
+    /// check downstream prevented harm but the parser is now a strict gate.
+    #[test]
+    fn pass12_run_id_rejects_path_traversal_in_iso_prefix() {
+        // slashes anywhere
+        assert!(RunId::parse("2026-01-01T00-00-00Z/foo__abcdef").is_none());
+        assert!(RunId::parse("a/b/c/d/e/f/g/h/i/j/k__abcdef").is_none());
+        // dotdot
+        assert!(RunId::parse("2026-01-01T00..0-00-00Z__abcdef").is_none());
+        // null byte
+        assert!(RunId::parse("2026-01-01T00-00-00\0Z__abcdef").is_none());
+        // valid canonical id still parses
+        assert!(RunId::parse("2026-01-01T00-00-00Z__abcdef").is_some());
     }
 
     #[test]

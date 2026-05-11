@@ -62,6 +62,16 @@ pub(crate) enum UndoError {
     },
     #[error("actions.jsonl unparseable at {0}")]
     ActionsParseError(String),
+    /// Pass-12 fix: Op::Rename records the stable_kind "rename" but drops the
+    /// destination `to` field on serialization. Without `to`, undo cannot
+    /// rename the file back to its original location — restoring from backup
+    /// would create a duplicate rather than reverse the rename. Until the
+    /// MutationRecord schema is extended to carry op-specific detail (pass-13+),
+    /// undo refuses Op::Rename mutations explicitly.
+    #[error(
+        "op::rename is not reversible in pass-1+ schema: {path:?} (the rename destination is not recorded in actions.jsonl)"
+    )]
+    OpRenameNotReversible { path: PathBuf },
 }
 
 /// Per-action outcome of an undo step. Returned in undo order (i.e., reverse
@@ -162,6 +172,7 @@ pub(crate) fn undo_run(
             data_dir,
             &original_run_dir,
             &target,
+            op,
             before_blake3.as_deref(),
             after_blake3.as_deref(),
         );
@@ -249,9 +260,21 @@ fn undo_one(
     data_dir: &Path,
     original_run_dir: &Path,
     target: &Path,
+    op_kind: &str,
     before_blake3: Option<&str>,
     after_blake3: Option<&str>,
 ) -> Result<&'static str, UndoError> {
+    // Pass-12 fix: Op::Rename is unsafe to undo because the rename
+    // destination isn't recorded in actions.jsonl. Restoring from backup
+    // would create a duplicate (file at both req.path AND `to`). Refuse
+    // explicitly with a precise error variant so agents know the run
+    // contains an un-reversible mutation — and the operator can manually
+    // inspect / restore via `cass doctor --explain`.
+    if op_kind == "rename" {
+        return Err(UndoError::OpRenameNotReversible {
+            path: target.to_path_buf(),
+        });
+    }
     // Step 1: tamper-check the post-mutation state. The recorded
     // `after_blake3` is what the chokepoint observed RIGHT after the
     // mutation; the current file's hash must match (or both must be None
@@ -574,6 +597,46 @@ mod tests {
             "post-undo: file restored at original location"
         );
         assert_eq!(fs::read(&target).unwrap(), pre.to_vec());
+    }
+
+    /// Pass-12 regression test: Op::Rename undo is refused with a precise
+    /// error variant because the rename destination isn't recorded in
+    /// actions.jsonl. Restoring from backup would create a duplicate file
+    /// rather than reversing the rename. Operator can still inspect via
+    /// `--explain` and restore manually.
+    #[test]
+    fn pass12_undo_of_op_rename_refuses_with_precise_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+        let run_id = RunId::from_parts("sha-rename", 1_700_000_000_000);
+        let _ = create_run_dir(&data_dir, &run_id).unwrap();
+
+        // Set up a pre-existing file we'll rename.
+        let src = data_dir.join("source.toml");
+        let dst = data_dir.join("renamed.toml");
+        fs::write(&src, b"content\n").unwrap();
+
+        // Op::Rename via the chokepoint.
+        let _r = crate::doctor_chokepoint::mutate(crate::doctor_chokepoint::MutationRequest {
+            run_id: run_id.clone(),
+            data_dir: data_dir.clone(),
+            fm_id: "fm-test-rename".into(),
+            path: src.clone(),
+            op: crate::doctor_chokepoint::Op::Rename { to: dst.clone() },
+        })
+        .expect("rename ok");
+        assert!(!src.exists(), "source moved");
+        assert!(dst.exists(), "destination written");
+
+        // Undo MUST refuse with OpRenameNotReversible.
+        let res = undo_run(&data_dir, &run_id, "sha-rename");
+        assert!(matches!(res, Err(UndoError::OpRenameNotReversible { .. })));
+
+        // The original source is NOT restored (refusal means no action) AND
+        // the destination is NOT removed. State is preserved exactly as
+        // the chokepoint left it.
+        assert!(!src.exists());
+        assert!(dst.exists());
     }
 
     /// Pass-11 regression test: idempotent re-undo. After a successful
