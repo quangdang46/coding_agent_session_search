@@ -425,6 +425,13 @@ fn capabilities_are_self_describing_for_agents() {
     );
     assert!(
         recoveries.iter().any(|recovery| recovery["wrong"]
+            == "cass why auth failed --json --max-evidence 3"
+            && recovery["canonical"] == "cass pack \"auth failed\" --json --max-evidence 3"
+            && recovery["accepted"] == true),
+        "capabilities should advertise question-pack alias recovery"
+    );
+    assert!(
+        recoveries.iter().any(|recovery| recovery["wrong"]
             == "cass search auth provider codex limit 5 last 7d --json"
             && recovery["canonical"]
                 == "cass search auth --agent codex --limit 5 --since -7d --json"
@@ -858,6 +865,21 @@ fn answer_alias_runs_pack_command() {
 #[test]
 fn handoff_alias_runs_pack_command() {
     assert_pack_alias_runs("handoff");
+}
+
+#[test]
+fn why_alias_runs_pack_command() {
+    assert_pack_alias_runs("why");
+}
+
+#[test]
+fn explain_alias_runs_pack_command() {
+    assert_pack_alias_runs("explain");
+}
+
+#[test]
+fn rca_alias_runs_pack_command() {
+    assert_pack_alias_runs("rca");
 }
 
 #[test]

@@ -3678,6 +3678,13 @@ fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
         ("evidence", "pack"),
         ("bundle", "pack"),
         ("handoff", "pack"),
+        ("why", "pack"),
+        ("explain", "pack"),
+        ("rca", "pack"),
+        ("root-cause", "pack"),
+        ("rootcause", "pack"),
+        ("summarize", "pack"),
+        ("summarise", "pack"),
         // Introspect aliases
         ("inspect", "introspect"),
         ("intro", "introspect"),
@@ -65055,6 +65062,12 @@ fn build_mistake_recovery_capabilities() -> Vec<MistakeRecoveryCapability> {
             "cass pack auth --json",
             true,
             "Answer/handoff/bundle/evidence aliases route cited-handoff intent to the answer-pack command instead of implicit search.",
+        ),
+        mistake_recovery_capability(
+            "cass why auth failed --json --max-evidence 3",
+            "cass pack \"auth failed\" --json --max-evidence 3",
+            true,
+            "Question/RC prompt aliases route answer intent to pack, so pack-only evidence flags do not get misparsed as search flags.",
         ),
         mistake_recovery_capability(
             "cass auth error --json",
