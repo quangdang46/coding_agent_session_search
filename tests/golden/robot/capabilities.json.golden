@@ -3067,6 +3067,18 @@
       "behavior": "Reversed HTML export spellings such as html-export, html_export, and exporthtml route to the self-contained HTML export command."
     },
     {
+      "wrong": "cass current --json",
+      "canonical": "cass sessions --current --json",
+      "accepted": true,
+      "behavior": "Current-session shorthands route to session discovery instead of being treated as a search query."
+    },
+    {
+      "wrong": "cass sessions current --json",
+      "canonical": "cass sessions --current --json",
+      "accepted": true,
+      "behavior": "The sessions command accepts current as a positional shorthand for the --current flag."
+    },
+    {
       "wrong": "cass auth failed --json --max-evidence 3",
       "canonical": "cass pack \"auth failed\" --json --max-evidence 3",
       "accepted": true,

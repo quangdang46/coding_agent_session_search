@@ -2281,6 +2281,58 @@ fn move_leading_structured_flag_to_subcommand(rest: &mut Vec<String>) -> bool {
     true
 }
 
+fn is_current_session_shorthand(arg: &str) -> bool {
+    matches!(
+        arg.to_ascii_lowercase().as_str(),
+        "current" | "current-session" | "current_session" | "session-current" | "session_current"
+    )
+}
+
+fn has_current_session_flag(rest: &[String]) -> bool {
+    rest.iter()
+        .any(|arg| arg == "--current" || arg.starts_with("--current="))
+}
+
+fn recover_current_session_shorthands(rest: &mut Vec<String>, corrections: &mut Vec<String>) {
+    let leading_structured_count = rest
+        .iter()
+        .take_while(|arg| matches!(arg.as_str(), "--json" | "--robot"))
+        .count();
+
+    if rest
+        .get(leading_structured_count)
+        .is_some_and(|arg| is_current_session_shorthand(arg))
+    {
+        let alias = rest[leading_structured_count].clone();
+        rest[leading_structured_count] = "sessions".to_string();
+        if !has_current_session_flag(rest) {
+            rest.insert(leading_structured_count + 1, "--current".to_string());
+        }
+        corrections.push(format!(
+            "'{alias}' → 'sessions --current' (current-session shorthand)"
+        ));
+        return;
+    }
+
+    if !matches!(rest.first().map(String::as_str), Some("sessions")) {
+        return;
+    }
+    if !rest
+        .get(1)
+        .is_some_and(|arg| is_current_session_shorthand(arg))
+    {
+        return;
+    }
+
+    let alias = rest.remove(1);
+    if !has_current_session_flag(rest) {
+        rest.insert(1, "--current".to_string());
+    }
+    corrections.push(format!(
+        "'sessions {alias}' → 'sessions --current' (current-session shorthand)"
+    ));
+}
+
 fn take_named_value(rest: &mut Vec<String>, names: &[&str]) -> Option<(String, String)> {
     for index in 1..rest.len() {
         let arg = rest[index].clone();
@@ -3554,7 +3606,8 @@ fn recover_multiword_query_positionals(rest: &mut Vec<String>, corrections: &mut
 /// 18. **Drill-down option recovery**: `view file line=42` → `view file --line 42`
 /// 19. **Search-result field aliases**: `view file --line-number 42` → `view file --line 42`
 /// 20. **Search-result source aliases**: `view source_path=file source_id=local` → `view file --source local`
-/// 21. **Global flag hoisting**: Moves global flags to front regardless of position
+/// 21. **Current-session shorthand**: `current --json` → `sessions --current --json`
+/// 22. **Global flag hoisting**: Moves global flags to front regardless of position
 ///
 /// Returns normalized argv plus an optional correction note teaching proper syntax.
 fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
@@ -3963,6 +4016,7 @@ fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
     }
 
     let mut normalized = Vec::with_capacity(1 + globals.len() + rest.len());
+    recover_current_session_shorthands(&mut rest, &mut corrections);
     if move_leading_structured_flag_to_subcommand(&mut rest) {
         corrections.push(
             "Leading --json/--robot moved after the subcommand (structured output flag)".into(),
@@ -65222,6 +65276,18 @@ fn build_mistake_recovery_capabilities() -> Vec<MistakeRecoveryCapability> {
             "cass export-html session.jsonl --json",
             true,
             "Reversed HTML export spellings such as html-export, html_export, and exporthtml route to the self-contained HTML export command.",
+        ),
+        mistake_recovery_capability(
+            "cass current --json",
+            "cass sessions --current --json",
+            true,
+            "Current-session shorthands route to session discovery instead of being treated as a search query.",
+        ),
+        mistake_recovery_capability(
+            "cass sessions current --json",
+            "cass sessions --current --json",
+            true,
+            "The sessions command accepts current as a positional shorthand for the --current flag.",
         ),
         mistake_recovery_capability(
             "cass auth failed --json --max-evidence 3",

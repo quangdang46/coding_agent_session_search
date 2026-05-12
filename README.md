@@ -766,6 +766,8 @@ AI agents sometimes make syntax mistakes. `cass` aggressively normalizes input t
 | `cass auth failed --json --max-evidence 3` | `cass pack "auth failed" --json --max-evidence 3` | Bare robot queries with pack-only flags become answer packs |
 | `cass search auth failed --json --max-evidence 3` | `cass pack "auth failed" --json --max-evidence 3` | Explicit robot search with pack-only flags becomes an answer pack |
 | `cass html-export session.jsonl --json` | `cass export-html session.jsonl --json` | Reversed HTML export aliases normalized to the archive exporter |
+| `cass current --json` | `cass sessions --current --json` | Current-session shorthand normalized to session discovery |
+| `cass sessions current --json` | `cass sessions --current --json` | Positional `current` accepted as the sessions current flag |
 | `cass search --query "auth" --json` | `cass search "auth" --json` | Named query option converted to required positional query |
 | `cass search --q "auth" --json` | `cass search "auth" --json` | Short/familiar query aliases converted to required positional query |
 | `cass search auth error --json` | `cass search "auth error" --json` | Adjacent unquoted query words folded into one search |
@@ -806,7 +808,8 @@ The CLI applies multiple normalization layers:
 17. **Search-hit bundle recovery**: `source_path=... source_id=... line_number=...` can be pasted into follow-up `view`/`expand` commands and becomes the canonical path/source/line form
 18. **Leading-filter query recovery**: if a search/pack query comes after leading options, the query is moved back to the required positional slot
 19. **Implicit robot search**: unquoted top-level words with an explicit robot/JSON output request become a `search` query unless they look like a subcommand typo
-20. **Global flag hoisting**: Position-independent flag handling
+20. **Current-session shorthand**: `current`, `current-session`, and `sessions current` become `sessions --current`
+21. **Global flag hoisting**: Position-independent flag handling
 
 When corrections are applied, `cass` emits a teaching note to stderr so agents learn the canonical syntax.
 

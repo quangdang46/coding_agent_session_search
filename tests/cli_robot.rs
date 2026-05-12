@@ -423,6 +423,22 @@ fn capabilities_are_self_describing_for_agents() {
         "capabilities should advertise reversed HTML export alias recovery"
     );
     assert!(
+        recoveries
+            .iter()
+            .any(|recovery| recovery["wrong"] == "cass current --json"
+                && recovery["canonical"] == "cass sessions --current --json"
+                && recovery["accepted"] == true),
+        "capabilities should advertise current-session shorthand recovery"
+    );
+    assert!(
+        recoveries.iter().any(
+            |recovery| recovery["wrong"] == "cass sessions current --json"
+                && recovery["canonical"] == "cass sessions --current --json"
+                && recovery["accepted"] == true
+        ),
+        "capabilities should advertise sessions current shorthand recovery"
+    );
+    assert!(
         recoveries.iter().any(
             |recovery| recovery["wrong"] == "cass search auth error --json"
                 && recovery["canonical"] == "cass search \"auth error\" --json"
@@ -891,6 +907,64 @@ fn html_export_aliases_route_to_export_html_command() {
             "{alias}"
         );
         assert_eq!(json["messages"].as_u64(), Some(1), "{alias}");
+    }
+}
+
+#[test]
+fn current_session_aliases_route_to_sessions_current() {
+    for args in [
+        vec![
+            "current",
+            "--json",
+            "--data-dir",
+            "tests/fixtures/search_demo_data",
+        ],
+        vec![
+            "current-session",
+            "--json",
+            "--data-dir",
+            "tests/fixtures/search_demo_data",
+        ],
+        vec![
+            "current_session",
+            "--json",
+            "--data-dir",
+            "tests/fixtures/search_demo_data",
+        ],
+        vec![
+            "sessions",
+            "current",
+            "--json",
+            "--data-dir",
+            "tests/fixtures/search_demo_data",
+        ],
+        vec![
+            "session",
+            "current",
+            "--json",
+            "--data-dir",
+            "tests/fixtures/search_demo_data",
+        ],
+        vec![
+            "--json",
+            "current",
+            "--data-dir",
+            "tests/fixtures/search_demo_data",
+        ],
+    ] {
+        let mut cmd = base_cmd();
+        cmd.args(args);
+        let output = cmd.assert().success().get_output().clone();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let json: Value = serde_json::from_str(stdout.trim()).expect("valid sessions JSON");
+        let sessions = json["sessions"].as_array().expect("sessions array");
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0]["agent"].as_str(), Some("aider"));
+        assert_eq!(
+            sessions[0]["workspace"].as_str(),
+            Some("/data/projects/coding_agent_session_search")
+        );
     }
 }
 
