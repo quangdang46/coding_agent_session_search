@@ -93,6 +93,13 @@ mod linux_publish_swap {
 
     pub const AT_FDCWD: c_int = -100;
     pub const RENAME_EXCHANGE: c_uint = 0x2;
+    /// Linux's `<errno.h>` definition (`EINVAL = 22`). We don't depend on
+    /// `libc` directly — `errno.h` has guaranteed this value on every
+    /// glibc/musl architecture since the kernel was renumbered, and
+    /// pulling in `libc` for one constant inflates compile time.
+    /// Cross-checked against `man 2 renameat2` (returns EINVAL when the
+    /// underlying filesystem doesn't support `RENAME_EXCHANGE`).
+    pub const EINVAL: i32 = 22;
 
     unsafe extern "C" {
         pub fn renameat2(
@@ -12690,7 +12697,40 @@ fn publish_staged_lexical_index(staged_index_path: &Path, index_path: &Path) -> 
         // A: atomic renameat2(RENAME_EXCHANGE). After the syscall,
         // `index_path` holds NEW content (live readers see it atomically)
         // and `staged_index_path` holds the OLD prior-live content.
-        atomic_exchange_paths(index_path, staged_index_path)?;
+        //
+        // Filesystems that don't implement RENAME_EXCHANGE (NFSv3, some
+        // older FUSE mounts, certain network exports) reject the syscall
+        // with EINVAL. In that case we fall through to the rename-pair
+        // strategy that the non-Linux branch already uses — same atomicity
+        // guarantees on the live `index_path` handle, slightly wider crash
+        // window because the swap is a sequence of two renames instead of
+        // one syscall. See coding_agent_session_search#225.
+        if let Err(err) = atomic_exchange_paths(index_path, staged_index_path) {
+            if err
+                .downcast_ref::<std::io::Error>()
+                .and_then(std::io::Error::raw_os_error)
+                == Some(linux_publish_swap::EINVAL)
+            {
+                tracing::info!(
+                    index_path = %index_path.display(),
+                    staged_index_path = %staged_index_path.display(),
+                    "renameat2(RENAME_EXCHANGE) returned EINVAL; falling through to rename-pair publish (likely NFSv3 or other filesystem without RENAME_EXCHANGE support)"
+                );
+                publish_via_rename_pair(
+                    staged_index_path,
+                    index_path,
+                    &retained_backup_path,
+                )?;
+                sync_parent_directory(index_path)?;
+                sync_parent_directory(&retained_backup_path)?;
+                tracing::info!(
+                    retained_backup_path = %retained_backup_path.display(),
+                    "staged lexical index published via rename-pair fallback"
+                );
+                return Ok(());
+            }
+            return Err(err);
+        }
 
         // A.5 (bead 9wkx5): park OLD at the canonical
         // `.<name>.publish-in-progress.bak` sidecar — the SAME handle the
@@ -12769,59 +12809,7 @@ fn publish_staged_lexical_index(staged_index_path: &Path, index_path: &Path) -> 
 
     #[cfg(not(target_os = "linux"))]
     {
-        let in_progress_backup_path = lexical_publish_in_progress_backup_path(index_path);
-        rename_lexical_publish_path(
-            index_path,
-            &in_progress_backup_path,
-            LexicalPublishRenameSite::NonLinuxParkPriorLive,
-        )
-        .with_context(|| {
-            format!(
-                "parking prior lexical index at {} before staged publish",
-                in_progress_backup_path.display()
-            )
-        })?;
-        if let Err(publish_err) = rename_lexical_publish_path(
-            staged_index_path,
-            index_path,
-            LexicalPublishRenameSite::NonLinuxPublishStagedLive,
-        ) {
-            match rename_lexical_publish_path(
-                &in_progress_backup_path,
-                index_path,
-                LexicalPublishRenameSite::RecoverRestorePriorLive,
-            ) {
-                Ok(()) => {
-                    return Err(publish_err).with_context(|| {
-                        format!(
-                            "publishing staged lexical index {} -> {} failed after parking the prior live index; restored the previous live index",
-                            staged_index_path.display(),
-                            index_path.display()
-                        )
-                    });
-                }
-                Err(rollback_err) => {
-                    return Err(anyhow::anyhow!(
-                        "publishing staged lexical index {} -> {} failed after parking the prior live index at {}: {publish_err:#}; rollback also failed: {rollback_err:#}",
-                        staged_index_path.display(),
-                        index_path.display(),
-                        in_progress_backup_path.display()
-                    ));
-                }
-            }
-        }
-        if let Err(retain_err) = rename_lexical_publish_path(
-            &in_progress_backup_path,
-            &retained_backup_path,
-            LexicalPublishRenameSite::NonLinuxRetainPriorLive,
-        ) {
-            tracing::warn!(
-                error = %retain_err,
-                backup_path = %in_progress_backup_path.display(),
-                retained_backup_path = %retained_backup_path.display(),
-                "published staged lexical index but could not move the prior live artifact into retained backup storage"
-            );
-        }
+        publish_via_rename_pair(staged_index_path, index_path, &retained_backup_path)?;
     }
 
     sync_parent_directory(index_path)?;
@@ -12843,6 +12831,80 @@ fn publish_staged_lexical_index(staged_index_path: &Path, index_path: &Path) -> 
             error = %prune_err,
             live_index_path = %index_path.display(),
             "failed to prune old retained lexical-publish backups; disk may not be reclaimed until the next successful prune attempt"
+        );
+    }
+    Ok(())
+}
+
+/// Rename-pair publish strategy: park the live index at the canonical
+/// sidecar, move the staged index into place, then retain the parked
+/// generation under a unique dated name. Used directly on non-Linux
+/// platforms and as the EINVAL fallback when Linux's atomic
+/// `renameat2(RENAME_EXCHANGE)` is rejected (NFSv3, some older FUSE
+/// mounts, certain network exports — see coding_agent_session_search#225).
+///
+/// Crash window: a single same-filesystem rename is essentially atomic
+/// on every modern filesystem we care about, so the window is bounded
+/// by the time between the publish rename and the retain rename. A
+/// crash in that window leaves the prior-live tree at the canonical
+/// sidecar; `recover_or_finalize_interrupted_lexical_publish_backup`
+/// finishes the retain step on next startup.
+fn publish_via_rename_pair(
+    staged_index_path: &Path,
+    index_path: &Path,
+    retained_backup_path: &Path,
+) -> Result<()> {
+    let in_progress_backup_path = lexical_publish_in_progress_backup_path(index_path);
+    rename_lexical_publish_path(
+        index_path,
+        &in_progress_backup_path,
+        LexicalPublishRenameSite::NonLinuxParkPriorLive,
+    )
+    .with_context(|| {
+        format!(
+            "parking prior lexical index at {} before staged publish",
+            in_progress_backup_path.display()
+        )
+    })?;
+    if let Err(publish_err) = rename_lexical_publish_path(
+        staged_index_path,
+        index_path,
+        LexicalPublishRenameSite::NonLinuxPublishStagedLive,
+    ) {
+        match rename_lexical_publish_path(
+            &in_progress_backup_path,
+            index_path,
+            LexicalPublishRenameSite::RecoverRestorePriorLive,
+        ) {
+            Ok(()) => {
+                return Err(publish_err).with_context(|| {
+                    format!(
+                        "publishing staged lexical index {} -> {} failed after parking the prior live index; restored the previous live index",
+                        staged_index_path.display(),
+                        index_path.display()
+                    )
+                });
+            }
+            Err(rollback_err) => {
+                return Err(anyhow::anyhow!(
+                    "publishing staged lexical index {} -> {} failed after parking the prior live index at {}: {publish_err:#}; rollback also failed: {rollback_err:#}",
+                    staged_index_path.display(),
+                    index_path.display(),
+                    in_progress_backup_path.display()
+                ));
+            }
+        }
+    }
+    if let Err(retain_err) = rename_lexical_publish_path(
+        &in_progress_backup_path,
+        retained_backup_path,
+        LexicalPublishRenameSite::NonLinuxRetainPriorLive,
+    ) {
+        tracing::warn!(
+            error = %retain_err,
+            backup_path = %in_progress_backup_path.display(),
+            retained_backup_path = %retained_backup_path.display(),
+            "published staged lexical index but could not move the prior live artifact into retained backup storage"
         );
     }
     Ok(())
