@@ -64333,7 +64333,7 @@ pub(crate) fn run_doctor_impl(
         let journal_run_id_str = journal_run_id.as_str().to_string();
         let journal_run_dir = match crate::doctor_runs::create_run_dir(&data_dir, &journal_run_id) {
             Ok(dir) => {
-                let _ = crate::doctor_runs::append_action(
+                if let Err(err) = crate::doctor_runs::append_action(
                     &dir,
                     &crate::doctor_runs::ActionRecord::RunStarted {
                         schema_version: crate::doctor_runs::RUN_ARTIFACT_SCHEMA_VERSION,
@@ -64342,7 +64342,14 @@ pub(crate) fn run_doctor_impl(
                         mode: "cleanup-apply".to_string(),
                         started_at_ms: doctor_now_ms(),
                     },
-                );
+                ) {
+                    tracing::warn!(
+                        target: "cass::doctor::cleanup",
+                        run_id = %journal_run_id_str,
+                        error = %err,
+                        "failed to append RunStarted to cleanup-apply journal; subsequent records will lack a session-opener"
+                    );
+                }
                 Some(dir)
             }
             Err(err) => {
@@ -64382,7 +64389,7 @@ pub(crate) fn run_doctor_impl(
             } else {
                 "no-op"
             };
-            let _ = crate::doctor_runs::append_action(
+            if let Err(err) = crate::doctor_runs::append_action(
                 run_dir,
                 &crate::doctor_runs::ActionRecord::RunEnded {
                     run_id: journal_run_id_str.clone(),
@@ -64390,7 +64397,15 @@ pub(crate) fn run_doctor_impl(
                     exit_code_kind: exit_code_kind.to_string(),
                     ended_at_ms: doctor_now_ms(),
                 },
-            );
+            ) {
+                tracing::warn!(
+                    target: "cass::doctor::cleanup",
+                    run_id = %journal_run_id_str,
+                    exit_code_kind,
+                    error = %err,
+                    "failed to append RunEnded to cleanup-apply journal; this run will appear as 'in-flight' to crash-recovery"
+                );
+            }
         }
         let cleanup_status = if result.applied {
             "pass"
