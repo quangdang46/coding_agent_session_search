@@ -153,11 +153,13 @@ fn buffer_to_ansi(buf: &Buffer) -> String {
 fn normalize(text: &str, mode: MatchMode) -> String {
     match mode {
         MatchMode::Exact => text.to_string(),
-        MatchMode::TrimTrailing => text
-            .lines()
-            .map(str::trim_end)
-            .collect::<Vec<_>>()
-            .join("\n"),
+        MatchMode::TrimTrailing => {
+            let mut lines = text.lines().map(str::trim_end).collect::<Vec<_>>();
+            while lines.last().is_some_and(|line| line.is_empty()) {
+                lines.pop();
+            }
+            lines.join("\n")
+        }
         MatchMode::Fuzzy => text
             .lines()
             .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
@@ -240,7 +242,7 @@ pub fn assert_buffer_snapshot(name: &str, buf: &Buffer, base_dir: &str, mode: Ma
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("failed to create snapshot directory");
         }
-        std::fs::write(&path, &actual).expect("failed to write snapshot");
+        std::fs::write(&path, normalize(&actual, mode)).expect("failed to write snapshot");
         return;
     }
 

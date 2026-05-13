@@ -25,6 +25,7 @@
 #![allow(dead_code)]
 
 use std::fs;
+use std::io;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -72,6 +73,8 @@ pub(crate) enum UndoError {
         "op::rename is not reversible in pass-1+ schema: {path:?} (the rename destination is not recorded in actions.jsonl)"
     )]
     OpRenameNotReversible { path: PathBuf },
+    #[error("undo quarantine destination {0:?} already exists; refusing to overwrite it")]
+    QuarantineDestinationExists(PathBuf),
 }
 
 /// Per-action outcome of an undo step. Returned in undo order (i.e., reverse
@@ -343,13 +346,18 @@ fn undo_one(
             .join("doctor")
             .join("undo-quarantine")
             .join(format!("{}", current_unix_ms()));
-        fs::create_dir_all(&undo_quarantine_dir)?;
+        create_private_undo_quarantine_dir(&undo_quarantine_dir)?;
         let dest = undo_quarantine_dir.join(
             target
                 .file_name()
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("orphan")),
         );
+        match fs::symlink_metadata(&dest) {
+            Ok(_) => return Err(UndoError::QuarantineDestinationExists(dest)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(UndoError::Io(err)),
+        }
         fs::rename(target, &dest)?;
         return Ok("quarantined-because-original-was-create");
     }
@@ -406,7 +414,7 @@ fn undo_one(
         tmp_nonce_undo(),
     ));
     {
-        let mut f = fs::File::create(&tmp)?;
+        let mut f = create_new_undo_temp_file(&tmp)?;
         f.write_all(&backup_bytes)?;
         f.sync_all()?;
     }
@@ -438,6 +446,52 @@ fn blake3_of_file(path: &Path) -> std::io::Result<String> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(&bytes);
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+fn create_new_undo_temp_file(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+fn create_private_undo_quarantine_dir(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::fs::DirBuilder;
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = DirBuilder::new();
+        builder.recursive(true);
+        builder.mode(0o700);
+        builder.create(path)?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(path)?;
+    }
+
+    let meta = fs::symlink_metadata(path)?;
+    let file_type = meta.file_type();
+    if file_type.is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("undo quarantine directory {path:?} must not be a symlink"),
+        ));
+    }
+    if !file_type.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("undo quarantine directory {path:?} is not a directory"),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o777 != 0o700 {
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+        }
+    }
+    Ok(())
 }
 
 fn current_unix_ms() -> i64 {
@@ -498,6 +552,44 @@ mod tests {
         assert_eq!(receipt.steps_succeeded, 1);
         assert_eq!(receipt.steps_failed, 0);
         assert_eq!(fs::read(&target).unwrap(), before_bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn undo_temp_file_creation_refuses_preexisting_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let protected = tmp.path().join("protected.txt");
+        let temp_path = tmp.path().join(".doctor.undo.tmp");
+        fs::write(&protected, b"protected").unwrap();
+        symlink(&protected, &temp_path).unwrap();
+
+        let err = create_new_undo_temp_file(&temp_path).expect_err("symlink collision should fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&protected).unwrap(), b"protected");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn undo_quarantine_dir_refuses_preexisting_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let quarantine_dir = tmp.path().join("doctor/undo-quarantine/123");
+        fs::create_dir_all(quarantine_dir.parent().unwrap()).unwrap();
+        symlink(outside.path(), &quarantine_dir).unwrap();
+
+        let err =
+            create_private_undo_quarantine_dir(&quarantine_dir).expect_err("symlink must fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            fs::symlink_metadata(&quarantine_dir)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[test]

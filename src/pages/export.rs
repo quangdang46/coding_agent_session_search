@@ -99,6 +99,14 @@ impl ExportEngine {
             let dest =
                 Connection::open(&output_path).context("Failed to create output database")?;
 
+            dest.execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA synchronous = NORMAL;
+                 PRAGMA busy_timeout = 5000;
+                 PRAGMA foreign_keys = ON;",
+            )
+            .context("Failed to set destination database PRAGMAs")?;
+
             let (processed, msg_processed) = {
                 let mut tx = dest.transaction()?;
 

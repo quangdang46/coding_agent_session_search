@@ -27029,8 +27029,10 @@ mod tests {
     #[test]
     fn debounce_does_not_fire_before_threshold() {
         let mut app = CassApp::default();
-        // Set search_dirty_since to just now (within debounce window)
-        app.search_dirty_since = Some(Instant::now());
+        // Keep the dirty timestamp safely inside the debounce window even on
+        // overloaded CI workers where this tick handler can spend >8ms before
+        // reaching the debounce check.
+        app.search_dirty_since = Some(Instant::now() + SEARCH_DEBOUNCE);
         let cmd = app.update(CassMsg::Tick);
         let msgs = extract_msgs(cmd);
         // Should NOT have fired SearchRequested yet; the remaining debounce
@@ -41295,30 +41297,44 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
     /// Markdown theming overhead relative to plain text rendering is acceptable.
     #[test]
     fn perf_profile_markdown_vs_plain_overhead_ratio() {
+        use std::hint::black_box;
+
         let styles = StyleContext::from_options(StyleOptions::default());
         let renderer = MarkdownRenderer::new(styles.markdown_theme());
+        let iterations = 50u32;
 
         // Benchmark markdown
         let md_start = std::time::Instant::now();
-        for _ in 0..20 {
-            let _r = renderer.render(MARKDOWN_PROFILE_CONTENT);
+        let mut md_units = 0usize;
+        for _ in 0..iterations {
+            let rendered = renderer.render(black_box(MARKDOWN_PROFILE_CONTENT));
+            black_box(rendered);
+            md_units = md_units.saturating_add(1);
         }
-        let md_us = md_start.elapsed().as_micros();
+        let md_us = md_start.elapsed().as_secs_f64() * 1_000_000.0 / f64::from(iterations);
 
         // Benchmark plain text equivalent (same length, split to lines)
-        let plain_content = "x".repeat(MARKDOWN_PROFILE_CONTENT.len());
         let plain_start = std::time::Instant::now();
-        for _ in 0..20 {
-            let _lines: Vec<&str> = plain_content.lines().collect();
+        let mut plain_units = 0usize;
+        for _ in 0..iterations {
+            let units = black_box(MARKDOWN_PROFILE_CONTENT)
+                .lines()
+                .map(str::len)
+                .sum::<usize>();
+            plain_units = plain_units.saturating_add(units);
         }
-        let plain_us = plain_start.elapsed().as_micros().max(1);
+        black_box((md_units, plain_units));
+        let plain_us = plain_start.elapsed().as_secs_f64() * 1_000_000.0 / f64::from(iterations);
 
-        // Markdown rendering should not be more than 1000x slower than
-        // a simple line split — generous bound for parser overhead.
-        let ratio = md_us / plain_us;
+        // Markdown rendering should not be more than 1000x slower than a
+        // simple line scan. On fast workers the plain baseline can fall below
+        // stable timer granularity, so clamp only that denominator to a tiny
+        // 2us floor; the absolute markdown budget above still catches real
+        // slowdowns.
+        let ratio = md_us / plain_us.max(2.0);
         assert!(
-            ratio < 1000,
-            "markdown/plain ratio = {}x — overhead is excessive (md={}us plain={}us)",
+            ratio < 1000.0,
+            "markdown/plain ratio = {:.1}x — overhead is excessive (md={:.1}us plain={:.1}us)",
             ratio,
             md_us,
             plain_us

@@ -38,7 +38,26 @@ fn create_owner_only_dir_all(path: &Path) -> std::io::Result<()> {
     builder.recursive(true);
     builder.mode(0o700);
     builder.create(path)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+
+    // MUST verify the path is a real directory and not a symlink.
+    // This prevents symlink attacks in shared parents (e.g. /tmp) where
+    // an attacker creates a symlink that DirBuilder happily traverses.
+    let meta = fs::symlink_metadata(path)?;
+    if !meta.file_type().is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "path exists but is not a regular directory: {}",
+                path.display()
+            ),
+        ));
+    }
+
+    // Only apply chmod if permissions are too loose. This minimizes the TOCTOU window
+    // since newly created directories will already have correct permissions.
+    if meta.permissions().mode() & 0o777 != 0o700 {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
     Ok(())
 }
 
@@ -306,12 +325,33 @@ impl ModelDaemon {
     pub fn run(&self) -> std::io::Result<()> {
         // Use a file lock to ensure only one daemon instance runs for this socket path
         let lock_path = daemon_run_lock_path(&self.config.socket_path);
-        let lock_file = std::fs::OpenOptions::new()
+
+        let lock_file = match std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)?;
+            .create_new(true)
+            .open(&lock_path)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Prevent symlink attacks by refusing to open symlinks.
+                // TOCTOU window exists here but is significantly reduced.
+                if std::fs::symlink_metadata(&lock_path)?
+                    .file_type()
+                    .is_symlink()
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "refusing to open a symlink lock file",
+                    ));
+                }
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&lock_path)?
+            }
+            Err(e) => return Err(e),
+        };
 
         // Acquire exclusive lock (non-blocking to fail fast if another daemon is already running)
         if lock_file.try_lock_exclusive().is_err() {

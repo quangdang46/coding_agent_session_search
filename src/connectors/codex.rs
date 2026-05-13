@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
@@ -77,6 +78,21 @@ fn augment_modern_codex_messages(conversation: &mut NormalizedConversation) {
         return;
     };
 
+    let mut seen_messages: HashSet<ModernCodexMessageSignature> = conversation
+        .messages
+        .iter()
+        .map(modern_codex_message_signature)
+        .collect();
+    let mut seen_call_ids: HashSet<String> = conversation
+        .messages
+        .iter()
+        .flat_map(modern_codex_message_call_ids)
+        .collect();
+    let mut seen_raw_entries: HashSet<[u8; 32]> = conversation
+        .messages
+        .iter()
+        .map(|message| modern_codex_raw_signature(&message.extra))
+        .collect();
     let mut added = false;
     for line in BufReader::new(file).lines().map_while(Result::ok) {
         let line = line.trim();
@@ -86,12 +102,20 @@ fn augment_modern_codex_messages(conversation: &mut NormalizedConversation) {
         let Ok(raw) = serde_json::from_str::<Value>(line) else {
             continue;
         };
+        let raw_signature = modern_codex_raw_signature(&raw);
+        if seen_raw_entries.contains(&raw_signature) {
+            continue;
+        }
         let Some(message) = modern_codex_message(&raw) else {
             continue;
         };
-        if message_already_indexed(conversation, &message) {
+        if message_already_indexed(&seen_messages, &seen_call_ids, &message) {
+            seen_raw_entries.insert(raw_signature);
             continue;
         }
+        seen_messages.insert(modern_codex_message_signature(&message));
+        seen_call_ids.extend(modern_codex_message_call_ids(&message));
+        seen_raw_entries.insert(raw_signature);
         conversation.messages.push(message);
         added = true;
     }
@@ -265,18 +289,7 @@ fn flatten_modern_content(content: &Value) -> Option<String> {
 
     let mut parts = Vec::new();
     for item in content.as_array()? {
-        let text = if let Some(text) = item.as_str() {
-            text
-        } else {
-            let item_type = item.get("type").and_then(Value::as_str);
-            if !matches!(
-                item_type,
-                None | Some("text") | Some("input_text") | Some("output_text")
-            ) {
-                continue;
-            }
-            item.get("text").and_then(Value::as_str).unwrap_or("")
-        };
+        let text = modern_content_part_text(item);
 
         let text = text.trim();
         if !text.is_empty() {
@@ -285,6 +298,50 @@ fn flatten_modern_content(content: &Value) -> Option<String> {
     }
 
     (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
+fn modern_content_part_text(item: &Value) -> String {
+    if let Some(text) = item.as_str() {
+        return text.to_string();
+    }
+
+    let item_type = item.get("type").and_then(Value::as_str);
+    if matches!(
+        item_type,
+        None | Some("text") | Some("input_text") | Some("output_text")
+    ) {
+        return item
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+    }
+
+    if item_type == Some("tool_use") {
+        let tool_name = item
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let detail = item
+            .get("input")
+            .and_then(|input| {
+                input
+                    .get("description")
+                    .or_else(|| input.get("file_path"))
+                    .or_else(|| input.get("path"))
+                    .or_else(|| input.get("command"))
+            })
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        return if detail.is_empty() {
+            format!("[Tool: {tool_name}]")
+        } else {
+            format!("[Tool: {tool_name} - {detail}]")
+        };
+    }
+
+    String::new()
 }
 
 fn tool_call_content(tool_name: &str, arguments: Option<&Value>) -> String {
@@ -343,25 +400,107 @@ fn truncate_tool_output(output: &str) -> String {
     truncated
 }
 
-fn message_already_indexed(
-    conversation: &NormalizedConversation,
-    candidate: &NormalizedMessage,
-) -> bool {
-    conversation.messages.iter().any(|message| {
-        message.role == candidate.role
-            && message.author == candidate.author
-            && message.created_at == candidate.created_at
-            && message.content == candidate.content
-    }) || candidate
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ModernCodexMessageSignature {
+    role: String,
+    author: Option<String>,
+    created_at: Option<i64>,
+    content_hash: [u8; 32],
+}
+
+fn modern_codex_message_signature(message: &NormalizedMessage) -> ModernCodexMessageSignature {
+    ModernCodexMessageSignature {
+        role: message.role.clone(),
+        author: message.author.clone(),
+        created_at: message.created_at,
+        content_hash: *blake3::hash(message.content.as_bytes()).as_bytes(),
+    }
+}
+
+fn modern_codex_raw_signature(raw: &Value) -> [u8; 32] {
+    let mut bytes = Vec::new();
+    if serde_json::to_writer(&mut bytes, raw).is_err() {
+        bytes.extend_from_slice(raw.to_string().as_bytes());
+    }
+    *blake3::hash(&bytes).as_bytes()
+}
+
+fn modern_codex_message_call_ids(message: &NormalizedMessage) -> impl Iterator<Item = String> + '_ {
+    message
         .invocations
         .iter()
-        .filter_map(|invocation| invocation.call_id.as_deref())
-        .any(|call_id| {
-            conversation.messages.iter().any(|message| {
-                message
-                    .invocations
-                    .iter()
-                    .any(|invocation| invocation.call_id.as_deref() == Some(call_id))
-            })
-        })
+        .filter_map(|invocation| invocation.call_id.clone())
+}
+
+fn message_already_indexed(
+    seen_messages: &HashSet<ModernCodexMessageSignature>,
+    seen_call_ids: &HashSet<String>,
+    candidate: &NormalizedMessage,
+) -> bool {
+    seen_messages.contains(&modern_codex_message_signature(candidate))
+        || candidate
+            .invocations
+            .iter()
+            .filter_map(|invocation| invocation.call_id.as_deref())
+            .any(|call_id| seen_call_ids.contains(call_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(content: &str, call_id: Option<&str>) -> NormalizedMessage {
+        NormalizedMessage {
+            idx: 0,
+            role: "assistant".to_string(),
+            author: None,
+            created_at: Some(1_700_000_000_000),
+            content: content.to_string(),
+            extra: Value::Null,
+            invocations: call_id
+                .map(|call_id| {
+                    vec![franken_agent_detection::NormalizedInvocation {
+                        kind: "tool".to_string(),
+                        name: "shell".to_string(),
+                        raw_name: None,
+                        call_id: Some(call_id.to_string()),
+                        arguments: None,
+                    }]
+                })
+                .unwrap_or_default(),
+            snippets: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn modern_codex_duplicate_detection_uses_precomputed_sets() {
+        let existing = message("canonical response", Some("call-1"));
+        let mut seen_messages = HashSet::from([modern_codex_message_signature(&existing)]);
+        let mut seen_call_ids: HashSet<String> = modern_codex_message_call_ids(&existing).collect();
+
+        assert!(message_already_indexed(
+            &seen_messages,
+            &seen_call_ids,
+            &message("canonical response", None)
+        ));
+        assert!(message_already_indexed(
+            &seen_messages,
+            &seen_call_ids,
+            &message("same tool call, changed wording", Some("call-1"))
+        ));
+
+        let fresh = message("fresh response", Some("call-2"));
+        assert!(!message_already_indexed(
+            &seen_messages,
+            &seen_call_ids,
+            &fresh
+        ));
+        seen_messages.insert(modern_codex_message_signature(&fresh));
+        seen_call_ids.extend(modern_codex_message_call_ids(&fresh));
+        assert!(message_already_indexed(
+            &seen_messages,
+            &seen_call_ids,
+            &fresh
+        ));
+    }
 }

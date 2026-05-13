@@ -980,6 +980,12 @@ impl PagesWizard {
         let conn = Connection::open(self.state.db_path.to_string_lossy().as_ref())
             .context("Failed to open database for summary generation")?;
 
+        conn.execute_batch(
+            "PRAGMA busy_timeout = 5000;
+             PRAGMA journal_mode = WAL;",
+        )
+        .context("Failed to set PRAGMAs for summary generation")?;
+
         let since_ts = self
             .state
             .time_range

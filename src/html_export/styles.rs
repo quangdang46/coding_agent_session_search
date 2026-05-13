@@ -1554,6 +1554,7 @@ pre:hover .copy-code-btn { opacity: 1; }
 .agent-windsurf .message-assistant { border-left-color: oklch(0.7 0.2 205); }
 .agent-amp .message-assistant { border-left-color: oklch(0.7 0.18 270); }
 .agent-grok .message-assistant { border-left-color: oklch(0.7 0.22 350); }
+.agent-hermes .message-assistant { border-left-color: oklch(0.78 0.16 95); }
 
 /* Print styles */
 @media print {

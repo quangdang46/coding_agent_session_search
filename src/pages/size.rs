@@ -66,6 +66,11 @@ impl SizeEstimate {
         let conn = Connection::open(db_path.as_ref().to_string_lossy().as_ref())
             .context("Failed to open database for size estimation")?;
 
+        conn.execute_batch(
+            "PRAGMA busy_timeout = 5000;
+             PRAGMA journal_mode = WAL;",
+        )?;
+
         // Build filter conditions
         let mut conditions = Vec::new();
         let mut param_values: Vec<ParamValue> = Vec::new();

@@ -500,7 +500,7 @@ pub fn agent_css_class(slug: &str) -> &'static str {
         "openclaw" => "agent-copilot",
         "vibe" | "mistral" => "agent-chatgpt",
         "crush" => "agent-amp",
-        "hermes" => "agent-default", // Reuse default styling until hermes gets its own palette
+        "hermes" => "agent-hermes",
         _ => "agent-default",
     }
 }
@@ -1566,6 +1566,7 @@ mod tests {
         assert_eq!(agent_css_class("opencode"), "agent-codex");
         assert_eq!(agent_css_class("copilot-cli"), "agent-copilot");
         assert_eq!(agent_css_class("qwen"), "agent-codex");
+        assert_eq!(agent_css_class("hermes"), "agent-hermes");
         assert_eq!(agent_css_class("unknown"), "agent-default");
     }
 

@@ -26,6 +26,7 @@
 #![allow(dead_code)]
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -158,20 +159,54 @@ pub(crate) fn runs_index_dir(data_dir: &Path) -> PathBuf {
 /// Idempotent: if the directory already exists with the expected layout, this
 /// is a no-op and returns the existing path.
 ///
-/// **Error:** Refuses if any expected child file already exists with non-zero
-/// size (would suggest run-id collision — caller should pick a fresh one).
+/// **Error:** Refuses if any expected directory is a symlink or non-directory,
+/// because backups and quarantine artifacts must remain under `data_dir`.
 pub(crate) fn create_run_dir(data_dir: &Path, run_id: &RunId) -> std::io::Result<PathBuf> {
     let run_dir = run_dir_for(data_dir, run_id);
-    fs::create_dir_all(&run_dir)?;
-    fs::create_dir_all(run_dir.join("backups"))?;
-    fs::create_dir_all(run_dir.join("quarantine"))?;
+    create_private_run_subdir(&run_dir)?;
+    create_private_run_subdir(&run_dir.join("backups"))?;
+    create_private_run_subdir(&run_dir.join("quarantine"))?;
+    Ok(run_dir)
+}
+
+fn create_private_run_subdir(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::fs::DirBuilder;
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = DirBuilder::new();
+        builder.recursive(true);
+        builder.mode(0o700);
+        builder.create(path)?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(path)?;
+    }
+
+    let meta = fs::symlink_metadata(path)?;
+    let file_type = meta.file_type();
+    if file_type.is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("doctor run directory {path:?} must not be a symlink"),
+        ));
+    }
+    if !file_type.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("doctor run directory {path:?} is not a directory"),
+        ));
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o700);
-        let _ = fs::set_permissions(&run_dir, perms);
+        if meta.permissions().mode() & 0o777 != 0o700 {
+            let perms = fs::Permissions::from_mode(0o700);
+            let _ = fs::set_permissions(path, perms);
+        }
     }
-    Ok(run_dir)
+    Ok(())
 }
 
 /// Update the `latest` symlink to point at `run_dir`. Atomic via
@@ -622,6 +657,28 @@ mod tests {
         assert_eq!(p1, p2);
         assert!(p1.join("backups").is_dir());
         assert!(p1.join("quarantine").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_run_dir_rejects_symlinked_artifact_subdirs() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let id = RunId::from_parts("abc", 1_700_000_000_000);
+        let run_dir = run_dir_for(tmp.path(), &id);
+        fs::create_dir_all(&run_dir).unwrap();
+        symlink(outside.path(), run_dir.join("backups")).unwrap();
+
+        let err = create_run_dir(tmp.path(), &id).expect_err("symlinked backups must fail closed");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            fs::symlink_metadata(run_dir.join("backups"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[test]

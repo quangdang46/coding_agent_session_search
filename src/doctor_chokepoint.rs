@@ -63,8 +63,9 @@ pub(crate) enum Op {
     CreateDir,
 
     /// Atomically rename `path` to `to`. Both must be in scope. The file at
-    /// `path` is backed up verbatim before the rename; if `to` already exists,
-    /// it is also backed up.
+    /// `path` is backed up verbatim before the rename. Existing destinations
+    /// are refused because the v1 mutation receipt does not carry a second
+    /// backup slot for destination content.
     Rename { to: PathBuf },
 
     /// Move `path` into `<run-dir>/quarantine/<basename>` with a deterministic
@@ -149,6 +150,10 @@ pub(crate) enum ChokepointError {
         "backup hash mismatch: file changed during mutate() (expected {expected}, found {actual})"
     )]
     HashMismatch { expected: String, actual: String },
+    #[error(
+        "rename destination {0:?} already exists; refusing to overwrite without a destination backup"
+    )]
+    RenameDestinationExists(PathBuf),
 }
 
 /// Determine whether a given path is within the doctor's write scope.
@@ -214,10 +219,15 @@ pub(crate) fn mutate(req: MutationRequest) -> Result<MutationReceipt, Chokepoint
     // Op-specific scope checks (per Gemini fresh-eyes round-1 P0):
     // Op::Rename has a destination path that ALSO must be in-scope, otherwise
     // a malicious or buggy fixer could rename in-scope/foo → /etc/passwd.
-    if let Op::Rename { to } = &req.op
-        && !path_is_in_scope(&req.data_dir, to)
-    {
-        return Err(ChokepointError::PathOutOfScope(to.clone()));
+    if let Op::Rename { to } = &req.op {
+        if !path_is_in_scope(&req.data_dir, to) {
+            return Err(ChokepointError::PathOutOfScope(to.clone()));
+        }
+        match fs::symlink_metadata(to) {
+            Ok(_) => return Err(ChokepointError::RenameDestinationExists(to.clone())),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(ChokepointError::Io(err)),
+        }
     }
     // Pass-3 fix (P2): Op::AppendLine collision guard. Refuse writes whose
     // path is the actions.jsonl of the *current* run — that file is owned by
@@ -390,7 +400,7 @@ fn apply_op(path: &Path, op: &Op, run_dir: &Path) -> Result<(), ChokepointError>
                 thread_id_hash(),
                 tmp_nonce()
             ));
-            let mut f = fs::File::create(&tmp)?;
+            let mut f = create_new_temp_file(&tmp)?;
             f.write_all(content)?;
             f.sync_all()?;
             drop(f);
@@ -477,6 +487,13 @@ fn copy_verbatim(src: &Path, dst: &Path) -> std::io::Result<()> {
     // mtime preservation is best-effort and platform-specific; skipped in pass-1
     // (the verbatim-content guarantee is what undo relies on, not mtime).
     Ok(())
+}
+
+fn create_new_temp_file(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
 }
 
 fn blake3_of_file_if_exists(path: &Path) -> std::io::Result<Option<String>> {
@@ -656,6 +673,57 @@ mod tests {
             },
         });
         assert!(matches!(res, Err(ChokepointError::PathOutOfScope(_))));
+    }
+
+    #[test]
+    fn rename_refuses_existing_destination_without_overwriting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (data_dir, run_id) = fresh_run(&tmp);
+        let src = data_dir.join("source.txt");
+        let dst = data_dir.join("dest.txt");
+        fs::write(&src, b"source").unwrap();
+        fs::write(&dst, b"destination").unwrap();
+
+        let res = mutate(MutationRequest {
+            run_id: run_id.clone(),
+            data_dir: data_dir.clone(),
+            fm_id: "fm-test-rename-dest-exists".into(),
+            path: src.clone(),
+            op: Op::Rename { to: dst.clone() },
+        });
+
+        assert!(matches!(
+            res,
+            Err(ChokepointError::RenameDestinationExists(path)) if path == dst
+        ));
+        assert_eq!(fs::read(&src).unwrap(), b"source");
+        assert_eq!(fs::read(&dst).unwrap(), b"destination");
+
+        let run_dir = crate::doctor_runs::run_dir_for(&data_dir, &run_id);
+        let (records, errors) = crate::doctor_runs::read_actions(&run_dir).unwrap();
+        assert!(errors.is_empty());
+        assert!(
+            records
+                .iter()
+                .all(|record| !matches!(record, ActionRecord::Mutation { .. })),
+            "failed rename must not journal a mutation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_file_creation_refuses_preexisting_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let protected = tmp.path().join("protected.txt");
+        let temp_path = tmp.path().join(".doctor.tmp");
+        fs::write(&protected, b"protected").unwrap();
+        symlink(&protected, &temp_path).unwrap();
+
+        let err = create_new_temp_file(&temp_path).expect_err("symlink collision should fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&protected).unwrap(), b"protected");
     }
 
     #[test]

@@ -180,13 +180,39 @@ impl UdsDaemonClient {
 
         // Use a file lock to prevent multiple processes from spawning the daemon simultaneously
         let lock_path = daemon_spawn_guard_lock_path(&self.config.socket_path);
-        let lock_file = std::fs::OpenOptions::new()
+
+        let lock_file = match std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
-            .truncate(false)
+            .create_new(true)
             .open(&lock_path)
-            .map_err(|e| DaemonError::Unavailable(format!("failed to open spawn lock: {}", e)))?;
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Prevent symlink attacks by refusing to open symlinks.
+                if std::fs::symlink_metadata(&lock_path)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false)
+                {
+                    return Err(DaemonError::Unavailable(
+                        "refusing to open a symlink spawn lock".to_string(),
+                    ));
+                }
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&lock_path)
+                    .map_err(|e| {
+                        DaemonError::Unavailable(format!("failed to open spawn lock: {}", e))
+                    })?
+            }
+            Err(e) => {
+                return Err(DaemonError::Unavailable(format!(
+                    "failed to create spawn lock: {}",
+                    e
+                )));
+            }
+        };
 
         // Acquire exclusive lock (blocks until available) so concurrent clients
         // don't all try to auto-spawn the daemon at once.
