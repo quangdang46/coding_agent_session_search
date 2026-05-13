@@ -74,7 +74,7 @@ Usage:
     ./scripts/tests/run_all.sh [OPTIONS]
 
 Options:
-    --rust-only       Run only Rust E2E tests (rch cargo test e2e_*)
+    --rust-only       Run only Rust E2E tests (rch exec -- env CARGO_TARGET_DIR=... cargo test e2e_*)
     --shell-only      Run only shell script tests (scripts/test-*.sh)
     --playwright-only Run only Playwright E2E tests on GitHub Actions
     --fail-fast       Stop execution on first suite failure
@@ -205,11 +205,11 @@ run_suite() {
     if [[ $exit_code -eq 0 ]]; then
         SUITE_RESULTS+=("pass")
         log_result "$name" "pass" "$duration"
-        ((TOTAL_PASSED++))
+        ((TOTAL_PASSED += 1))
     else
         SUITE_RESULTS+=("fail")
         log_result "$name" "fail" "$duration"
-        ((TOTAL_FAILED++))
+        ((TOTAL_FAILED += 1))
 
         # Log error details
         e2e_error "Suite $name failed with exit code $exit_code" "$name"
@@ -229,7 +229,7 @@ skip_suite() {
     SUITE_NAMES+=("$name")
     SUITE_RESULTS+=("skip")
     SUITE_DURATIONS+=("0")
-    ((TOTAL_SKIPPED++))
+    ((TOTAL_SKIPPED += 1))
 }
 
 ensure_rch() {
@@ -362,7 +362,7 @@ main() {
                 SUITE_NAMES+=("rust_e2e")
                 SUITE_RESULTS+=("fail")
                 SUITE_DURATIONS+=("0")
-                ((TOTAL_FAILED++))
+                ((TOTAL_FAILED += 1))
                 log_result "rust_e2e" "fail" "0"
                 [[ "$FAIL_FAST" -eq 1 ]] && { generate_summary; exit 1; }
             elif run_suite "rust_e2e" "rust" "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_TARGET_DIR" E2E_LOG=1 cargo test --features "$CASS_ROUTINE_FEATURES" --verbose "${args[@]}" -- --test-threads=1 --nocapture; then

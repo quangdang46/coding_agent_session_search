@@ -71,7 +71,7 @@ run_query_ok() {
     shift 2
     local extra_args=("$@")
 
-    ((total++)) || true
+    ((total += 1))
     e2e_test_start "$test_name" "$SUITE"
 
     local start_time end_time duration
@@ -87,11 +87,11 @@ run_query_ok() {
     duration=$((end_time - start_time))
 
     if [[ $exit_code -eq 0 ]]; then
-        ((passed++)) || true
+        ((passed += 1))
         e2e_test_pass "$test_name" "$SUITE" "$duration"
         e2e_info "PASS: $test_name (${duration}ms, query='$query')" "test_$test_name"
     else
-        ((failed++)) || true
+        ((failed += 1))
         local err_msg
         err_msg=$(echo "$output" | tail -3 | tr '\n' ' ')
         e2e_test_fail "$test_name" "$SUITE" "$duration" 0 \
@@ -109,7 +109,7 @@ run_query_type_check() {
     shift 3
     local extra_args=("$@")
 
-    ((total++)) || true
+    ((total += 1))
     e2e_test_start "$test_name" "$SUITE"
 
     local start_time end_time duration
@@ -125,7 +125,7 @@ run_query_type_check() {
     duration=$((end_time - start_time))
 
     if [[ $exit_code -ne 0 ]]; then
-        ((failed++)) || true
+        ((failed += 1))
         local err_msg
         err_msg=$(echo "$output" | tail -3 | tr '\n' ' ')
         e2e_test_fail "$test_name" "$SUITE" "$duration" 0 \
@@ -136,11 +136,11 @@ run_query_type_check() {
 
     # Check that the expected query_type appears in the dry-run JSON output
     if echo "$output" | grep -q "\"query_type\": \"$expected_type\""; then
-        ((passed++)) || true
+        ((passed += 1))
         e2e_test_pass "$test_name" "$SUITE" "$duration"
         e2e_info "PASS: $test_name — query_type='$expected_type' (${duration}ms)" "test_$test_name"
     else
-        ((failed++)) || true
+        ((failed += 1))
         local actual_type
         actual_type=$(echo "$output" | grep -o '"query_type": "[^"]*"' | head -1)
         e2e_test_fail "$test_name" "$SUITE" "$duration" 0 \
@@ -157,7 +157,7 @@ run_query_dryrun() {
     shift 2
     local extra_args=("$@")
 
-    ((total++)) || true
+    ((total += 1))
     e2e_test_start "$test_name" "$SUITE"
 
     local start_time end_time duration
@@ -173,11 +173,11 @@ run_query_dryrun() {
     duration=$((end_time - start_time))
 
     if [[ $exit_code -eq 0 ]]; then
-        ((passed++)) || true
+        ((passed += 1))
         e2e_test_pass "$test_name" "$SUITE" "$duration"
         e2e_info "PASS: $test_name — dry-run OK (${duration}ms)" "test_$test_name"
     else
-        ((failed++)) || true
+        ((failed += 1))
         local err_msg
         err_msg=$(echo "$output" | tail -3 | tr '\n' ' ')
         e2e_test_fail "$test_name" "$SUITE" "$duration" 0 \

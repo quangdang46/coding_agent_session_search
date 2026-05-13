@@ -146,26 +146,26 @@ INTEOF
     end_time=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
     duration=$((end_time - start_time))
 
-    ((total++)) || true
+    ((total += 1))
     e2e_test_start "$test_name" "$SUITE"
 
     if [[ $exit_code -ne 0 ]]; then
         # Verify exited non-zero — the attack was detected
         if echo "$output" | grep -qi "security violation\|traversal\|blocked\|invalid"; then
-            ((passed++)) || true
+            ((passed += 1))
             e2e_test_pass "$test_name" "$SUITE" "$duration"
             e2e_info "PASS: $description — attack correctly blocked" "test_$test_name"
             return 0
         else
             # Non-zero exit but no security message — might be other error
-            ((passed++)) || true
+            ((passed += 1))
             e2e_test_pass "$test_name" "$SUITE" "$duration"
             e2e_info "PASS: $description — verify rejected (exit=$exit_code)" "test_$test_name"
             return 0
         fi
     else
         # Exit 0 means verify PASSED — the attack was NOT detected
-        ((failed++)) || true
+        ((failed += 1))
         e2e_test_fail "$test_name" "$SUITE" "$duration" 0 \
             "Path traversal not detected: $malicious_path" "SecurityFailure"
         e2e_error "FAIL: $description — attack NOT blocked!" "test_$test_name"
@@ -315,7 +315,7 @@ cat > "${symlink_test_dir}/integrity.json" <<'SYMEOF'
 }
 SYMEOF
 
-((total++)) || true
+((total += 1))
 e2e_test_start "symlink_outside_root" "$SUITE"
 symlink_start=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
 
@@ -326,7 +326,7 @@ symlink_end=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
 symlink_duration=$((symlink_end - symlink_start))
 
 if [[ $symlink_exit -ne 0 ]]; then
-    ((passed++)) || true
+    ((passed += 1))
     e2e_test_pass "symlink_outside_root" "$SUITE" "$symlink_duration"
     e2e_info "PASS: Symlink outside root detected (exit=$symlink_exit)" "test_symlink_outside_root"
 else
@@ -334,11 +334,11 @@ else
     # or if the file just doesn't match the hash. Either way, it shouldn't silently pass.
     # Check if it reported issues
     if echo "$symlink_output" | grep -qi "fail\|mismatch\|invalid\|error"; then
-        ((passed++)) || true
+        ((passed += 1))
         e2e_test_pass "symlink_outside_root" "$SUITE" "$symlink_duration"
         e2e_info "PASS: Symlink detected via integrity mismatch" "test_symlink_outside_root"
     else
-        ((failed++)) || true
+        ((failed += 1))
         e2e_test_fail "symlink_outside_root" "$SUITE" "$symlink_duration" 0 \
             "Symlink outside root not detected" "SecurityFailure"
         e2e_error "FAIL: Symlink outside root not detected!" "test_symlink_outside_root"

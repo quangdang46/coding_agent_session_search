@@ -282,7 +282,7 @@ for f in tests/e2e_*.rs; do
     # Check for e2e_log import or PhaseTracker usage
     if ! grep -q "use.*e2e_log\|mod.*e2e_log\|PhaseTracker\|E2eLogger" "$f"; then
         echo "  WARNING: $name not using E2E logging infrastructure"
-        ((E2E_WARNINGS++)) || true
+        ((E2E_WARNINGS += 1))
     fi
 done
 
@@ -292,7 +292,7 @@ for f in scripts/e2e/*.sh; do
         name=$(basename "$f")
         if ! grep -q "e2e_log.sh" "$f"; then
             echo "  WARNING: $name not sourcing e2e_log.sh"
-            ((E2E_WARNINGS++)) || true
+            ((E2E_WARNINGS += 1))
         fi
     fi
 done

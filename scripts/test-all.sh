@@ -137,7 +137,7 @@ check_nextest() {
         if run_cargo nextest --version > /dev/null 2>&1; then
             return 0
         else
-            log WARN "cargo-nextest unavailable through rch, falling back to rch cargo test"
+            log WARN "cargo-nextest unavailable through rch, falling back to run_cargo test"
             USE_NEXTEST=0
             return 1
         fi
@@ -198,14 +198,14 @@ run_connector_tests() {
                 log INFO "  $conn connector passed"
             else
                 log ERROR "  $conn connector failed"
-                ((failed++))
+                ((failed += 1))
             fi
         else
             if run_cargo test --test "connector_${conn}" --color=always 2>&1 | tee -a "$LOG_FILE"; then
                 log INFO "  $conn connector passed"
             else
                 log ERROR "  $conn connector failed"
-                ((failed++))
+                ((failed += 1))
             fi
         fi
 
@@ -242,14 +242,14 @@ run_cli_tests() {
                 log INFO "  $test passed"
             else
                 log ERROR "  $test failed"
-                ((failed++))
+                ((failed += 1))
             fi
         else
             if run_cargo test --test "$test" --color=always -- --test-threads=1 2>&1 | tee -a "$LOG_FILE"; then
                 log INFO "  $test passed"
             else
                 log ERROR "  $test failed"
-                ((failed++))
+                ((failed += 1))
             fi
         fi
 
@@ -361,14 +361,14 @@ run_slow_tests() {
                 log INFO "  $test passed"
             else
                 log ERROR "  $test failed"
-                ((failed++))
+                ((failed += 1))
             fi
         else
             if run_cargo test --test "$test" --color=always 2>&1 | tee -a "$LOG_FILE"; then
                 log INFO "  $test passed"
             else
                 log ERROR "  $test failed"
-                ((failed++))
+                ((failed += 1))
             fi
         fi
     done
@@ -415,7 +415,7 @@ print_summary() {
         else
             status_text="FAIL"
             status_color=$RED
-            ((total_failed++))
+            ((total_failed += 1))
         fi
 
         local duration_display="${duration}s"
@@ -457,7 +457,7 @@ Options:
   --include-ssh       Include SSH integration tests (requires Docker)
   --include-slow      Include slow/performance tests
   --all               Include all optional tests
-  --no-nextest        Use rch cargo test instead of rch cargo nextest
+  --no-nextest        Use run_cargo test instead of run_cargo nextest
   -h, --help          Show this help
 
 Environment Variables:
@@ -500,25 +500,25 @@ main() {
 
     # Check for nextest
     check_nextest
-    log INFO "Test runner: $([ "$USE_NEXTEST" -eq 1 ] && echo 'rch cargo-nextest' || echo 'rch cargo test')"
+    log INFO "Test runner: $([ "$USE_NEXTEST" -eq 1 ] && echo 'run_cargo nextest' || echo 'run_cargo test')"
 
     # Run all phases, collecting results
     local failed=0
 
-    run_unit_tests || ((failed++))
+    run_unit_tests || ((failed += 1))
     [[ $FAIL_FAST -eq 1 ]] && [[ $failed -gt 0 ]] && { print_summary; exit 1; }
 
-    run_connector_tests || ((failed++))
+    run_connector_tests || ((failed += 1))
     [[ $FAIL_FAST -eq 1 ]] && [[ $failed -gt 0 ]] && { print_summary; exit 1; }
 
-    run_cli_tests || ((failed++))
+    run_cli_tests || ((failed += 1))
     [[ $FAIL_FAST -eq 1 ]] && [[ $failed -gt 0 ]] && { print_summary; exit 1; }
 
-    run_ui_tests || ((failed++))
+    run_ui_tests || ((failed += 1))
     [[ $FAIL_FAST -eq 1 ]] && [[ $failed -gt 0 ]] && { print_summary; exit 1; }
 
-    run_ssh_tests || ((failed++))
-    run_slow_tests || ((failed++))
+    run_ssh_tests || ((failed += 1))
+    run_slow_tests || ((failed += 1))
 
     print_summary
     local summary_failed=$?

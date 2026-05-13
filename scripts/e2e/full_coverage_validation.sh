@@ -81,15 +81,15 @@ run_cmd() {
     end_time=$(now_ms)
     local duration=$((end_time - start_time))
 
-    ((total++)) || true
+    ((total += 1))
 
     if [[ $exit_code -eq 0 ]]; then
-        ((passed++)) || true
+        ((passed += 1))
         e2e_test_pass "$test_name" "$suite" "$duration"
         return 0
     fi
 
-    ((failed++)) || true
+    ((failed += 1))
     local err_msg
     err_msg=$(tail -3 "$log_file" | tr '\n' ' ')
     e2e_test_fail "$test_name" "$suite" "$duration" 0 "$err_msg" "CommandFailure"
@@ -121,8 +121,8 @@ e2e_phase_start "e2e_scripts" "Running E2E shell scripts"
 for script in connector_stress query_parser_e2e security_paths_e2e; do
     script_path="${PROJECT_ROOT}/scripts/e2e/${script}.sh"
     if [[ ! -x "$script_path" ]]; then
-        ((total++)) || true
-        ((failed++)) || true
+        ((total += 1))
+        ((failed += 1))
         e2e_test_start "$script" "e2e"
         e2e_test_fail "$script" "e2e" 0 0 "Missing script: $script_path" "MissingScript"
         continue
@@ -141,8 +141,8 @@ e2e_phase_start "jsonl_validation" "Validating E2E JSONL logs"
 mapfile -t jsonl_files < <(find "${E2E_DIR}" -type f \( -name "*.jsonl" -o -name "cass.log" \) 2>/dev/null | sort)
 
 if [[ ${#jsonl_files[@]} -eq 0 ]]; then
-    ((total++)) || true
-    ((failed++)) || true
+    ((total += 1))
+    ((failed += 1))
     e2e_test_start "jsonl_logs_present" "validation"
     e2e_test_fail "jsonl_logs_present" "validation" 0 0 "No JSONL logs found in ${E2E_DIR}" "MissingLogs"
 else

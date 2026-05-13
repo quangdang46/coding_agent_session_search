@@ -87,16 +87,16 @@ archive_prior_logs() {
 
 check_pass() {
     local name="$1"
-    ((TOTAL_CHECKS++)) || true
-    ((PASSED_CHECKS++)) || true
+    ((TOTAL_CHECKS += 1))
+    ((PASSED_CHECKS += 1))
     echo "  [PASS] $name"
 }
 
 check_fail() {
     local name="$1"
     local reason="$2"
-    ((TOTAL_CHECKS++)) || true
-    ((FAILED_CHECKS++)) || true
+    ((TOTAL_CHECKS += 1))
+    ((FAILED_CHECKS += 1))
     echo "  [FAIL] $name: $reason"
 }
 

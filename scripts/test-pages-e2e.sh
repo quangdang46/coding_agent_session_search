@@ -103,7 +103,7 @@ check_nextest() {
         if run_cargo nextest --version > /dev/null 2>&1; then
             return 0
         else
-            log WARN "cargo-nextest unavailable through rch, falling back to rch cargo test"
+            log WARN "cargo-nextest unavailable through rch, falling back to run_cargo test"
             USE_NEXTEST=0
             return 1
         fi
@@ -221,7 +221,7 @@ Options:
   -v, --verbose       Verbose output (set RUST_LOG=debug)
   --fail-fast         Stop on first failure
   --include-master    Include master E2E tests (slower)
-  --no-nextest        Use rch cargo test instead of rch cargo nextest
+  --no-nextest        Use run_cargo test instead of run_cargo nextest
   -h, --help          Show this help
 
 Environment Variables:
@@ -267,7 +267,7 @@ main() {
 
     # Check for nextest
     check_nextest
-    log INFO "Test runner: $([ "$USE_NEXTEST" -eq 1 ] && echo 'rch cargo-nextest' || echo 'rch cargo test')"
+    log INFO "Test runner: $([ "$USE_NEXTEST" -eq 1 ] && echo 'run_cargo nextest' || echo 'run_cargo test')"
 
     # Set verbose logging if requested
     if [[ $VERBOSE -eq 1 ]]; then
@@ -279,13 +279,13 @@ main() {
     local failed=0
 
     # Run test phases
-    run_pages_e2e_tests || ((failed++))
+    run_pages_e2e_tests || ((failed += 1))
     [[ $FAIL_FAST -eq 1 ]] && [[ $failed -gt 0 ]] && exit 1
 
-    run_pages_accessibility_tests || ((failed++))
+    run_pages_accessibility_tests || ((failed += 1))
     [[ $FAIL_FAST -eq 1 ]] && [[ $failed -gt 0 ]] && exit 1
 
-    run_pages_error_handling_tests || ((failed++))
+    run_pages_error_handling_tests || ((failed += 1))
 
     # Summary
     log_section "SUMMARY"

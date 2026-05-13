@@ -226,17 +226,17 @@ run_stress_test() {
     end_time=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
     duration=$((end_time - start_time))
 
-    ((total++)) || true
+    ((total += 1))
     e2e_test_start "$test_name" "$SUITE"
 
     # Exit code < 128 means no signal-based crash (0=ok, 1=handled error, etc.)
     if [[ $exit_code -lt 128 ]]; then
-        ((passed++)) || true
+        ((passed += 1))
         e2e_test_pass "$test_name" "$SUITE" "$duration"
         e2e_info "PASS: $connector/$scenario (exit=$exit_code, ${duration}ms)" "test_$test_name"
         return 0
     else
-        ((failed++)) || true
+        ((failed += 1))
         local signal=$((exit_code - 128))
         e2e_test_fail "$test_name" "$SUITE" "$duration" 0 \
             "Crashed (signal $signal) on $scenario input" "CrashFailure"
@@ -311,15 +311,15 @@ run_combined_stress_test() {
     end_time=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
     duration=$((end_time - start_time))
 
-    ((total++)) || true
+    ((total += 1))
     e2e_test_start "combined_all_connectors" "$SUITE"
 
     if [[ $exit_code -lt 128 ]]; then
-        ((passed++)) || true
+        ((passed += 1))
         e2e_test_pass "combined_all_connectors" "$SUITE" "$duration"
         e2e_info "PASS: Combined stress (exit=$exit_code, ${duration}ms)" "test_combined"
     else
-        ((failed++)) || true
+        ((failed += 1))
         e2e_test_fail "combined_all_connectors" "$SUITE" "$duration" 0 \
             "Combined stress crashed (signal $((exit_code-128)))" "CrashFailure"
         e2e_error "FAIL: Combined stress crashed" "test_combined"
@@ -332,15 +332,15 @@ run_combined_stress_test() {
         XDG_DATA_HOME="$xdg" \
         "$CASS_BIN" search "test" --robot --data-dir "$data" >/dev/null 2>&1 || search_exit=$?
 
-    ((total++)) || true
+    ((total += 1))
     e2e_test_start "combined_search_integrity" "$SUITE"
 
     if [[ $search_exit -lt 128 ]]; then
-        ((passed++)) || true
+        ((passed += 1))
         e2e_test_pass "combined_search_integrity" "$SUITE" "0"
         e2e_info "PASS: Search intact after malformed index" "test_combined_search"
     else
-        ((failed++)) || true
+        ((failed += 1))
         e2e_test_fail "combined_search_integrity" "$SUITE" "0" 0 \
             "Search crashed after indexing malformed data" "CrashFailure"
         e2e_error "FAIL: Search crashed after malformed index" "test_combined_search"

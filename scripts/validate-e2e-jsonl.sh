@@ -118,8 +118,8 @@ validate_file() {
     # Validate each line. The helper only uses the file path for diagnostics.
     # shellcheck disable=SC2094
     while IFS= read -r line || [[ -n "$line" ]]; do
-        ((line_num++)) || true
-        ((total_events++)) || true
+        ((line_num += 1))
+        ((total_events += 1))
 
         # Skip empty lines
         [[ -z "${line// }" ]] && continue
@@ -210,11 +210,11 @@ main() {
 
     # Validate each file
     for file in "${files[@]}"; do
-        ((total_files++)) || true
+        ((total_files += 1))
         if validate_file "$file"; then
-            ((valid_files++)) || true
+            ((valid_files += 1))
         else
-            ((invalid_files++)) || true
+            ((invalid_files += 1))
         fi
         echo ""
     done
