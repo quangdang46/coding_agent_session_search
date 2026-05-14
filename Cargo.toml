@@ -8,77 +8,86 @@ license-file = "LICENSE"
 resolver = "2"
 repository = "https://github.com/Dicklesworthstone/coding_agent_session_search"
 default-run = "cass"
+include = [
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/build.rs",
+    "/LICENSE",
+    "/README.md",
+    "/src/**/*.rs",
+    "/src/pages_assets/**",
+]
 
 [dependencies]
-anyhow = "*"
-thiserror = "*"
-tracing = "*"
-tracing-subscriber = { version = "*", features = ["env-filter", "fmt", "ansi"] }
+anyhow = "1.0.102"
+thiserror = "1.0.69"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "ansi"] }
 asupersync = { version = "0.3.1", features = ["test-internals", "tls-native-roots"] }
-clap = { version = "*", features = ["derive", "cargo", "env", "unicode", "wrap_help"] }
-clap_complete = "*"
-clap_mangen = "*"
-indicatif = "*"
-console = "*"
-colored = "*"
-serde = { version = "*", features = ["derive"] }
-serde_json = "*"
+clap = { version = "4.6.1", features = ["derive", "cargo", "env", "unicode", "wrap_help"] }
+clap_complete = "4.6.5"
+clap_mangen = "0.3.0"
+indicatif = "0.18.4"
+console = "0.16.3"
+colored = "3.1.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
 toon = { version = "0.2.2", git = "https://github.com/Dicklesworthstone/toon_rust", rev = "5669b72a", package = "tru" }
-tempfile = "*"
-wait-timeout = "*"
-rmp-serde = "*"  # MessagePack for binary metadata serialization (Opt 3.1)
-toml = "*"
-directories = "*"
-which = "*"
-shell-words = "*"
-dotenvy = "*"
-notify = "*"
+tempfile = "3.27.0"
+wait-timeout = "0.2.1"
+rmp-serde = "1.3.1"  # MessagePack for binary metadata serialization (Opt 3.1)
+toml = "1.1.2"
+directories = "6.0.0"
+which = "8.0.2"
+shell-words = "1.1.1"
+dotenvy = "0.15.7"
+notify = "8.2.0"
 frankensqlite = { version = "0.1.3", git = "https://github.com/Dicklesworthstone/frankensqlite", rev = "eba969ec45d102071b90519d3b819ddbcecf3d61", package = "fsqlite", features = ["fts5"] }
-rayon = "*"
-crossbeam-channel = "*"
-parking_lot = "*"
-fs2 = "*"
+rayon = "1.12.0"
+crossbeam-channel = "0.5.15"
+parking_lot = "0.12.5"
+fs2 = "0.4.3"
 lru = "0.18"
-rustc-hash = "*"  # Fast non-cryptographic hashing for cache keys (P1 Opt 1.3), replaces unmaintained fxhash
-xxhash-rust = { version = "*", features = ["xxh3"] }  # Fast content hashing for search-hit dedup (bead sdoxg)
-itoa = "*"  # Zero-allocation integer-to-string for hot paths (bead w32k6)
-smallvec = "*"  # Stack-allocated small vectors for hot paths (Opt 4.4)
-regex = "*"
-portable-pty = "*"
+rustc-hash = "2.1.2"  # Fast non-cryptographic hashing for cache keys (P1 Opt 1.3), replaces unmaintained fxhash
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }  # Fast content hashing for search-hit dedup (bead sdoxg)
+itoa = "1.0.18"  # Zero-allocation integer-to-string for hot paths (bead w32k6)
+smallvec = "1.15.1"  # Stack-allocated small vectors for hot paths (Opt 4.4)
+regex = "1.12.3"
+portable-pty = "0.9.0"
 # FrankenTUI migration foundation (bead 2noh9.2.1).
 # Strategy: pin a Git revision for reproducible CI builds.
 ftui = { version = "0.3.1", git = "https://github.com/Dicklesworthstone/frankentui", rev = "5f78cfa0" }
 ftui-runtime = { version = "0.3.1", git = "https://github.com/Dicklesworthstone/frankentui", rev = "5f78cfa0", features = ["native-backend", "crossterm-compat"] }
 ftui-tty = { version = "0.3.1", git = "https://github.com/Dicklesworthstone/frankentui", rev = "5f78cfa0" }
 ftui-extras = { version = "0.3.1", git = "https://github.com/Dicklesworthstone/frankentui", rev = "5f78cfa0", default-features = false, features = ["markdown", "syntax", "charts", "canvas", "theme", "clipboard", "clipboard-fallback", "export", "visual-fx", "forms", "validation", "help"] }
-dirs = "*"
-walkdir = "*"
-glob = "*"
+dirs = "6.0.0"
+walkdir = "2.5.0"
+glob = "0.3.3"
 base64 = ">=0.21"
-blake3 = "*"
-mime_guess = "*"
-pulldown-cmark = { version = "*", default-features = false, features = ["html"] }
-chrono = { version = "*", features = ["serde"] }
-semver = "*"
-tracing-appender = "*"
-strsim = "*"
-once_cell = "*"
-syntect = "*"
-itertools = "*"
-crc32fast = "*"
-unicode-normalization = "*"
-urlencoding = "*"
-half = { version = "*", features = ["bytemuck"] }
-memmap2 = "*"
-bytemuck = "*"
-fastembed = { version = "*", default-features = false, features = ["ort-download-binaries-rustls-tls"] }
+blake3 = "1.8.5"
+mime_guess = "2.0.5"
+pulldown-cmark = { version = "0.13.3", default-features = false, features = ["html"] }
+chrono = { version = "0.4.44", features = ["serde"] }
+semver = "1.0.28"
+tracing-appender = "0.2.5"
+strsim = "0.11.1"
+once_cell = "1.21.4"
+syntect = "5.3.0"
+itertools = "0.14.0"
+crc32fast = "1.5.0"
+unicode-normalization = "0.1.25"
+urlencoding = "2.1.3"
+half = { version = "2.7.1", features = ["bytemuck"] }
+memmap2 = "0.9.10"
+bytemuck = "1.25.0"
+fastembed = { version = "5.13.4", default-features = false, features = ["ort-download-binaries-rustls-tls"] }
 frankensearch = { version = "0.3.0", git = "https://github.com/Dicklesworthstone/frankensearch", rev = "831b3b13", default-features = false, features = ["hash", "lexical", "ann", "fastembed-reranker"] }
 franken-agent-detection = { version = "0.1.7", git = "https://github.com/Dicklesworthstone/franken_agent_detection", rev = "5115da8e515ee8a76cf676e78bc2d351e14abc82", features = ["connectors", "cursor", "chatgpt", "opencode", "crush", "hermes"] }
-wide = "*"  # Portable SIMD for P0 Opt 2: SIMD dot product
-arrayvec = "*"  # Stack-based arrays for P1 Opt 1.4: Edge N-gram optimization
-bloomfilter = "*"  # Probabilistic membership testing for P2 Opt 3.3: Workspace Cache
-hnsw_rs = "*"  # Opt 9: Approximate Nearest Neighbor with HNSW
-ouroboros = "*"  # Safe self-referential wrapper for HNSW loader lifetime
+wide = "1.4.0"  # Portable SIMD for P0 Opt 2: SIMD dot product
+arrayvec = "0.7.6"  # Stack-based arrays for P1 Opt 1.4: Edge N-gram optimization
+bloomfilter = "3.0.1"  # Probabilistic membership testing for P2 Opt 3.3: Workspace Cache
+hnsw_rs = "0.3.4"  # Opt 9: Approximate Nearest Neighbor with HNSW
+ouroboros = "0.18.5"  # Safe self-referential wrapper for HNSW loader lifetime
 
 # Crypto for ChatGPT encrypted conversations and HTML export encryption.
 # The aes-gcm + digest + hkdf + hmac + sha2 family must stay on compatible
@@ -87,39 +96,39 @@ ouroboros = "*"  # Safe self-referential wrapper for HNSW loader lifetime
 # to 0.13 (digest 0.11), which fails to satisfy aes-gcm's KeyInit bound and
 # breaks the encryption.rs build with ~29 trait-bound errors.
 aes-gcm = "0.10"
-ring = "*"
-url = "*"
-pbkdf2 = "*"  # PBKDF2 key derivation for Web Crypto compatible HTML export encryption
+ring = "0.17.14"
+url = "2.5.8"
+pbkdf2 = "0.13.0"  # PBKDF2 key derivation for Web Crypto compatible HTML export encryption
 
 # SHA256 hashing for model verification
 sha2 = "0.10"
-hex = "*"
+hex = "0.4.3"
 
 # Interactive terminal prompts for setup wizard
-dialoguer = "*"
+dialoguer = "0.12.0"
 
 # SFTP fallback for sync when rsync is unavailable
-ssh2 = "*"
-argon2 = "*"
+ssh2 = "0.9.5"
+argon2 = "0.5.3"
 hkdf = "0.12"  # Must match hmac 0.12 / sha2 0.10 / aes-gcm 0.10 digest family; see comment above.
-zeroize = { version = "*", features = ["derive"] }
-flate2 = "*"
+zeroize = { version = "1.8.2", features = ["derive"] }
+flate2 = "1.1.9"
 rand = "0.10"
 
 # QR code generation (optional, for recovery secret QR codes)
-qrcode = { version = "*", optional = true }
-image = { version = "*", optional = true, default-features = false, features = ["png"] }
+qrcode = { version = "0.14.1", optional = true }
+image = { version = "0.25.10", optional = true, default-features = false, features = ["png"] }
 unicode-width = "0.2.2"
 
 # macOS keychain access (optional, for ChatGPT decryption)
 [target.'cfg(target_os = "macos")'.dependencies]
-security-framework = "*"
+security-framework = "3.7.0"
 
 # Statically link OpenSSL into Unix release binaries so they do not require a
 # matching system libssl. Windows builds use platform TLS/crypto stacks through
 # transitive dependencies, and forcing vendored OpenSSL breaks MSVC cross-builds.
 [target.'cfg(not(windows))'.dependencies]
-openssl = { version = "*", features = ["vendored"] }
+openssl = { version = "0.10.79", features = ["vendored"] }
 
 [features]
 default = ["qr", "encryption"]
@@ -131,24 +140,24 @@ backtrace = []
 strict-path-dep-validation = []
 
 [build-dependencies]
-vergen = { version = "*", default-features = false, features = ["build", "cargo"] }
-toml = "*"
+vergen = { version = "9.1.0", default-features = false, features = ["build", "cargo"] }
+toml = "1.1.2"
 
 [dev-dependencies]
-assert_cmd = "*"
-predicates = "*"
-insta = { version = "*", features = ["yaml", "json"] }
-criterion = "*"
-once_cell = "*"
-serial_test = "*"
-proptest = "*"
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
+insta = { version = "1.47.2", features = ["yaml", "json"] }
+criterion = "0.8.2"
+once_cell = "1.21.4"
+serial_test = "3.4.0"
+proptest = "1.11.0"
 arbitrary = { version = "1", features = ["derive"] }
-serde_yaml = "*"
+serde_yaml = "0.9.34"
 rand = "0.10"
 rand_chacha = "0.10"
 # rusqlite is retained only for C-SQLite interop fixtures in tests; production
 # storage and historical salvage paths use frankensqlite.
-rusqlite = { version = "*", features = ["bundled", "modern_sqlite"] }
+rusqlite = { version = "0.39.0", features = ["bundled", "modern_sqlite"] }
 # frankensqlite compat gate tests (bead 3vvqa) — fsqlite-types needed for SqliteValue
 # enum variants in test assertions. The main fsqlite dep is available as `frankensqlite`.
 fsqlite-types = { version = "0.1.3", git = "https://github.com/Dicklesworthstone/frankensqlite", rev = "eba969ec45d102071b90519d3b819ddbcecf3d61", package = "fsqlite-types" }
