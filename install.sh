@@ -302,6 +302,10 @@ case "${OS}-${ARCH}" in
   mingw*-amd64|msys*-amd64|cygwin*-amd64) TARGET="windows-amd64"; EXT="zip" ;;
   *) :;;
 esac
+INSTALL_BASENAME="cass"
+if [ "$TARGET" = "windows-amd64" ]; then
+  INSTALL_BASENAME="cass.exe"
+fi
 
 # Prefer prebuilt artifact when we know the target or the caller supplied a direct URL.
 TAR=""
@@ -371,13 +375,19 @@ if [ "$FROM_SOURCE" -eq 1 ]; then
   ensure_rust
   git clone --depth 1 --branch "$VERSION" "https://github.com/${OWNER}/${REPO}.git" "$TMP/src"
   (cd "$TMP/src" && cargo build --release)
-  BIN="$TMP/src/target/release/cass"
+  BIN="$TMP/src/target/release/$INSTALL_BASENAME"
+  if [ ! -x "$BIN" ]; then
+    BIN="$TMP/src/target/release/cass"
+  fi
+  if [ ! -x "$BIN" ]; then
+    BIN="$TMP/src/target/release/cass.exe"
+  fi
   [ -x "$BIN" ] || { err "Build failed"; exit 1; }
-  install -m 0755 "$BIN" "$DEST"
-  ok "Installed to $DEST/cass (source build)"
+  install -m 0755 "$BIN" "$DEST/$INSTALL_BASENAME"
+  ok "Installed to $DEST/$INSTALL_BASENAME (source build)"
   maybe_add_path
-  if [ "$VERIFY" -eq 1 ]; then "$DEST/cass" --version || true; ok "Self-test complete"; fi
-  if [ "$QUICKSTART" -eq 1 ]; then info "Running index --full (quickstart)"; "$DEST/cass" index --full || warn "index --full failed"; fi
+  if [ "$VERIFY" -eq 1 ]; then "$DEST/$INSTALL_BASENAME" --version || true; ok "Self-test complete"; fi
+  if [ "$QUICKSTART" -eq 1 ]; then info "Running index --full (quickstart)"; "$DEST/$INSTALL_BASENAME" index --full || warn "index --full failed"; fi
   ok "Done. Run: cass"
   exit 0
 fi
@@ -454,18 +464,18 @@ if [ ! -x "$BIN" ]; then
 fi
 
 [ -x "$BIN" ] || { err "Binary not found in tar"; exit 1; }
-install -m 0755 "$BIN" "$DEST/cass"
-ok "Installed to $DEST/cass"
+install -m 0755 "$BIN" "$DEST/$INSTALL_BASENAME"
+ok "Installed to $DEST/$INSTALL_BASENAME"
 maybe_add_path
 
 if [ "$VERIFY" -eq 1 ]; then
-  "$DEST/cass" --version || true
+  "$DEST/$INSTALL_BASENAME" --version || true
   ok "Self-test complete"
 fi
 
 if [ "$QUICKSTART" -eq 1 ]; then
   info "Running index --full (quickstart)"
-  "$DEST/cass" index --full || warn "index --full failed"
+  "$DEST/$INSTALL_BASENAME" index --full || warn "index --full failed"
 fi
 
 ok "Done. Run: cass"
