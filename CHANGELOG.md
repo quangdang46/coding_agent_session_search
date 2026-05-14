@@ -13,6 +13,28 @@ Repository: <https://github.com/Dicklesworthstone/coding_agent_session_search>
 
 ## Unreleased
 
+## [v0.4.7] -- 2026-05-14
+
+**Registry and source-release alignment for the v0.4.6 publication fix.**
+
+The `v0.4.6` tag remains immutable, but crates.io publication required one
+more dependency and build-script correction after that tag. This patch release
+cuts the registry-ready source from the matching commit instead of mixing
+post-tag source into the `v0.4.6` release line.
+
+### Fixed
+
+- **crates.io installation**: publish against `franken-agent-detection` 0.1.7
+  so the enabled `chatgpt` connector feature resolves from crates.io instead of
+  depending on an unpublished registry feature set.
+- **registry package verification**: allow Cargo's packaged manifest rewrite for
+  git dependencies with explicit registry versions while keeping local
+  path/git dependency contract checks strict during normal development.
+- **fresh source reproducibility**: replace wildcard dependency constraints with
+  the current resolved minimums and include the required source files in the
+  package manifest so `cargo install coding-agent-search --version 0.4.7
+  --locked` has a stable registry surface.
+
 ## [v0.4.6] -- 2026-05-14
 
 **Windows release-build fix for the v0.4.5 publication attempt.**
