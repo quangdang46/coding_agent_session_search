@@ -103,7 +103,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew install openssl@3
-          echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> $GITHUB_ENV
+          echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
 
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
@@ -175,13 +175,15 @@ jobs:
           mkdir -p dist
           TARBALL="${{ matrix.asset_name }}.tar.gz"
           cd target/${{ matrix.target }}/release
-          tar -czf "../../../dist/$TARBALL" ${{ matrix.artifact_name }}
+          tar -czf "../../../dist/$TARBALL" "${{ matrix.artifact_name }}"
           cd ../../../dist
           shasum -a 256 "$TARBALL" > "$TARBALL.sha256"
-          echo "### ${{ matrix.target }}" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          cat "$TARBALL.sha256" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          {
+            echo "### ${{ matrix.target }}"
+            echo '```'
+            cat "$TARBALL.sha256"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create zip with checksum (Windows)
         if: runner.os == 'Windows'
@@ -268,20 +270,22 @@ jobs:
 
       - name: List artifacts
         run: |
-          echo "## Release Artifacts" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          ls -la artifacts/ >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## SHA256 Checksums" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          cat artifacts/*.sha256 >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Release Artifacts"
+            echo '```'
+            ls -la artifacts/
+            echo '```'
+            echo ""
+            echo "## SHA256 Checksums"
+            echo '```'
+            cat artifacts/*.sha256
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create combined checksums file
         run: |
           cd artifacts
-          cat *.sha256 > SHA256SUMS.txt
+          cat ./*.sha256 > SHA256SUMS.txt
 
       - name: Generate SBOM (SPDX)
         uses: anchore/sbom-action@62ad5284b8ced813296287a0b63906cb364b73ee # v0
@@ -319,12 +323,23 @@ jobs:
         run: |
           echo "Creating release for tag: ${TAG}"
 
-          # Delete any leftover draft/broken release for this tag (from prior failed runs)
-          EXISTING_ID=$(gh api "repos/${{ github.repository }}/releases" \
-            --paginate --jq ".[] | select(.tag_name == \"${TAG}\") | .id" 2>/dev/null || true)
-          if [[ -n "$EXISTING_ID" ]]; then
-            echo "Deleting existing release id=${EXISTING_ID} for tag ${TAG}"
-            gh api -X DELETE "repos/${{ github.repository }}/releases/${EXISTING_ID}" || true
+          # Delete only leftover draft releases for this tag. A published
+          # release may have been repaired manually after a runner outage; do
+          # not overwrite it from a delayed workflow run.
+          EXISTING_RELEASE=$(gh api "repos/${{ github.repository }}/releases" \
+            --paginate --jq ".[] | select(.tag_name == \"${TAG}\") | {id, draft, html_url}" 2>/dev/null | head -n 1 || true)
+          if [[ -n "$EXISTING_RELEASE" ]]; then
+            EXISTING_ID=$(jq -r '.id' <<<"$EXISTING_RELEASE")
+            EXISTING_DRAFT=$(jq -r '.draft' <<<"$EXISTING_RELEASE")
+            EXISTING_URL=$(jq -r '.html_url' <<<"$EXISTING_RELEASE")
+            if [[ "$EXISTING_DRAFT" == "true" ]]; then
+              echo "Deleting existing draft release id=${EXISTING_ID} for tag ${TAG}"
+              gh api -X DELETE "repos/${{ github.repository }}/releases/${EXISTING_ID}" || true
+            else
+              echo "::error::Published release already exists for ${TAG}: ${EXISTING_URL}"
+              echo "::error::Refusing to delete or overwrite a published release from a delayed workflow run."
+              exit 1
+            fi
           fi
 
           # Build release body
@@ -649,7 +664,7 @@ jobs:
         run: |
           if [[ "${{ env.HAS_TOKEN }}" != "true" ]]; then
             echo "::warning::SCOOP_BUCKET_TOKEN not configured, skipping notification"
-            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Resolve Windows checksum
