@@ -4,6 +4,7 @@ use coding_agent_search::storage::sqlite::FrankenStorage;
 use frankensqlite::compat::{ConnectionExt, RowExt};
 use frankensqlite::params as fparams;
 use fs2::FileExt;
+use fsqlite_types::value::SqliteValue;
 use serde_json::{Value, json};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -435,62 +436,74 @@ fn seed_large_health_latency_db(data_dir: &Path) {
     .expect("seed latency fixture agent");
     conn.execute("BEGIN").expect("begin latency fixture seed");
 
-    let payload = "x".repeat(128);
-    for chunk_start in (1..=LARGE_HEALTH_DB_CONVERSATIONS)
-        .step_by(usize::try_from(LARGE_HEALTH_DB_INSERT_CHUNK).expect("valid chunk size"))
     {
-        let chunk_end =
-            (chunk_start + LARGE_HEALTH_DB_INSERT_CHUNK - 1).min(LARGE_HEALTH_DB_CONVERSATIONS);
-        for conversation_id in chunk_start..=chunk_end {
-            let started_at = 1_700_000_000_000_i64 + conversation_id;
-            let external_id = format!("health-latency-{conversation_id}");
-            let title = format!("Health latency {conversation_id}");
-            let source_path = format!("/tmp/cass-health-latency/session-{conversation_id}.jsonl");
-            conn.execute_compat(
+        let insert_conversation = conn
+            .prepare(
                 "INSERT INTO conversations(
                     id, agent_id, source_id, external_id, title, source_path,
                     started_at, ended_at, approx_tokens, metadata_json
                  ) VALUES (?1, 1, 'local', ?2, ?3, ?4, ?5, ?6, 12, '{}')",
-                fparams![
-                    conversation_id,
-                    external_id.as_str(),
-                    title.as_str(),
-                    source_path.as_str(),
-                    started_at,
-                    started_at + 1,
-                ],
             )
-            .expect("seed latency fixture conversation");
-
-            let first_message_id = conversation_id * 2 - 1;
-            let user_content = format!("large health latency user {conversation_id} {payload}");
-            conn.execute_compat(
+            .expect("prepare latency fixture conversation insert");
+        let insert_message = conn
+            .prepare(
                 "INSERT INTO messages(
                     id, conversation_id, idx, role, author, created_at, content, extra_json
-                 ) VALUES (?1, ?2, 0, 'user', 'user', ?3, ?4, '{}')",
-                fparams![
-                    first_message_id,
-                    conversation_id,
-                    started_at,
-                    user_content.as_str(),
-                ],
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '{}')",
             )
-            .expect("seed latency fixture user message");
+            .expect("prepare latency fixture message insert");
 
-            let assistant_content =
-                format!("large health latency assistant {conversation_id} {payload}");
-            conn.execute_compat(
-                "INSERT INTO messages(
-                    id, conversation_id, idx, role, author, created_at, content, extra_json
-                 ) VALUES (?1, ?2, 1, 'assistant', 'agent', ?3, ?4, '{}')",
-                fparams![
-                    first_message_id + 1,
-                    conversation_id,
-                    started_at + 1,
-                    assistant_content.as_str(),
-                ],
-            )
-            .expect("seed latency fixture assistant message");
+        let payload = "x".repeat(128);
+        for chunk_start in (1..=LARGE_HEALTH_DB_CONVERSATIONS)
+            .step_by(usize::try_from(LARGE_HEALTH_DB_INSERT_CHUNK).expect("valid chunk size"))
+        {
+            let chunk_end =
+                (chunk_start + LARGE_HEALTH_DB_INSERT_CHUNK - 1).min(LARGE_HEALTH_DB_CONVERSATIONS);
+            for conversation_id in chunk_start..=chunk_end {
+                let started_at = 1_700_000_000_000_i64 + conversation_id;
+                let external_id = format!("health-latency-{conversation_id}");
+                let title = format!("Health latency {conversation_id}");
+                let source_path =
+                    format!("/tmp/cass-health-latency/session-{conversation_id}.jsonl");
+                insert_conversation
+                    .execute_with_params(&[
+                        SqliteValue::from(conversation_id),
+                        SqliteValue::from(external_id.as_str()),
+                        SqliteValue::from(title.as_str()),
+                        SqliteValue::from(source_path.as_str()),
+                        SqliteValue::from(started_at),
+                        SqliteValue::from(started_at + 1),
+                    ])
+                    .expect("seed latency fixture conversation");
+
+                let first_message_id = conversation_id * 2 - 1;
+                let user_content = format!("large health latency user {conversation_id} {payload}");
+                insert_message
+                    .execute_with_params(&[
+                        SqliteValue::from(first_message_id),
+                        SqliteValue::from(conversation_id),
+                        SqliteValue::from(0_i64),
+                        SqliteValue::from("user"),
+                        SqliteValue::from("user"),
+                        SqliteValue::from(started_at),
+                        SqliteValue::from(user_content.as_str()),
+                    ])
+                    .expect("seed latency fixture user message");
+
+                let assistant_content =
+                    format!("large health latency assistant {conversation_id} {payload}");
+                insert_message
+                    .execute_with_params(&[
+                        SqliteValue::from(first_message_id + 1),
+                        SqliteValue::from(conversation_id),
+                        SqliteValue::from(1_i64),
+                        SqliteValue::from("assistant"),
+                        SqliteValue::from("agent"),
+                        SqliteValue::from(started_at + 1),
+                        SqliteValue::from(assistant_content.as_str()),
+                    ])
+                    .expect("seed latency fixture assistant message");
+            }
         }
     }
 
