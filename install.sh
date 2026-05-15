@@ -448,6 +448,12 @@ fi
 if [ ! -x "$BIN" ] && [ -n "$TARGET" ] && [ -f "$TMP/cass-${TARGET}/cass.exe" ]; then
   BIN="$TMP/cass-${TARGET}/cass.exe"
 fi
+if [ ! -x "$BIN" ] && [ "$INSTALL_BASENAME" = "cass.exe" ]; then
+   BIN=$(find "$TMP" -maxdepth 3 -type f -name "coding-agent-search.exe" -perm -111 | head -n 1)
+   if [ -x "$BIN" ]; then
+      warn "Found 'coding-agent-search.exe' binary instead of 'cass.exe'; installing it as 'cass.exe'"
+   fi
+fi
 # Fallback for older versions or if name mismatch?
 if [ ! -x "$BIN" ]; then
    BIN=$(find "$TMP" -maxdepth 3 -type f -name "coding-agent-search" -perm -111 | head -n 1)
