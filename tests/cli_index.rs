@@ -106,6 +106,109 @@ fn index_creates_db_and_index() {
 }
 
 #[test]
+#[serial]
+fn index_json_warns_for_disabled_sources_agents() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let data_dir = tmp.path().join("data");
+    let config_dir = tmp.path().join(".config").join("cass");
+    fs::create_dir_all(&data_dir)?;
+    fs::create_dir_all(&config_dir)?;
+    fs::write(
+        config_dir.join("sources.toml"),
+        "disabled_agents = [\"claude-code\", \"codex\"]\n",
+    )?;
+
+    let mut cmd = base_cmd(tmp.path());
+    cmd.arg("index")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .arg("--json")
+        .arg("--no-progress-events");
+
+    let output = cmd.output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "cass index should still succeed when connectors are excluded\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+
+    let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|err| {
+        format!(
+            "index stdout is not JSON: {err}\nstdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })?;
+    if stdout.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(format!("index stdout should report success=true: {stdout}").into());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let exclusion_event = stderr
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|event| {
+            event.get("event").and_then(serde_json::Value::as_str) == Some("indexing_exclusions")
+        })
+        .ok_or_else(|| format!("missing indexing_exclusions event in stderr:\n{stderr}"))?;
+
+    let expected_disabled_agents = serde_json::json!(["claude", "codex"]);
+    if exclusion_event.get("disabled_agents") != Some(&expected_disabled_agents) {
+        return Err(format!(
+            "disabled_agents should be {expected_disabled_agents}: {exclusion_event}"
+        )
+        .into());
+    }
+    let disabled_connectors = exclusion_event
+        .get("disabled_connectors")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("missing disabled_connectors array: {exclusion_event}"))?;
+    if !disabled_connectors
+        .iter()
+        .any(|value| value.as_str() == Some("claude"))
+    {
+        return Err(format!(
+            "claude-code alias should surface the disabled claude connector factory: {exclusion_event}"
+        )
+        .into());
+    }
+    if !disabled_connectors
+        .iter()
+        .any(|value| value.as_str() == Some("codex"))
+    {
+        return Err(
+            format!("codex connector should be listed as disabled: {exclusion_event}").into(),
+        );
+    }
+    let disabled_index_agents = exclusion_event
+        .get("disabled_index_agents")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("missing disabled_index_agents array: {exclusion_event}"))?;
+    if !disabled_index_agents
+        .iter()
+        .any(|value| value.as_str() == Some("claude_code"))
+    {
+        return Err(format!(
+            "diagnostic should also surface the indexed claude_code agent slug: {exclusion_event}"
+        )
+        .into());
+    }
+    let expected_commands = serde_json::json!([
+        "cass sources agents include claude",
+        "cass sources agents include codex"
+    ]);
+    if exclusion_event.get("reenable_commands") != Some(&expected_commands) {
+        return Err(
+            format!("reenable_commands should be {expected_commands}: {exclusion_event}").into(),
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn index_full_rebuilds() {
     let tmp = TempDir::new().unwrap();
     let data_dir = tmp.path().join("data");

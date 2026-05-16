@@ -73879,6 +73879,7 @@ fn run_index_with_data(
         }
     });
     let structured_output = structured_format.is_some();
+    let indexing_exclusion_notice = active_indexing_exclusion_notice();
 
     // Generate params hash for idempotency validation
     let params_hash = {
@@ -74001,6 +74002,10 @@ fn run_index_with_data(
             eprintln!("{}", s);
         }
     };
+
+    if let Some(notice) = &indexing_exclusion_notice {
+        emit_indexing_exclusion_notice(notice, structured_output);
+    }
 
     if emit_progress_events {
         let pid = std::process::id();
@@ -74560,6 +74565,135 @@ fn run_index_with_data(
     match res {
         Err(err) if structured_format.is_some() => Err(CliError::already_reported_from(&err)),
         other => other,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct IndexingExclusionNotice {
+    config_path: String,
+    disabled_agents: Vec<String>,
+    disabled_connectors: Vec<String>,
+    disabled_index_agents: Vec<String>,
+    total_connectors: usize,
+    enabled_connectors: usize,
+    reenable_commands: Vec<String>,
+}
+
+impl IndexingExclusionNotice {
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "config_path": self.config_path,
+            "disabled_agents": self.disabled_agents,
+            "disabled_connectors": self.disabled_connectors,
+            "disabled_index_agents": self.disabled_index_agents,
+            "total_connectors": self.total_connectors,
+            "enabled_connectors": self.enabled_connectors,
+            "reenable_commands": self.reenable_commands,
+        })
+    }
+}
+
+fn active_indexing_exclusion_notice() -> Option<IndexingExclusionNotice> {
+    use crate::sources::config::SourcesConfig;
+
+    if dotenvy::var("CASS_IGNORE_SOURCES_CONFIG").is_ok() {
+        return None;
+    }
+
+    let config = SourcesConfig::load().ok()?;
+    let disabled_agents = config.configured_disabled_agents();
+    if disabled_agents.is_empty() {
+        return None;
+    }
+
+    let factories = crate::indexer::get_connector_factories();
+    let total_connectors = factories.len();
+    let disabled_connectors = factories
+        .iter()
+        .filter_map(|(name, _)| {
+            config
+                .is_agent_disabled(name)
+                .then_some((*name).to_string())
+        })
+        .collect::<Vec<_>>();
+    let mut disabled_index_agents = disabled_connectors
+        .iter()
+        .map(|name| index_agent_slug_for_connector_notice(name).to_string())
+        .collect::<Vec<_>>();
+    disabled_index_agents.sort();
+    disabled_index_agents.dedup();
+    let enabled_connectors = total_connectors.saturating_sub(disabled_connectors.len());
+    let config_path = SourcesConfig::config_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let reenable_commands = disabled_agents
+        .iter()
+        .map(|agent| format!("cass sources agents include {agent}"))
+        .collect::<Vec<_>>();
+
+    Some(IndexingExclusionNotice {
+        config_path,
+        disabled_agents,
+        disabled_connectors,
+        disabled_index_agents,
+        total_connectors,
+        enabled_connectors,
+        reenable_commands,
+    })
+}
+
+fn index_agent_slug_for_connector_notice(connector_name: &str) -> &str {
+    match connector_name {
+        "claude" => "claude_code",
+        other => other,
+    }
+}
+
+fn emit_indexing_exclusion_notice(notice: &IndexingExclusionNotice, structured_output: bool) {
+    if structured_output {
+        let mut payload = notice.to_json();
+        if let serde_json::Value::Object(ref mut map) = payload {
+            map.insert(
+                "event".to_string(),
+                serde_json::json!("indexing_exclusions"),
+            );
+            map.insert(
+                "ts_ms".to_string(),
+                serde_json::json!(chrono::Utc::now().timestamp_millis()),
+            );
+            map.insert(
+                "hint".to_string(),
+                serde_json::json!(
+                    "These connectors are disabled by sources.toml and will not be scanned."
+                ),
+            );
+        }
+        if let Ok(line) = serde_json::to_string(&payload) {
+            eprintln!("{line}");
+        }
+        return;
+    }
+
+    eprintln!(
+        "Indexing exclusions active from {}: disabled agents [{}]; disabled connectors [{}]; indexed agent slugs [{}].",
+        notice.config_path,
+        notice.disabled_agents.join(", "),
+        if notice.disabled_connectors.is_empty() {
+            "none".to_string()
+        } else {
+            notice.disabled_connectors.join(", ")
+        },
+        if notice.disabled_index_agents.is_empty() {
+            "none".to_string()
+        } else {
+            notice.disabled_index_agents.join(", ")
+        }
+    );
+    if !notice.reenable_commands.is_empty() {
+        eprintln!("Re-enable with:");
+        for command in &notice.reenable_commands {
+            eprintln!("  {command}");
+        }
     }
 }
 
