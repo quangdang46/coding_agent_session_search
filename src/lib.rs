@@ -57922,6 +57922,79 @@ paths = ["~/.claude/projects"]
         }
     }
 
+    #[test]
+    fn pass18_journal_mutation_schema_fingerprint_is_stable() {
+        // Pass-18 golden-style schema fingerprint: pin the exact byte form
+        // of an ActionRecord::Mutation line so any silent field add / remove /
+        // reorder fails visibly. The proptest in pass-17 checks parseability +
+        // canonical op mapping; this test pins the literal wire format. If
+        // this test fires, either (a) the doctor_runs::ActionRecord::Mutation
+        // schema legitimately changed and downstream consumers (`--diff`,
+        // `--ls`, `--undo`) must be updated, or (b) someone introduced an
+        // accidental schema regression.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let run_dir = temp.path().join("run-dir");
+        std::fs::create_dir_all(&run_dir).expect("create run dir");
+
+        let receipt = DoctorFsMutationReceipt {
+            schema_version: 1,
+            operation_id: "op-fingerprint".to_string(),
+            action_id: "act-fingerprint".to_string(),
+            mutation_kind: DoctorFsMutationKind::PruneCleanupTarget,
+            fallback_kind: None,
+            mode: DoctorRepairMode::CleanupApply,
+            asset_class: DoctorAssetClass::QuarantinedLexicalGeneration,
+            source_path: None,
+            redacted_source_path: None,
+            target_path: "/data/doctor/example.idx".to_string(),
+            redacted_target_path: String::new(),
+            staging_root: None,
+            redacted_staging_root: None,
+            expected_source_blake3: None,
+            actual_source_blake3: Some(
+                "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+            ),
+            actual_target_blake3: Some(
+                "2222222222222222222222222222222222222222222222222222222222222222".to_string(),
+            ),
+            planned_bytes: 0,
+            affected_bytes: 0,
+            status: DoctorActionStatus::Applied,
+            blocked_reasons: Vec::new(),
+            precondition_checks: Vec::new(),
+            forensic_bundle: doctor_forensic_bundle_uncaptured("fingerprint"),
+        };
+        journal_fs_mutation_receipt_to_actions_log(&run_dir, "rid-fp", &receipt, 100, 200)
+            .expect("journal");
+        let body =
+            std::fs::read_to_string(run_dir.join("actions.jsonl")).expect("read actions.jsonl");
+
+        // Expected exact wire form. Field order is determined by serde's
+        // serialization order of `ActionRecord::Mutation` fields, plus the
+        // `kind` discriminant tag from `#[serde(tag = "kind")]`. Any change
+        // here is a SCHEMA EVENT and must be coordinated with downstream
+        // consumers (cass doctor --diff/--ls/--undo, undo_run, etc.).
+        let expected = concat!(
+            "{",
+            "\"kind\":\"mutation\",",
+            "\"run_id\":\"rid-fp\",",
+            "\"fm_id\":\"op-fingerprint\",",
+            "\"path\":\"/data/doctor/example.idx\",",
+            "\"op\":\"prune-cleanup-target\",",
+            "\"before_blake3\":\"1111111111111111111111111111111111111111111111111111111111111111\",",
+            "\"after_blake3\":\"2222222222222222222222222222222222222222222222222222222222222222\",",
+            "\"started_at_ms\":100,",
+            "\"ended_at_ms\":200",
+            "}\n",
+        );
+        assert_eq!(
+            body, expected,
+            "Mutation record wire format drifted. If this is intentional, \
+             update the expected literal and bump RUN_ARTIFACT_SCHEMA_VERSION \
+             so consumers know to refresh their parsers."
+        );
+    }
+
     proptest::proptest! {
         #![proptest_config(proptest::test_runner::Config::with_cases(128))]
 
