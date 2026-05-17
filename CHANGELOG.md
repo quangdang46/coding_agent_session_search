@@ -17,6 +17,56 @@ Repository: <https://github.com/Dicklesworthstone/coding_agent_session_search>
 
 ## Unreleased
 
+## [v0.4.8] -- 2026-05-16
+
+**Stop chained orphan-sidecar growth from frankensqlite Windows VFS lock files.**
+
+A long-running cass install on Windows NTFS could accumulate ~789k orphan files
+(195 GB observed) under the data directory. The shape was `*-lock-pending`,
+`*-lock-pending-lock-pending`, `*-lock-pending-lock-pending-lock-pending`, …
+growing without bound across reindex sessions. Root cause was a two-way
+interaction: frankensqlite's Windows VFS leaked three advisory-lock sidecars
+per transient DB file (e.g. each `VACUUM INTO` backup), and cass's
+`historical_bundle_root_paths` re-enumerated those orphan sidecars as
+"backup roots" and reopened them — which spawned a fresh set of sidecars on
+top of the orphan path, chaining indefinitely.
+
+This release closes the cass side. The frankensqlite side (the actual leak
+fix in `Vfs::delete`) ships in frankensqlite `fsqlite-vfs` 0.1.5 / commit
+[`64363595`](https://github.com/Dicklesworthstone/frankensqlite/commit/64363595);
+cass continues to pin frankensqlite by git rev, so picking up the full fix
+on the cass side will require a follow-up rev-bump.
+
+### Fixed
+
+- **storage**: `historical_bundle_root_paths` now skips frankensqlite's three
+  Windows advisory-lock sidecars (`-lock-shared`, `-lock-reserved`,
+  `-lock-pending`) alongside the standard `-wal`/`-shm` filter, so an orphan
+  sidecar can no longer be misidentified as a backup root and reopened.
+  Reported by @oysteinkrog with a real 789k-file production reproduction; closed
+  via #236 with an independent reimplementation
+  ([commit](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/37b42058)).
+  `is_backup_root_name` is intentionally left untouched so the existing
+  `cleanup_old_backups` rotation continues to reap any pre-existing orphan
+  lock sidecars already on disk in the field.
+
+### Internal
+
+Bug-fix rollup since v0.4.7 (none of these are direct user-facing fixes but
+they shipped on this tag):
+
+- **indexer**: surface disabled-connector exclusions; preserve watermarks
+  with scan exclusions; unblock large streaming source scans.
+- **installer**: validate Windows zip layout before extraction; prefer
+  canonical Windows binary name; install exe basename on Windows POSIX
+  shells; support legacy Windows exe in POSIX installer; avoid eager zip
+  entry type binding; reject exe payloads off Windows; reject non-exe
+  payloads on Windows; prefer platform binary after extraction; prefer
+  legacy exe on Windows POSIX shells.
+- **fts**: stream-based rebuild + pass-15/16/17 doctor `cleanup_apply` work.
+- **ci**: gate UBS on changed-file regressions; release workflow inspects
+  all matching releases before publish.
+
 ## [v0.4.7] -- 2026-05-14
 
 **Registry and source-release alignment for the v0.4.6 publication fix.**
