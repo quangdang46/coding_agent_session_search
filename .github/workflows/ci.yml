@@ -247,25 +247,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # UBS is distributed as a single shell installer per the project's
-          # README. We pin a version via .github/workflows/ubs-version.txt so
-          # CI is reproducible across runs. If the file is absent, fall back
-          # to the latest stable release tag.
+          # UBS is distributed via the upstream install.sh script. The script
+          # fetches the actual scanner from the project's main branch — its
+          # internal VERSION variable is cosmetic. We pin the *installer ref*
+          # via .github/workflows/ubs-version.txt so CI runs against a known
+          # installer commit/tag. A value of "latest" (or an empty file) maps
+          # to the main branch.
+          UBS_REF=""
           if [ -f .github/workflows/ubs-version.txt ]; then
-            UBS_VERSION="$(tr -d '[:space:]' < .github/workflows/ubs-version.txt)"
-          else
-            UBS_VERSION="latest"
+            UBS_REF="$(tr -d '[:space:]' < .github/workflows/ubs-version.txt)"
           fi
-          echo "Installing UBS version: $UBS_VERSION"
-          # Heuristic install: prefer cargo-binstall -> direct binary -> source.
-          # The project's existing tooling assumes ubs is on PATH.
+          case "$UBS_REF" in
+            ""|"latest") UBS_REF="main" ;;
+          esac
+          echo "Installing UBS using installer from ref: $UBS_REF"
           if command -v ubs >/dev/null 2>&1; then
             echo "ubs already on PATH: $(command -v ubs)"
             ubs --version || true
           else
-            # Fall back: build from source. Slow but reliable.
-            cargo install ubs --locked --version "$UBS_VERSION" 2>/dev/null || \
-              cargo install ubs --locked
+            curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/${UBS_REF}/install.sh" | bash
+            # install.sh drops the binary in $HOME/.local/bin by default,
+            # which is not on PATH on GitHub-hosted runners by default.
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.local/bin:$PATH"
+            ubs --version || true
           fi
 
       - name: Run UBS on changed files
