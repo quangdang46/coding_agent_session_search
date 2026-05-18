@@ -12,7 +12,7 @@ use self::refresh_ledger::{
 };
 
 use std::any::Any;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 #[cfg(target_os = "linux")]
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
@@ -725,6 +725,11 @@ pub struct IndexingStats {
     /// Automatic lexical repair/catch-up performed before normal indexing work.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lexical_repair: Option<LexicalRepairStats>,
+    /// Conversations skipped by ingest quarantine during this run.
+    pub quarantined_conversations: usize,
+    /// True when SQLite ingest succeeded but inline lexical updates were
+    /// deferred and the caller must rebuild lexical assets from the archive.
+    pub lexical_update_deferred: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -747,6 +752,41 @@ impl CanonicalMutationCounts {
 
     fn changed(self) -> bool {
         self.inserted_conversations > 0 || self.inserted_messages > 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct NonWatchIngestOutcome {
+    canonical_mutations: CanonicalMutationCounts,
+    quarantined_conversations: usize,
+    lexical_update_deferred: bool,
+}
+
+impl NonWatchIngestOutcome {
+    fn accumulate(self, other: Self) -> Self {
+        Self {
+            canonical_mutations: self
+                .canonical_mutations
+                .accumulate(other.canonical_mutations),
+            quarantined_conversations: self
+                .quarantined_conversations
+                .saturating_add(other.quarantined_conversations),
+            lexical_update_deferred: self.lexical_update_deferred || other.lexical_update_deferred,
+        }
+    }
+}
+
+impl std::ops::Deref for NonWatchIngestOutcome {
+    type Target = CanonicalMutationCounts;
+
+    fn deref(&self) -> &Self::Target {
+        &self.canonical_mutations
+    }
+}
+
+impl PartialEq<CanonicalMutationCounts> for NonWatchIngestOutcome {
+    fn eq(&self, other: &CanonicalMutationCounts) -> bool {
+        self.canonical_mutations == *other
     }
 }
 
@@ -936,6 +976,16 @@ impl IndexingProgress {
             .lock()
             .map(|value| value.clone())
             .unwrap_or_default();
+        let (quarantined_conversations, lexical_update_deferred) = self
+            .stats
+            .lock()
+            .map(|stats| {
+                (
+                    stats.quarantined_conversations,
+                    stats.lexical_update_deferred,
+                )
+            })
+            .unwrap_or_default();
 
         // Derived rate + ETA for the indexing phase. Guard against divide-by-zero
         // and bogus values when `total` isn't set yet.
@@ -965,6 +1015,8 @@ impl IndexingProgress {
             "rate_per_sec": rate_per_sec,
             "eta_seconds": eta_seconds,
             "last_error": last_error,
+            "quarantined_conversations": quarantined_conversations,
+            "lexical_update_deferred": lexical_update_deferred,
             "rebuild_pipeline": {
                 "queue_depth": rebuild_pipeline_queue_depth,
                 "inflight_message_bytes": rebuild_pipeline_inflight_message_bytes,
@@ -9065,7 +9117,7 @@ fn run_streaming_consumer(
     progress: &Option<Arc<IndexingProgress>>,
     lexical_strategy: LexicalPopulationStrategy,
     scan_start_ts: Option<i64>,
-) -> Result<(Vec<String>, CanonicalMutationCounts)> {
+) -> Result<(Vec<String>, NonWatchIngestOutcome)> {
     use std::collections::HashMap;
 
     let mut active_producers = num_producers;
@@ -9075,7 +9127,7 @@ fn run_streaming_consumer(
     let mut switched_to_indexing = false;
     let mut last_commit = std::time::Instant::now();
     let index_start = std::time::Instant::now();
-    let mut canonical_mutations = CanonicalMutationCounts::default();
+    let mut ingest_outcome = NonWatchIngestOutcome::default();
     // Streaming ingest intentionally defers connection-local WAL
     // auto-checkpoints until the enclosing index/watch close path restores
     // steady-state policy and runs the final checkpoint. Keep incidental
@@ -9222,7 +9274,7 @@ fn run_streaming_consumer(
 
                 // Ingest the combined batch (== original single batch when
                 // combine_enabled = false or no extras were drained).
-                let ingest_result = ingest_batch(
+                let batch_outcome = ingest_non_watch_batch_with_oom_split(
                     storage,
                     t_index.as_deref_mut(),
                     data_dir,
@@ -9232,7 +9284,7 @@ fn run_streaming_consumer(
                     defer_streaming_checkpoints,
                 );
                 flow_limiter.release(combined_byte_reservation);
-                canonical_mutations = canonical_mutations.accumulate(ingest_result?);
+                ingest_outcome = ingest_outcome.accumulate(batch_outcome?);
 
                 // For tracing parity with the per-message path, use the
                 // first batch's connector_name + the combined totals.
@@ -9350,8 +9402,14 @@ fn run_streaming_consumer(
     }
 
     // Final commit to ensure all data is persisted
-    if let Some(t_index) = t_index {
+    if let Some(t_index) = t_index
+        && !ingest_outcome.lexical_update_deferred
+    {
         t_index.commit()?;
+    } else if ingest_outcome.lexical_update_deferred {
+        tracing::warn!(
+            "skipping final streaming Tantivy commit because lexical updates were deferred; authoritative DB rebuild will replace derived lexical assets"
+        );
     }
 
     let index_ms = index_start.elapsed().as_millis() as u64;
@@ -9373,6 +9431,10 @@ fn run_streaming_consumer(
         stats.agents_discovered = discovered_names.clone();
         stats.total_conversations = total_conversations;
         stats.total_messages = total_messages;
+        stats.quarantined_conversations = stats
+            .quarantined_conversations
+            .saturating_add(ingest_outcome.quarantined_conversations);
+        stats.lexical_update_deferred |= ingest_outcome.lexical_update_deferred;
     }
 
     tracing::info!(
@@ -9384,7 +9446,7 @@ fn run_streaming_consumer(
         "streaming_indexing_complete"
     );
 
-    Ok((discovered_names, canonical_mutations))
+    Ok((discovered_names, ingest_outcome))
 }
 
 /// Run indexing using streaming architecture with backpressure.
@@ -9400,7 +9462,7 @@ fn run_streaming_index(
     lexical_strategy: LexicalPopulationStrategy,
     additional_scan_roots: Vec<ScanRoot>,
     scan_start_ts: i64,
-) -> Result<CanonicalMutationCounts> {
+) -> Result<NonWatchIngestOutcome> {
     run_streaming_index_with_connector_factories(
         storage,
         t_index,
@@ -9466,7 +9528,7 @@ fn run_streaming_index_with_connector_factories(
     additional_scan_roots: Vec<ScanRoot>,
     connector_factories: Vec<(&'static str, ConnectorFactory)>,
     scan_start_ts: i64,
-) -> Result<CanonicalMutationCounts> {
+) -> Result<NonWatchIngestOutcome> {
     if connector_factories.is_empty() {
         tracing::warn!("no enabled connectors are configured for indexing; skipping scan");
         if let Some(p) = &opts.progress {
@@ -9478,7 +9540,7 @@ fn run_streaming_index_with_connector_factories(
                 names.clear();
             }
         }
-        return Ok(CanonicalMutationCounts::default());
+        return Ok(NonWatchIngestOutcome::default());
     }
 
     let buffered_connectors: Vec<&'static str> = connector_factories
@@ -9581,7 +9643,7 @@ fn run_streaming_index_with_connector_factories(
         return Err(anyhow::anyhow!(error));
     }
 
-    let (discovered_names, canonical_mutations) = match consumer_result {
+    let (discovered_names, ingest_outcome) = match consumer_result {
         Ok(result) => result,
         Err(_) => unreachable!("handled above"),
     };
@@ -9593,7 +9655,7 @@ fn run_streaming_index_with_connector_factories(
         names.extend(discovered_names);
     }
 
-    Ok(canonical_mutations)
+    Ok(ingest_outcome)
 }
 
 /// Run indexing using original batch collection architecture.
@@ -9609,7 +9671,7 @@ fn run_batch_index(
     lexical_strategy: LexicalPopulationStrategy,
     additional_scan_roots: Vec<ScanRoot>,
     scan_start_ts: i64,
-) -> Result<CanonicalMutationCounts> {
+) -> Result<NonWatchIngestOutcome> {
     run_batch_index_with_connector_factories(
         storage,
         t_index,
@@ -9632,7 +9694,7 @@ fn run_batch_index_with_connector_factories(
     additional_scan_roots: Vec<ScanRoot>,
     connector_factories: Vec<(&'static str, ConnectorFactory)>,
     scan_start_ts: i64,
-) -> Result<CanonicalMutationCounts> {
+) -> Result<NonWatchIngestOutcome> {
     let scan_start = std::time::Instant::now();
 
     // First pass: Scan all to get counts if we have progress tracker
@@ -9833,10 +9895,10 @@ fn run_batch_index_with_connector_factories(
 
     let index_start = std::time::Instant::now();
     let mut last_scan_ts_save = std::time::Instant::now();
-    let mut canonical_mutations = CanonicalMutationCounts::default();
+    let mut ingest_outcome = NonWatchIngestOutcome::default();
     let preserve_scan_watermark = scan_watermark_preservation_active();
     for (name, convs, _discovered) in pending_batches {
-        canonical_mutations = canonical_mutations.accumulate(ingest_batch(
+        let batch_outcome = ingest_non_watch_batch_with_oom_split(
             storage,
             t_index.as_deref_mut(),
             &opts.data_dir,
@@ -9844,7 +9906,8 @@ fn run_batch_index_with_connector_factories(
             &opts.progress,
             lexical_strategy,
             !opts.watch,
-        )?);
+        )?;
+        ingest_outcome = ingest_outcome.accumulate(batch_outcome);
         // Periodically persist scan_start_ts so that if the process is killed,
         // the next run does a delta scan instead of a full rescan (infinite-OOM-loop fix).
         if !preserve_scan_watermark && last_scan_ts_save.elapsed() >= Duration::from_secs(10) {
@@ -9882,9 +9945,13 @@ fn run_batch_index_with_connector_factories(
         stats.agents_discovered = discovered_names;
         stats.total_conversations = total_conversations;
         stats.total_messages = total_messages;
+        stats.quarantined_conversations = stats
+            .quarantined_conversations
+            .saturating_add(ingest_outcome.quarantined_conversations);
+        stats.lexical_update_deferred |= ingest_outcome.lexical_update_deferred;
     }
 
-    Ok(canonical_mutations)
+    Ok(ingest_outcome)
 }
 
 pub fn run_index(
@@ -10221,6 +10288,7 @@ pub fn run_index(
     }
     let mut performed_scan = false;
     let mut scan_canonical_mutations = CanonicalMutationCounts::default();
+    let mut scan_lexical_update_deferred = false;
 
     let mut tantivy_requires_rebuild = false;
     let mut observed_tantivy_docs = None;
@@ -10699,41 +10767,73 @@ pub fn run_index(
                 }
                 if streaming_index_enabled() {
                     tracing::info!("using streaming indexing (Opt 8.2)");
+                    let scan_outcome = run_streaming_index(
+                        &storage,
+                        t_index.as_mut(),
+                        &opts,
+                        since_ts,
+                        lexical_strategy,
+                        additional_scan_roots.clone(),
+                        scan_start_ts,
+                    )?;
                     scan_canonical_mutations =
-                        scan_canonical_mutations.accumulate(run_streaming_index(
-                            &storage,
-                            t_index.as_mut(),
-                            &opts,
-                            since_ts,
-                            lexical_strategy,
-                            additional_scan_roots.clone(),
-                            scan_start_ts,
-                        )?);
+                        scan_canonical_mutations.accumulate(scan_outcome.canonical_mutations);
+                    scan_lexical_update_deferred |= scan_outcome.lexical_update_deferred;
                 } else {
                     tracing::info!(
                         "using batch indexing (streaming disabled via CASS_STREAMING_INDEX=0)"
                     );
+                    let scan_outcome = run_batch_index(
+                        &storage,
+                        t_index.as_mut(),
+                        &opts,
+                        since_ts,
+                        lexical_strategy,
+                        additional_scan_roots.clone(),
+                        scan_start_ts,
+                    )?;
                     scan_canonical_mutations =
-                        scan_canonical_mutations.accumulate(run_batch_index(
-                            &storage,
-                            t_index.as_mut(),
-                            &opts,
-                            since_ts,
-                            lexical_strategy,
-                            additional_scan_roots.clone(),
-                            scan_start_ts,
-                        )?);
+                        scan_canonical_mutations.accumulate(scan_outcome.canonical_mutations);
+                    scan_lexical_update_deferred |= scan_outcome.lexical_update_deferred;
                 }
                 performed_scan = true;
 
-                if scan_requires_tantivy {
+                if scan_lexical_update_deferred {
+                    tracing::warn!(
+                        db_path = %opts.db_path.display(),
+                        inserted_conversations = scan_canonical_mutations.inserted_conversations,
+                        inserted_messages = scan_canonical_mutations.inserted_messages,
+                        "inline lexical updates were deferred during non-watch scan; rebuilding lexical assets from canonical SQLite"
+                    );
+                    drop(t_index.take());
+                    let rebuild_convs = count_total_conversations_exact(&storage)?;
+                    let rebuild = rebuild_tantivy_from_db_deferred_startup(
+                        &opts.db_path,
+                        &opts.data_dir,
+                        rebuild_convs,
+                        opts.progress.clone(),
+                    )?;
+                    exact_completed_lexical_checkpoint = rebuild.exact_checkpoint_persisted;
+                    if let Some(observed_messages) = rebuild.observed_messages {
+                        record_exact_total_counts_in_progress(
+                            opts.progress.as_ref(),
+                            rebuild_convs,
+                            observed_messages,
+                        );
+                    }
+                    if keep_tantivy_open_after_rebuild {
+                        t_index = Some(TantivyIndex::open_or_create(&index_path)?);
+                    }
+                } else if scan_requires_tantivy {
                     t_index
                         .as_mut()
                         .expect("tantivy index must remain open for lexical commit")
                         .commit()?;
                 }
 
-                if opts.full || historical_salvage.messages_imported > 0 {
+                if !scan_lexical_update_deferred
+                    && (opts.full || historical_salvage.messages_imported > 0)
+                {
                     let post_scan_observed_tantivy_docs =
                         observed_tantivy_docs_for_post_full_scan_skip(
                             &index_path,
@@ -15841,6 +15941,7 @@ fn rebuild_tantivy_from_db_with_options(
     })
 }
 
+#[cfg(test)]
 fn ingest_batch(
     storage: &FrankenStorage,
     t_index: Option<&mut TantivyIndex>,
@@ -15850,6 +15951,32 @@ fn ingest_batch(
     lexical_strategy: LexicalPopulationStrategy,
     defer_checkpoints: bool,
 ) -> Result<CanonicalMutationCounts> {
+    let outcome = ingest_batch_detailed(
+        storage,
+        t_index,
+        data_dir,
+        convs,
+        progress,
+        lexical_strategy,
+        defer_checkpoints,
+    )?;
+    if outcome.lexical_update_deferred {
+        anyhow::bail!(
+            "incremental lexical update ran out of memory after SQLite ingest; rerun with CASS_DEFER_LEXICAL_UPDATES=1 or rebuild derived lexical assets"
+        );
+    }
+    Ok(outcome.canonical_mutations)
+}
+
+fn ingest_batch_detailed(
+    storage: &FrankenStorage,
+    t_index: Option<&mut TantivyIndex>,
+    data_dir: &Path,
+    convs: &[NormalizedConversation],
+    progress: &Option<Arc<IndexingProgress>>,
+    lexical_strategy: LexicalPopulationStrategy,
+    defer_checkpoints: bool,
+) -> Result<NonWatchIngestOutcome> {
     let trace_span =
         robot_trace_ingest_start("ingest_batch", convs, lexical_strategy, defer_checkpoints);
     // Persistence now uses short-lived writer connections internally so the
@@ -15871,11 +15998,10 @@ fn ingest_batch(
         }
     };
     if batch_outcome.lexical_update_deferred {
-        let error = anyhow::anyhow!(
-            "incremental lexical update ran out of memory after SQLite ingest; rerun with CASS_DEFER_LEXICAL_UPDATES=1 or rebuild derived lexical assets"
+        tracing::warn!(
+            error = ?batch_outcome.lexical_update_error,
+            "SQLite ingest succeeded but inline lexical update was deferred; scheduling authoritative lexical rebuild"
         );
-        robot_trace_ingest_finish(trace_span, "error", 0, 0, Some(&error));
-        return Err(error);
     }
 
     // Update progress counter for all conversations at once
@@ -15889,9 +16015,172 @@ fn ingest_batch(
         batch_outcome.inserted_messages,
         None,
     );
-    Ok(CanonicalMutationCounts {
-        inserted_conversations: batch_outcome.inserted_conversations,
-        inserted_messages: batch_outcome.inserted_messages,
+    Ok(NonWatchIngestOutcome {
+        canonical_mutations: CanonicalMutationCounts {
+            inserted_conversations: batch_outcome.inserted_conversations,
+            inserted_messages: batch_outcome.inserted_messages,
+        },
+        quarantined_conversations: 0,
+        lexical_update_deferred: batch_outcome.lexical_update_deferred,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ingest_non_watch_batch_with_oom_split(
+    storage: &FrankenStorage,
+    t_index: Option<&mut TantivyIndex>,
+    data_dir: &Path,
+    convs: &[NormalizedConversation],
+    progress: &Option<Arc<IndexingProgress>>,
+    lexical_strategy: LexicalPopulationStrategy,
+    defer_checkpoints: bool,
+) -> Result<NonWatchIngestOutcome> {
+    if convs.is_empty() {
+        return Ok(NonWatchIngestOutcome::default());
+    }
+
+    let first_attempt = ingest_non_watch_batch_once(
+        storage,
+        t_index,
+        data_dir,
+        convs,
+        progress,
+        lexical_strategy,
+        defer_checkpoints,
+    );
+
+    match first_attempt {
+        Ok(outcome) => Ok(outcome),
+        Err(error) if error_is_out_of_memory(&error) => ingest_non_watch_oom_retry_or_quarantine(
+            storage,
+            data_dir,
+            convs,
+            progress,
+            lexical_strategy,
+            defer_checkpoints,
+            error,
+        ),
+        Err(error) => Err(error),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ingest_non_watch_batch_once(
+    storage: &FrankenStorage,
+    t_index: Option<&mut TantivyIndex>,
+    data_dir: &Path,
+    convs: &[NormalizedConversation],
+    progress: &Option<Arc<IndexingProgress>>,
+    lexical_strategy: LexicalPopulationStrategy,
+    defer_checkpoints: bool,
+) -> Result<NonWatchIngestOutcome> {
+    if should_inject_non_watch_ingest_test_oom(convs) {
+        anyhow::bail!("out of memory");
+    }
+
+    ingest_batch_detailed(
+        storage,
+        t_index,
+        data_dir,
+        convs,
+        progress,
+        lexical_strategy,
+        defer_checkpoints,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ingest_non_watch_oom_retry_or_quarantine(
+    storage: &FrankenStorage,
+    data_dir: &Path,
+    convs: &[NormalizedConversation],
+    progress: &Option<Arc<IndexingProgress>>,
+    lexical_strategy: LexicalPopulationStrategy,
+    defer_checkpoints: bool,
+    error: anyhow::Error,
+) -> Result<NonWatchIngestOutcome> {
+    if lexical_population_strategy_requires_inline_tantivy(lexical_strategy) {
+        tracing::warn!(
+            conversations = convs.len(),
+            error = %error,
+            "non-watch ingest ran out of memory; retrying batch with deferred lexical updates before quarantine"
+        );
+        return match ingest_non_watch_batch_once(
+            storage,
+            None,
+            data_dir,
+            convs,
+            progress,
+            LexicalPopulationStrategy::DeferredAuthoritativeDbRebuild,
+            defer_checkpoints,
+        ) {
+            Ok(mut outcome) => {
+                outcome.lexical_update_deferred = true;
+                Ok(outcome)
+            }
+            Err(retry_error) if error_is_out_of_memory(&retry_error) => {
+                ingest_non_watch_oom_retry_or_quarantine(
+                    storage,
+                    data_dir,
+                    convs,
+                    progress,
+                    LexicalPopulationStrategy::DeferredAuthoritativeDbRebuild,
+                    defer_checkpoints,
+                    retry_error,
+                )
+            }
+            Err(retry_error) => Err(retry_error),
+        };
+    }
+
+    if convs.len() > 1 {
+        let split_at = convs.len() / 2;
+        tracing::warn!(
+            conversations = convs.len(),
+            left = split_at,
+            right = convs.len().saturating_sub(split_at),
+            error = %error,
+            "non-watch deferred ingest batch ran out of memory; retrying as smaller batches"
+        );
+        let mut left = ingest_non_watch_batch_with_oom_split(
+            storage,
+            None,
+            data_dir,
+            &convs[..split_at],
+            progress,
+            LexicalPopulationStrategy::DeferredAuthoritativeDbRebuild,
+            defer_checkpoints,
+        )?;
+        let right = ingest_non_watch_batch_with_oom_split(
+            storage,
+            None,
+            data_dir,
+            &convs[split_at..],
+            progress,
+            LexicalPopulationStrategy::DeferredAuthoritativeDbRebuild,
+            defer_checkpoints,
+        )?;
+        left = left.accumulate(right);
+        left.lexical_update_deferred = true;
+        return Ok(left);
+    }
+
+    let conv = &convs[0];
+    record_index_poison_conversation(data_dir, conv, &error)?;
+    if let Some(progress) = progress {
+        progress.current.fetch_add(1, Ordering::Relaxed);
+    }
+    tracing::warn!(
+        agent = %conv.agent_slug,
+        external_id = conv.external_id.as_deref().unwrap_or(""),
+        source_path = %conv.source_path.display(),
+        error = %error,
+        "single non-watch conversation ran out of memory after deferred lexical retry; quarantined and continuing index refresh"
+    );
+    Ok(NonWatchIngestOutcome {
+        canonical_mutations: CanonicalMutationCounts::default(),
+        quarantined_conversations: 1,
+        lexical_update_deferred: true,
     })
 }
 
@@ -16123,17 +16412,99 @@ fn record_watch_poison_conversation(
     conv: &NormalizedConversation,
     error: &anyhow::Error,
 ) -> Result<()> {
+    record_poison_conversation(
+        data_dir,
+        WATCH_INGEST_POISON_FILE,
+        "watch-ingest-out-of-memory",
+        conv,
+        error,
+    )
+}
+
+fn record_index_poison_conversation(
+    data_dir: &Path,
+    conv: &NormalizedConversation,
+    error: &anyhow::Error,
+) -> Result<()> {
+    record_poison_conversation(
+        data_dir,
+        INDEX_INGEST_POISON_FILE,
+        "index-ingest-out-of-memory",
+        conv,
+        error,
+    )
+}
+
+const WATCH_INGEST_POISON_FILE: &str = "watch_ingest_poison.jsonl";
+const INDEX_INGEST_POISON_FILE: &str = "index_ingest_poison.jsonl";
+const POISON_CONVERSATION_QUARANTINE_SCHEMA_VERSION: i64 = 1;
+
+fn record_poison_conversation(
+    data_dir: &Path,
+    file_name: &str,
+    reason: &str,
+    conv: &NormalizedConversation,
+    error: &anyhow::Error,
+) -> Result<()> {
     let quarantine_dir = data_dir.join("quarantine");
     fs::create_dir_all(&quarantine_dir).with_context(|| {
         format!(
-            "creating watch ingest quarantine directory {}",
+            "creating ingest quarantine directory {}",
             quarantine_dir.display()
         )
     })?;
 
+    let now_ms = FrankenStorage::now_millis();
+    let conversation_id = poison_conversation_id(conv);
+    let schema_version_at_quarantine = crate::storage::sqlite::CURRENT_SCHEMA_VERSION;
+    let key = (conversation_id.clone(), schema_version_at_quarantine);
+    let path = quarantine_dir.join(file_name);
+    let mut raw_preserved_lines = Vec::new();
+    let mut records = BTreeMap::<(String, i64), serde_json::Value>::new();
+
+    if path.exists() {
+        let contents = fs::read_to_string(&path)
+            .with_context(|| format!("reading ingest quarantine file {}", path.display()))?;
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<serde_json::Value>(trimmed) {
+                Ok(value) => {
+                    if let Some(existing_key) = poison_record_key_from_value(&value) {
+                        records.insert(existing_key, value);
+                    } else {
+                        raw_preserved_lines.push(trimmed.to_string());
+                    }
+                }
+                Err(_) => raw_preserved_lines.push(trimmed.to_string()),
+            }
+        }
+    }
+
+    let previous = records.remove(&key);
+    let first_quarantined_at_ms = previous
+        .as_ref()
+        .and_then(poison_record_first_quarantined_at_ms)
+        .unwrap_or(now_ms);
+    let attempt_count = previous
+        .as_ref()
+        .and_then(|value| value.get("attempt_count"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+        .saturating_add(1);
+
     let record = serde_json::json!({
-        "recorded_at_ms": FrankenStorage::now_millis(),
-        "reason": "watch-ingest-out-of-memory",
+        "schema_version": POISON_CONVERSATION_QUARANTINE_SCHEMA_VERSION,
+        "conversation_id": conversation_id,
+        "schema_version_at_quarantine": schema_version_at_quarantine,
+        "first_quarantined_at_ms": first_quarantined_at_ms,
+        "last_attempt_at_ms": now_ms,
+        "attempt_count": attempt_count,
+        "reason": reason,
+        "error_kind": "out-of-memory",
+        "last_error": error.to_string(),
         "error": error.to_string(),
         "agent_slug": conv.agent_slug,
         "external_id": conv.external_id.as_deref(),
@@ -16143,18 +16514,177 @@ fn record_watch_poison_conversation(
         "ended_at": conv.ended_at,
         "message_count": conv.messages.len(),
     });
+    records.insert(key, record);
 
-    let path = quarantine_dir.join("watch_ingest_poison.jsonl");
     let mut file = OpenOptions::new()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(true)
         .open(&path)
-        .with_context(|| format!("opening watch ingest quarantine file {}", path.display()))?;
-    writeln!(file, "{record}")
-        .with_context(|| format!("writing watch ingest quarantine record {}", path.display()))?;
+        .with_context(|| format!("opening ingest quarantine file {}", path.display()))?;
+    for line in raw_preserved_lines {
+        writeln!(file, "{line}")
+            .with_context(|| format!("preserving ingest quarantine record {}", path.display()))?;
+    }
+    for record in records.values() {
+        writeln!(file, "{record}")
+            .with_context(|| format!("writing ingest quarantine record {}", path.display()))?;
+    }
     file.sync_all()
-        .with_context(|| format!("syncing watch ingest quarantine record {}", path.display()))?;
+        .with_context(|| format!("syncing ingest quarantine record {}", path.display()))?;
     Ok(())
+}
+
+fn poison_conversation_id(conv: &NormalizedConversation) -> String {
+    let workspace = conv
+        .workspace
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let external_id = conv.external_id.as_deref().unwrap_or("");
+    format!(
+        "{}|{}|{}|{}|{}|{}|{}",
+        conv.agent_slug,
+        conv.source_path.display(),
+        workspace,
+        external_id,
+        conv.started_at.unwrap_or_default(),
+        conv.ended_at.unwrap_or_default(),
+        conv.messages.len()
+    )
+}
+
+fn poison_record_key_from_value(value: &serde_json::Value) -> Option<(String, i64)> {
+    let schema_version_at_quarantine = value
+        .get("schema_version_at_quarantine")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(crate::storage::sqlite::CURRENT_SCHEMA_VERSION);
+    if let Some(conversation_id) = value
+        .get("conversation_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|id| !id.trim().is_empty())
+    {
+        return Some((conversation_id, schema_version_at_quarantine));
+    }
+
+    let agent_slug = value
+        .get("agent_slug")
+        .and_then(serde_json::Value::as_str)?;
+    let source_path = value
+        .get("source_path")
+        .and_then(serde_json::Value::as_str)?;
+    let workspace = value
+        .get("workspace")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let external_id = value
+        .get("external_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let started_at = value
+        .get("started_at")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or_default();
+    let ended_at = value
+        .get("ended_at")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or_default();
+    let message_count = value
+        .get("message_count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default();
+    Some((
+        format!(
+            "{agent_slug}|{source_path}|{workspace}|{external_id}|{started_at}|{ended_at}|{message_count}"
+        ),
+        schema_version_at_quarantine,
+    ))
+}
+
+fn poison_record_first_quarantined_at_ms(value: &serde_json::Value) -> Option<i64> {
+    value
+        .get("first_quarantined_at_ms")
+        .and_then(serde_json::Value::as_i64)
+        .or_else(|| {
+            value
+                .get("recorded_at_ms")
+                .and_then(serde_json::Value::as_i64)
+        })
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConversationIngestQuarantineSummary {
+    pub schema_version: i64,
+    pub status: String,
+    pub quarantined_conversations: usize,
+    pub quarantine_files: Vec<String>,
+    pub newest_last_attempt_at_ms: Option<i64>,
+    pub recommended_action: Option<String>,
+}
+
+pub fn conversation_ingest_quarantine_summary(
+    data_dir: &Path,
+) -> ConversationIngestQuarantineSummary {
+    let quarantine_dir = data_dir.join("quarantine");
+    let mut keys = BTreeSet::<(String, i64)>::new();
+    let mut quarantine_files = Vec::new();
+    let mut newest_last_attempt_at_ms: Option<i64> = None;
+
+    for file_name in [WATCH_INGEST_POISON_FILE, INDEX_INGEST_POISON_FILE] {
+        let path = quarantine_dir.join(file_name);
+        if !path.exists() {
+            continue;
+        }
+        quarantine_files.push(path.display().to_string());
+        let Ok(contents) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                continue;
+            };
+            if let Some(key) = poison_record_key_from_value(&value) {
+                keys.insert(key);
+            }
+            if let Some(last_attempt_at_ms) = value
+                .get("last_attempt_at_ms")
+                .and_then(serde_json::Value::as_i64)
+                .or_else(|| {
+                    value
+                        .get("recorded_at_ms")
+                        .and_then(serde_json::Value::as_i64)
+                })
+            {
+                newest_last_attempt_at_ms = Some(
+                    newest_last_attempt_at_ms.map_or(last_attempt_at_ms, |current| {
+                        current.max(last_attempt_at_ms)
+                    }),
+                );
+            }
+        }
+    }
+
+    let quarantined_conversations = keys.len();
+    ConversationIngestQuarantineSummary {
+        schema_version: POISON_CONVERSATION_QUARANTINE_SCHEMA_VERSION,
+        status: if quarantined_conversations > 0 {
+            "degraded".to_string()
+        } else {
+            "ok".to_string()
+        },
+        quarantined_conversations,
+        quarantine_files,
+        newest_last_attempt_at_ms,
+        recommended_action: (quarantined_conversations > 0).then(|| {
+            "Inspect the listed quarantine file(s), then retry repaired source paths with `cass index --watch-once <path> --json --no-progress-events` or run a bounded full refresh."
+                .to_string()
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -16167,6 +16697,19 @@ fn should_inject_watch_ingest_test_oom(convs: &[NormalizedConversation]) -> bool
 
 #[cfg(not(test))]
 fn should_inject_watch_ingest_test_oom(_convs: &[NormalizedConversation]) -> bool {
+    false
+}
+
+#[cfg(test)]
+fn should_inject_non_watch_ingest_test_oom(convs: &[NormalizedConversation]) -> bool {
+    dotenvy::var("CASS_TEST_NON_WATCH_INGEST_OOM_MIN_CONVS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|min| min > 0 && convs.len() >= min)
+}
+
+#[cfg(not(test))]
+fn should_inject_non_watch_ingest_test_oom(_convs: &[NormalizedConversation]) -> bool {
     false
 }
 
@@ -28480,6 +29023,132 @@ mod tests {
             !index_dir(&data_dir).unwrap().join("meta.json").exists(),
             "deferred streaming ingest should not materialize a live Tantivy index before the authoritative rebuild"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn streaming_consumer_defers_lexical_oom_without_quarantining_persisted_conversation() {
+        let _oom_guard = set_env("CASS_TEST_INCREMENTAL_LEXICAL_UPDATE_OOM", "1");
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let db_path = data_dir.join("db.sqlite");
+        let storage = FrankenStorage::open(&db_path).unwrap();
+        ensure_fts_schema(&storage);
+        let mut index = TantivyIndex::open_or_create(&index_dir(&data_dir).unwrap()).unwrap();
+        let progress = Arc::new(IndexingProgress::default());
+        let (tx, rx) = bounded(STREAMING_CHANNEL_SIZE);
+
+        send_conversation_batches(
+            &tx,
+            "codex",
+            vec![norm_conv(
+                Some("lexical-oom-deferred"),
+                vec![norm_msg(0, 1_700_000_000_000)],
+            )],
+            true,
+        );
+        send_done(&tx, "codex", true);
+        drop(tx);
+
+        let (_discovered, outcome) = run_streaming_consumer(
+            rx,
+            1,
+            &storage,
+            &data_dir,
+            Some(&mut index),
+            Arc::new(StreamingByteLimiter::new(STREAMING_MAX_BYTES_IN_FLIGHT)),
+            &Some(progress.clone()),
+            LexicalPopulationStrategy::IncrementalInline,
+            Some(FrankenStorage::now_millis()),
+        )
+        .expect("lexical OOM after SQLite ingest should defer repair, not fail the scan");
+
+        assert_eq!(outcome.inserted_conversations, 1);
+        assert_eq!(outcome.inserted_messages, 1);
+        assert!(outcome.lexical_update_deferred);
+        assert_eq!(outcome.quarantined_conversations, 0);
+        let conversation_rows: i64 = storage
+            .raw()
+            .query_row_map("SELECT COUNT(*) FROM conversations", &[], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        assert_eq!(conversation_rows, 1);
+        assert!(
+            !data_dir
+                .join("quarantine/index_ingest_poison.jsonl")
+                .exists(),
+            "lexical-only OOM must not quarantine a conversation already preserved in SQLite"
+        );
+        let stats = progress.stats.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(stats.lexical_update_deferred);
+        assert_eq!(stats.quarantined_conversations, 0);
+    }
+
+    #[test]
+    #[serial]
+    fn streaming_consumer_quarantines_single_non_watch_oom_and_dedupes_record() {
+        let _oom_guard = set_env("CASS_TEST_NON_WATCH_INGEST_OOM_MIN_CONVS", "1");
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let db_path = data_dir.join("db.sqlite");
+        let storage = FrankenStorage::open(&db_path).unwrap();
+        ensure_fts_schema(&storage);
+        let progress = Arc::new(IndexingProgress::default());
+        let conv = norm_conv(Some("poison-single"), vec![norm_msg(0, 1_700_000_000_000)]);
+
+        for expected_attempts in [1_u64, 2] {
+            let mut index = TantivyIndex::open_or_create(&index_dir(&data_dir).unwrap()).unwrap();
+            let (tx, rx) = bounded(STREAMING_CHANNEL_SIZE);
+            send_conversation_batches(&tx, "codex", vec![conv.clone()], true);
+            send_done(&tx, "codex", true);
+            drop(tx);
+
+            let (_discovered, outcome) = run_streaming_consumer(
+                rx,
+                1,
+                &storage,
+                &data_dir,
+                Some(&mut index),
+                Arc::new(StreamingByteLimiter::new(STREAMING_MAX_BYTES_IN_FLIGHT)),
+                &Some(progress.clone()),
+                LexicalPopulationStrategy::IncrementalInline,
+                Some(FrankenStorage::now_millis()),
+            )
+            .expect("single deferred ingest OOM should quarantine and continue");
+
+            assert_eq!(outcome.inserted_conversations, 0);
+            assert_eq!(outcome.inserted_messages, 0);
+            assert!(outcome.lexical_update_deferred);
+            assert_eq!(outcome.quarantined_conversations, 1);
+
+            let quarantine_path = data_dir.join("quarantine/index_ingest_poison.jsonl");
+            let contents = std::fs::read_to_string(&quarantine_path).unwrap();
+            let lines: Vec<_> = contents
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .collect();
+            assert_eq!(
+                lines.len(),
+                1,
+                "poison record must be upserted, not appended"
+            );
+            let record: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+            assert_eq!(record["reason"], "index-ingest-out-of-memory");
+            assert_eq!(
+                record["attempt_count"],
+                serde_json::json!(expected_attempts)
+            );
+            assert_eq!(record["external_id"], serde_json::json!("poison-single"));
+
+            let summary = conversation_ingest_quarantine_summary(&data_dir);
+            assert_eq!(summary.quarantined_conversations, 1);
+            assert_eq!(summary.status, "degraded");
+        }
     }
 
     #[test]

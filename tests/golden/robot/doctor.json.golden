@@ -688,6 +688,7 @@
     "activity_at": null,
     "documents": null,
     "empty_with_messages": false,
+    "quarantined_conversations": 0,
     "fingerprint": {
       "current_db_fingerprint": null,
       "checkpoint_fingerprint": null,

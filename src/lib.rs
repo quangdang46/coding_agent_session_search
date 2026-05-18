@@ -11745,6 +11745,11 @@ fn state_meta_json_inner(
         &lexical_rebuild_pipeline_json,
     ))
     .unwrap_or(serde_json::Value::Null);
+    let ingest_quarantine_summary =
+        crate::indexer::conversation_ingest_quarantine_summary(data_dir);
+    let quarantined_conversations = ingest_quarantine_summary.quarantined_conversations;
+    let ingest_quarantine_json =
+        serde_json::to_value(&ingest_quarantine_summary).unwrap_or(serde_json::Value::Null);
 
     // Probe the live lexical document count when the DB has messages. Prefer
     // the published generation manifest: status only needs the durable count
@@ -11792,6 +11797,7 @@ fn state_meta_json_inner(
             }),
             "documents": index_doc_count,
             "empty_with_messages": index_empty_with_messages,
+            "quarantined_conversations": quarantined_conversations,
             "fingerprint": {
                 "current_db_fingerprint": lexical.fingerprint.current_db_fingerprint,
                 "checkpoint_fingerprint": lexical.fingerprint.checkpoint_fingerprint,
@@ -11916,6 +11922,7 @@ fn state_meta_json_inner(
                     .and_then(format_timestamp_millis_rfc3339),
             },
         },
+        "ingest_quarantine": ingest_quarantine_json,
         "policy_registry": policy_registry,
         "_meta": {
             "timestamp": ts_str,
@@ -60058,6 +60065,22 @@ fn run_status(
         .and_then(|i| i.get("empty_with_messages"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let quarantined_conversations = state
+        .get("ingest_quarantine")
+        .and_then(|q| q.get("quarantined_conversations"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let ingest_quarantine_recommended_action = state
+        .get("ingest_quarantine")
+        .and_then(|q| q.get("recommended_action"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let mut warnings = Vec::<String>::new();
+    if quarantined_conversations > 0 {
+        warnings.push(format!(
+            "{quarantined_conversations} conversation(s) are quarantined after irreducible ingest OOM; search remains usable for the rest of the archive"
+        ));
+    }
 
     let db_available = db_opened || (db_exists && db_open_retryable);
     let lexical_index_initialized = cass_lexical_index_initialized(&data_dir);
@@ -60107,6 +60130,8 @@ fn run_status(
         Some(format!(
             "Run 'cass index' to refresh the index{pending_msg}"
         ))
+    } else if quarantined_conversations > 0 {
+        ingest_quarantine_recommended_action
     } else {
         semantic_recommended_action(&state, not_initialized)
     };
@@ -60196,8 +60221,10 @@ fn run_status(
         let payload = serde_json::json!({
             "status": status,
             "healthy": healthy,
+            "health_level": if healthy && quarantined_conversations > 0 { "degraded" } else { status },
             "initialized": !not_initialized,
             "explanation": explanation,
+            "warnings": warnings,
             "data_dir": data_dir.display().to_string(),
             "index": state.get("index").cloned().unwrap_or(serde_json::Value::Null),
             "database": serde_json::json!({
@@ -60215,6 +60242,7 @@ fn run_status(
             "rebuild": state.get("rebuild").cloned().unwrap_or(serde_json::Value::Null),
             "rebuild_progress": rebuild_progress_summary_json(&state),
             "semantic": state.get("semantic").cloned().unwrap_or(serde_json::Value::Null),
+            "ingest_quarantine": state.get("ingest_quarantine").cloned().unwrap_or(serde_json::Value::Null),
             "policy_registry": policy_registry,
             "topology_budget": topology_budget,
             "doctor_summary": doctor_summary,
@@ -60337,6 +60365,12 @@ fn run_status(
     if pending_sessions > 0 {
         println!();
         println!("Pending: {pending_sessions} sessions awaiting indexing");
+    }
+    if quarantined_conversations > 0 {
+        println!();
+        println!(
+            "Warning: {quarantined_conversations} conversation(s) quarantined after ingest OOM"
+        );
     }
 
     if let Some(explanation) = &explanation {
@@ -60600,6 +60634,22 @@ fn run_health(
         .and_then(|i| i.get("empty_with_messages"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let quarantined_conversations = state
+        .get("ingest_quarantine")
+        .and_then(|q| q.get("quarantined_conversations"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let ingest_quarantine_recommended_action = state
+        .get("ingest_quarantine")
+        .and_then(|q| q.get("recommended_action"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let mut warnings = Vec::<String>::new();
+    if quarantined_conversations > 0 {
+        warnings.push(format!(
+            "{quarantined_conversations} conversation(s) are quarantined after irreducible ingest OOM; lexical search remains usable for non-quarantined sessions"
+        ));
+    }
 
     let db_degraded = db_exists && !db_opened;
     let lexical_index_initialized = cass_lexical_index_initialized(&data_dir);
@@ -60629,6 +60679,8 @@ fn run_health(
         Some(cass_not_initialized_recommended_action())
     } else if db_degraded {
         Some("Run 'cass doctor --fix' or 'cass index --full' to attempt recovery.".to_string())
+    } else if healthy && quarantined_conversations > 0 {
+        ingest_quarantine_recommended_action
     } else if !healthy {
         Some("Run 'cass index --full' to rebuild the index/database.".to_string())
     } else {
@@ -60746,8 +60798,10 @@ fn run_health(
         let payload = serde_json::json!({
             "status": status,
             "healthy": healthy,
+            "health_level": if healthy && quarantined_conversations > 0 { "degraded" } else { status },
             "initialized": !not_initialized,
             "explanation": explanation,
+            "warnings": warnings,
             "data_dir": data_dir.display().to_string(),
             "recommended_action": recommended_action,
             "recommended_commands": recommended_commands,
@@ -60775,6 +60829,7 @@ fn run_health(
             "remote_source_sync": remote_source_sync_summary,
             "coverage_risk": coverage_risk,
             "policy_registry": policy_registry,
+            "ingest_quarantine": state.get("ingest_quarantine").cloned().unwrap_or(serde_json::Value::Null),
             "responsiveness": responsiveness,
             "parallel_wal_shadow": parallel_wal_shadow,
             // [coding_agent_session_search-yvv7r + waijq] Runtime optimization
@@ -60790,6 +60845,11 @@ fn run_health(
         println!("✓ Healthy ({latency_ms}ms)");
         if pending_sessions > 0 {
             println!("  Note: {pending_sessions} sessions pending reindex");
+        }
+        if quarantined_conversations > 0 {
+            println!(
+                "  Note: {quarantined_conversations} conversation(s) quarantined after ingest OOM"
+            );
         }
     } else if rebuild_active {
         println!("~ Rebuilding ({latency_ms}ms)");
@@ -61349,6 +61409,50 @@ mod cli_read_db_tests {
                 .get("open_error")
                 .and_then(|v| v.as_str())
                 .is_some_and(|err| !err.is_empty())
+        );
+    }
+
+    #[test]
+    fn status_state_surfaces_ingest_quarantine_without_marking_index_corrupt() {
+        let temp = TempDir::new().expect("tempdir");
+        let quarantine_dir = temp.path().join("quarantine");
+        std::fs::create_dir_all(&quarantine_dir).expect("create quarantine dir");
+        std::fs::write(
+            quarantine_dir.join("index_ingest_poison.jsonl"),
+            serde_json::json!({
+                "schema_version": 1,
+                "conversation_id": "tester|/logs/demo.jsonl|/workspace/demo|poison|1|2|1",
+                "schema_version_at_quarantine": crate::storage::sqlite::CURRENT_SCHEMA_VERSION,
+                "first_quarantined_at_ms": 10,
+                "last_attempt_at_ms": 20,
+                "attempt_count": 1,
+                "reason": "index-ingest-out-of-memory",
+                "agent_slug": "tester",
+                "external_id": "poison",
+                "source_path": "/logs/demo.jsonl",
+                "workspace": "/workspace/demo",
+                "started_at": 1,
+                "ended_at": 2,
+                "message_count": 1
+            })
+            .to_string(),
+        )
+        .expect("write quarantine record");
+
+        let db_path = temp.path().join("agent_search.db");
+        let state = state_meta_json_for_status(temp.path(), &db_path, 60);
+
+        assert_eq!(
+            state["index"]["quarantined_conversations"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            state["ingest_quarantine"]["status"],
+            serde_json::json!("degraded")
+        );
+        assert_eq!(
+            state["ingest_quarantine"]["quarantined_conversations"],
+            serde_json::json!(1)
         );
     }
 
@@ -74580,6 +74684,16 @@ fn run_index_with_data(
                 ))
             })
             .unwrap_or((0, 0));
+        let (quarantined_conversations, lexical_update_deferred) = index_progress
+            .stats
+            .lock()
+            .map(|stats| {
+                (
+                    stats.quarantined_conversations,
+                    stats.lexical_update_deferred,
+                )
+            })
+            .unwrap_or_default();
         let mut payload = serde_json::json!({
             "success": true,
             "elapsed_ms": elapsed_ms,
@@ -74590,6 +74704,8 @@ fn run_index_with_data(
             "db_path": db_path.display().to_string(),
             "conversations": conversations,
             "messages": messages,
+            "quarantined_conversations": quarantined_conversations,
+            "lexical_update_deferred": lexical_update_deferred,
         });
 
         // Add structured indexing stats if available (T7.4)

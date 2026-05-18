@@ -795,6 +795,9 @@
         "empty_with_messages": {
           "type": "boolean"
         },
+        "quarantined_conversations": {
+          "type": "integer"
+        },
         "fingerprint": {
           "type": "object",
           "properties": {

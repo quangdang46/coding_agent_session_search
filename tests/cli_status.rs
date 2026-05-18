@@ -1,6 +1,7 @@
 use assert_cmd::Command;
 use coding_agent_search::search::tantivy::{SCHEMA_HASH, expected_index_dir};
 use coding_agent_search::sources::config::{SourceDefinition, SourcesConfig, SyncSchedule};
+use coding_agent_search::storage::sqlite::CURRENT_SCHEMA_VERSION;
 use fs2::FileExt;
 use serde_json::json;
 use std::fs::{self, OpenOptions};
@@ -129,6 +130,45 @@ fn write_remote_source_config(config_home: &Path) {
     .expect("write sources config");
 }
 
+fn isolated_cass_cmd(temp_home: &Path) -> Command {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cass"));
+    cmd.env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1");
+    cmd.env("CASS_IGNORE_SOURCES_CONFIG", "1");
+    cmd.env("HOME", temp_home);
+    cmd.env("XDG_DATA_HOME", temp_home.join(".local/share"));
+    cmd.env("XDG_CONFIG_HOME", temp_home.join(".config"));
+    cmd.env("CODEX_HOME", temp_home.join(".codex"));
+    cmd
+}
+
+fn write_ingest_quarantine_record(data_dir: &Path) {
+    let quarantine_dir = data_dir.join("quarantine");
+    fs::create_dir_all(&quarantine_dir).expect("create ingest quarantine dir");
+    let record = json!({
+        "schema_version": 1,
+        "conversation_id": "tester|/logs/demo.jsonl|/workspace/demo|poison|1|2|1",
+        "schema_version_at_quarantine": CURRENT_SCHEMA_VERSION,
+        "first_quarantined_at_ms": 10,
+        "last_attempt_at_ms": 20,
+        "attempt_count": 1,
+        "reason": "index-ingest-out-of-memory",
+        "error_kind": "out-of-memory",
+        "last_error": "out of memory",
+        "agent_slug": "tester",
+        "external_id": "poison",
+        "source_path": "/logs/demo.jsonl",
+        "workspace": "/workspace/demo",
+        "started_at": 1,
+        "ended_at": 2,
+        "message_count": 1
+    });
+    fs::write(
+        quarantine_dir.join("index_ingest_poison.jsonl"),
+        format!("{record}\n"),
+    )
+    .expect("write ingest quarantine record");
+}
+
 fn seed_active_rebuild_runtime(data_dir: &Path) -> std::fs::File {
     let db_path = data_dir.join("agent_search.db");
     let index_path = expected_index_dir(data_dir);
@@ -207,6 +247,104 @@ fn seed_active_rebuild_runtime(data_dir: &Path) -> std::fs::File {
     .expect("write lock metadata");
     lock_file.flush().expect("flush lock metadata");
     lock_file
+}
+
+#[test]
+fn status_and_health_json_surface_ingest_quarantine_as_nonfatal_degraded() {
+    let test_home = tempfile::tempdir().expect("tempdir");
+    let data_dir = test_home.path().join("cass-data");
+    fs::create_dir_all(&data_dir).expect("create data dir");
+
+    let index_out = isolated_cass_cmd(test_home.path())
+        .args([
+            "index",
+            "--data-dir",
+            data_dir.to_str().expect("utf8"),
+            "--json",
+            "--no-progress-events",
+        ])
+        .output()
+        .expect("run cass index --json");
+    assert!(
+        index_out.status.success(),
+        "cass index --json failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&index_out.stdout),
+        String::from_utf8_lossy(&index_out.stderr)
+    );
+
+    write_ingest_quarantine_record(&data_dir);
+
+    let status_out = isolated_cass_cmd(test_home.path())
+        .args([
+            "status",
+            "--data-dir",
+            data_dir.to_str().expect("utf8"),
+            "--json",
+        ])
+        .output()
+        .expect("run cass status --json");
+    assert!(
+        status_out.status.success(),
+        "cass status --json failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&status_out.stdout),
+        String::from_utf8_lossy(&status_out.stderr)
+    );
+    let status_payload: serde_json::Value =
+        serde_json::from_slice(&status_out.stdout).expect("status JSON");
+    assert_eq!(status_payload["status"].as_str(), Some("healthy"));
+    assert_eq!(status_payload["healthy"].as_bool(), Some(true));
+    assert_eq!(status_payload["health_level"].as_str(), Some("degraded"));
+    assert_eq!(
+        status_payload["index"]["quarantined_conversations"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        status_payload["ingest_quarantine"]["quarantined_conversations"].as_u64(),
+        Some(1)
+    );
+    assert!(
+        status_payload["warnings"]
+            .as_array()
+            .is_some_and(|warnings| !warnings.is_empty()),
+        "status should expose a nonfatal ingest-quarantine warning: {status_payload}"
+    );
+    assert!(
+        status_payload["recommended_action"]
+            .as_str()
+            .is_some_and(|action| action.contains("quarantine")),
+        "status should recommend inspecting quarantine state: {status_payload}"
+    );
+
+    let health_out = isolated_cass_cmd(test_home.path())
+        .args([
+            "health",
+            "--data-dir",
+            data_dir.to_str().expect("utf8"),
+            "--json",
+        ])
+        .output()
+        .expect("run cass health --json");
+    assert!(
+        health_out.status.success(),
+        "cass health --json should remain exit 0 for nonfatal ingest quarantine: stdout={} stderr={}",
+        String::from_utf8_lossy(&health_out.stdout),
+        String::from_utf8_lossy(&health_out.stderr)
+    );
+    let health_payload: serde_json::Value =
+        serde_json::from_slice(&health_out.stdout).expect("health JSON");
+    assert_eq!(health_payload["status"].as_str(), Some("healthy"));
+    assert_eq!(health_payload["healthy"].as_bool(), Some(true));
+    assert_eq!(health_payload["health_level"].as_str(), Some("degraded"));
+    assert_eq!(
+        health_payload["ingest_quarantine"]["quarantined_conversations"].as_u64(),
+        Some(1)
+    );
+    assert!(
+        health_payload["warnings"]
+            .as_array()
+            .is_some_and(|warnings| !warnings.is_empty()),
+        "health should expose a nonfatal ingest-quarantine warning: {health_payload}"
+    );
 }
 
 #[test]

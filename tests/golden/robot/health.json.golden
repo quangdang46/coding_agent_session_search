@@ -1,8 +1,10 @@
 {
   "status": "not_initialized",
   "healthy": false,
+  "health_level": "not_initialized",
   "initialized": false,
   "explanation": "No cass database or search index exists in [TEST_HOME]/coding-agent-search yet. This is expected on a fresh install or when using a brand-new --data-dir.",
+  "warnings": [],
   "data_dir": "[TEST_HOME]/coding-agent-search",
   "recommended_action": "Run 'cass index --full' once to discover local sessions and build the initial archive.",
   "recommended_commands": [
@@ -264,6 +266,14 @@
       }
     ]
   },
+  "ingest_quarantine": {
+    "schema_version": 1,
+    "status": "ok",
+    "quarantined_conversations": 0,
+    "quarantine_files": [],
+    "newest_last_attempt_at_ms": null,
+    "recommended_action": null
+  },
   "responsiveness": {
     "current_capacity_pct": 100,
     "resource_policy": {
@@ -348,6 +358,7 @@
       "activity_at": null,
       "documents": null,
       "empty_with_messages": false,
+      "quarantined_conversations": 0,
       "fingerprint": {
         "current_db_fingerprint": null,
         "checkpoint_fingerprint": null,
@@ -476,6 +487,14 @@
         "last_offset": null,
         "saved_at": null
       }
+    },
+    "ingest_quarantine": {
+      "schema_version": 1,
+      "status": "ok",
+      "quarantined_conversations": 0,
+      "quarantine_files": [],
+      "newest_last_attempt_at_ms": null,
+      "recommended_action": null
     },
     "policy_registry": {
       "schema_version": "1",
