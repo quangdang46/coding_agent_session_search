@@ -61659,8 +61659,14 @@ mod cli_read_db_tests {
             pipeline["tantivy_writer_threads"].as_u64(),
             Some(available_parallelism.min(2))
         );
-        assert_eq!(pipeline["staged_shard_builders"].as_u64(), Some(4));
-        assert_eq!(pipeline["staged_merge_workers"].as_u64(), Some(2));
+        assert_eq!(
+            pipeline["staged_shard_builders"].as_u64(),
+            Some(crate::indexer::responsiveness::effective_worker_count(4).max(1) as u64)
+        );
+        assert_eq!(
+            pipeline["staged_merge_workers"].as_u64(),
+            Some(crate::indexer::responsiveness::effective_worker_count(2).max(1) as u64)
+        );
         assert_eq!(
             pipeline["page_size"].as_i64(),
             Some(crate::indexer::LEXICAL_REBUILD_PAGE_SIZE_PUBLIC)
@@ -61692,7 +61698,10 @@ mod cli_read_db_tests {
             Some(61000)
         );
         assert_eq!(pipeline["pipeline_channel_size"].as_u64(), Some(4));
-        assert_eq!(pipeline["page_prep_workers"].as_u64(), Some(6));
+        assert_eq!(
+            pipeline["page_prep_workers"].as_u64(),
+            Some(crate::indexer::responsiveness::effective_worker_count(6).max(1) as u64)
+        );
         assert_eq!(
             pipeline["pipeline_max_message_bytes_in_flight"].as_u64(),
             Some(888888)

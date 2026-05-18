@@ -26128,8 +26128,14 @@ mod tests {
             snapshot.tantivy_writer_threads,
             snapshot.available_parallelism.min(2)
         );
-        assert_eq!(snapshot.staged_shard_builders, 4);
-        assert_eq!(snapshot.staged_merge_workers, 2);
+        assert_eq!(
+            snapshot.staged_shard_builders,
+            responsiveness::effective_worker_count(4).max(1)
+        );
+        assert_eq!(
+            snapshot.staged_merge_workers,
+            responsiveness::effective_worker_count(2).max(1)
+        );
         assert_eq!(snapshot.controller_mode, "steady");
         assert_eq!(snapshot.controller_restore_clear_samples, 5);
         assert_eq!(snapshot.controller_restore_hold_ms, 2345);
@@ -26151,7 +26157,10 @@ mod tests {
         assert_eq!(snapshot.steady_commit_every_message_bytes, 123456);
         assert_eq!(snapshot.startup_commit_every_message_bytes, 12345);
         assert_eq!(snapshot.pipeline_channel_size, 5);
-        assert_eq!(snapshot.page_prep_workers, 3);
+        assert_eq!(
+            snapshot.page_prep_workers,
+            responsiveness::effective_worker_count(3).max(1)
+        );
         assert_eq!(snapshot.pipeline_max_message_bytes_in_flight, 777777);
     }
 
@@ -26845,8 +26854,14 @@ mod tests {
                 snapshot.tantivy_writer_threads
             )
         );
-        assert_eq!(snapshot.page_prep_workers, 6);
-        assert_eq!(snapshot.staged_merge_workers, 3);
+        assert_eq!(
+            snapshot.page_prep_workers,
+            responsiveness::effective_worker_count(6).max(1)
+        );
+        assert_eq!(
+            snapshot.staged_merge_workers,
+            responsiveness::effective_worker_count(3).max(1)
+        );
     }
 
     #[test]
