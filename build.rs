@@ -81,8 +81,8 @@ const CONTRACTS: &[DependencyContract] = &[
         crate_package_name: "franken-agent-detection",
         manifest_package_field: None,
         expected_git: "https://github.com/Dicklesworthstone/franken_agent_detection",
-        expected_rev: "a0ce134b433c0e2d5cafe83ad548a5b50bf94787",
-        expected_version: "0.1.7",
+        expected_rev: "b62d859709aa6f8e772759efa2c13da9e3c088c9",
+        expected_version: "0.1.8",
         expected_features: &[
             "chatgpt",
             "connectors",
@@ -128,8 +128,8 @@ const CONTRACTS: &[DependencyContract] = &[
         expected_git: "https://github.com/Dicklesworthstone/frankensearch",
         // Bumped from 831b3b13 to pick up bounded cass content-prefix
         // indexing plus the self-contained Git dependency packaging fix.
-        expected_rev: "128d134ad2cde552d36ad837ff83ff974448f214",
-        expected_version: "0.3.0",
+        expected_rev: "c8fd66544614b434f82eab86e86e189ea284dada",
+        expected_version: "0.3.1",
         expected_features: &["ann", "fastembed-reranker", "hash", "lexical"],
         expected_default_features: Some(false),
         repo_rel: "../frankensearch",
