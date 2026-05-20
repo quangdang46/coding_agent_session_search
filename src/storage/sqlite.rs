@@ -6843,15 +6843,37 @@ impl FrankenStorage {
             ));
         }
 
+        let every_footprint_was_missing_tail = missing_tail_positions.len() == footprints.len();
         if !missing_tail_positions.is_empty() {
             self.fill_missing_lexical_rebuild_footprint_tails(
                 &mut footprints,
                 &missing_tail_positions,
             )?;
         }
-        self.raise_lexical_rebuild_footprints_to_exact_message_counts(&mut footprints)?;
+        if !every_footprint_was_missing_tail {
+            self.raise_lexical_rebuild_footprints_to_exact_message_counts(&mut footprints)?;
+        }
 
         Ok(footprints)
+    }
+
+    pub fn lexical_rebuild_has_tail_footprint_metadata(&self) -> Result<bool> {
+        let conversation_columns = franken_table_column_names(&self.conn, "conversations")?;
+        if conversation_columns.contains("last_message_idx") {
+            return Ok(true);
+        }
+
+        match self.conn.query_map_collect(
+            "SELECT 1 FROM conversation_tail_state LIMIT 1",
+            fparams![],
+            |row| row.get_typed::<i64>(0),
+        ) {
+            Ok(rows) => Ok(!rows.is_empty()),
+            Err(err) if error_indicates_missing_table(&err) => Ok(false),
+            Err(err) => Err(err).with_context(
+                || "checking whether lexical rebuild tail-state footprint metadata exists",
+            ),
+        }
     }
 
     fn raise_lexical_rebuild_footprints_to_exact_message_counts(
@@ -6927,61 +6949,59 @@ impl FrankenStorage {
             return Ok(());
         }
 
-        let mut current_conversation_id = None;
-        let mut current_message_count = 0usize;
-        let apply_current_tail =
-            |conversation_id: Option<i64>,
-             message_count: usize,
-             footprints: &mut [LexicalRebuildConversationFootprintRow]| {
-                let Some(conversation_id) = conversation_id else {
-                    return;
-                };
-                let Some(position) = missing_tail_positions.get(&conversation_id) else {
-                    return;
-                };
-                footprints[*position] = lexical_rebuild_conversation_footprint_from_count(
-                    conversation_id,
-                    message_count,
+        self.fill_missing_lexical_rebuild_footprint_tails_from_grouped_messages(
+            footprints,
+            missing_tail_positions,
+            "SELECT conversation_id, MAX(idx) AS last_message_idx
+             FROM messages INDEXED BY idx_messages_conv_idx
+             GROUP BY conversation_id
+             ORDER BY conversation_id ASC",
+        )
+        .or_else(|err| {
+            if err
+                .to_string()
+                .contains("no such index: idx_messages_conv_idx")
+            {
+                return self.fill_missing_lexical_rebuild_footprint_tails_from_grouped_messages(
+                    footprints,
+                    missing_tail_positions,
+                    "SELECT conversation_id, MAX(idx) AS last_message_idx
+                     FROM messages
+                     GROUP BY conversation_id
+                     ORDER BY conversation_id ASC",
                 );
-            };
-        self.conn
-            .query_with_params_for_each(
-                "SELECT conversation_id, idx
-                 FROM messages
-                 ORDER BY conversation_id ASC, idx ASC",
-                &[] as &[SqliteValue],
-                |row| {
-                    let conversation_id: i64 = row.get_typed(0)?;
-                    let idx: Option<i64> = row.get_typed(1)?;
-                    let row_message_count = lexical_rebuild_message_count_from_tail_idx(idx);
-                    match current_conversation_id {
-                        Some(current_id) if current_id == conversation_id => {
-                            if let Some(row_message_count) = row_message_count {
-                                current_message_count =
-                                    current_message_count.max(row_message_count);
-                            }
-                        }
-                        Some(_) => {
-                            apply_current_tail(
-                                current_conversation_id,
-                                current_message_count,
-                                footprints,
-                            );
-                            current_conversation_id = Some(conversation_id);
-                            current_message_count = row_message_count.unwrap_or(0);
-                        }
-                        None => {
-                            current_conversation_id = Some(conversation_id);
-                            current_message_count = row_message_count.unwrap_or(0);
-                        }
-                    }
-                    Ok(())
-                },
-            )
-            .with_context(|| "streaming missing lexical rebuild tail estimates from messages")?;
-        apply_current_tail(current_conversation_id, current_message_count, footprints);
+            }
+            Err(err)
+        })
+        .with_context(|| "grouping missing lexical rebuild tail estimates from messages")?;
 
         Ok(())
+    }
+
+    fn fill_missing_lexical_rebuild_footprint_tails_from_grouped_messages(
+        &self,
+        footprints: &mut [LexicalRebuildConversationFootprintRow],
+        missing_tail_positions: &HashMap<i64, usize>,
+        sql: &str,
+    ) -> Result<()> {
+        self.conn
+            .query_with_params_for_each(sql, &[] as &[SqliteValue], |row| {
+                let conversation_id: i64 = row.get_typed(0)?;
+                let last_message_idx: Option<i64> = row.get_typed(1)?;
+                let Some(position) = missing_tail_positions.get(&conversation_id) else {
+                    return Ok(());
+                };
+                if let Some(message_count) =
+                    lexical_rebuild_message_count_from_tail_idx(last_message_idx)
+                {
+                    footprints[*position] = lexical_rebuild_conversation_footprint_from_count(
+                        conversation_id,
+                        message_count,
+                    );
+                }
+                Ok(())
+            })
+            .with_context(|| "grouping lexical rebuild missing tail estimates")
     }
 
     /// List conversation ids in the stable order used by lexical rebuilds.
