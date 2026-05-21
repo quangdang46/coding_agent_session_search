@@ -3245,6 +3245,15 @@ pub struct LexicalRebuildConversationFootprintRow {
 pub(crate) const LEXICAL_REBUILD_PLANNER_ESTIMATED_BYTES_PER_MESSAGE: usize = 4 * 1024;
 const LEXICAL_REBUILD_FOOTPRINT_POINT_TAIL_FALLBACK_LIMIT: usize = 64;
 
+fn lexical_rebuild_tail_metadata_coverage_is_sufficient(
+    total_conversations: usize,
+    covered_conversations: usize,
+) -> bool {
+    total_conversations == 0
+        || total_conversations.saturating_sub(covered_conversations.min(total_conversations))
+            <= LEXICAL_REBUILD_FOOTPRINT_POINT_TAIL_FALLBACK_LIMIT
+}
+
 fn lexical_rebuild_message_count_from_tail_idx(last_message_idx: Option<i64>) -> Option<usize> {
     let last_message_idx = u64::try_from(last_message_idx?).ok()?;
     let high_water = last_message_idx.checked_add(1)?;
@@ -6858,22 +6867,70 @@ impl FrankenStorage {
     }
 
     pub fn lexical_rebuild_has_tail_footprint_metadata(&self) -> Result<bool> {
-        let conversation_columns = franken_table_column_names(&self.conn, "conversations")?;
-        if conversation_columns.contains("last_message_idx") {
+        let total_conversations: i64 = self
+            .conn
+            .query_row_map("SELECT COUNT(*) FROM conversations", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .with_context(|| "counting conversations for lexical rebuild tail metadata coverage")?;
+        let total_conversations = usize::try_from(total_conversations.max(0)).unwrap_or(usize::MAX);
+        if total_conversations == 0 {
             return Ok(true);
         }
 
-        match self.conn.query_map_collect(
-            "SELECT 1 FROM conversation_tail_state LIMIT 1",
-            fparams![],
-            |row| row.get_typed::<i64>(0),
-        ) {
-            Ok(rows) => Ok(!rows.is_empty()),
-            Err(err) if error_indicates_missing_table(&err) => Ok(false),
-            Err(err) => Err(err).with_context(
-                || "checking whether lexical rebuild tail-state footprint metadata exists",
-            ),
+        let conversation_columns = franken_table_column_names(&self.conn, "conversations")?;
+        let conversations_have_tail_column = conversation_columns.contains("last_message_idx");
+        let tail_state_has_tail_column =
+            match franken_table_column_names(&self.conn, "conversation_tail_state") {
+                Ok(columns) => columns.contains("last_message_idx"),
+                Err(err) if error_indicates_missing_table(&err) => false,
+                Err(err) => {
+                    return Err(err)
+                        .with_context(|| "reading lexical rebuild tail-state metadata columns");
+                }
+            };
+        if !conversations_have_tail_column && !tail_state_has_tail_column {
+            return Ok(false);
         }
+
+        let covered_sql = match (conversations_have_tail_column, tail_state_has_tail_column) {
+            (true, true) => {
+                "SELECT COUNT(*)
+                 FROM conversations c
+                 LEFT JOIN conversation_tail_state ts ON ts.conversation_id = c.id
+                 WHERE c.last_message_idx IS NOT NULL
+                    OR ts.last_message_idx IS NOT NULL"
+            }
+            (true, false) => {
+                "SELECT COUNT(*)
+                 FROM conversations
+                 WHERE last_message_idx IS NOT NULL"
+            }
+            (false, true) => {
+                "SELECT COUNT(*)
+                 FROM conversations c
+                 WHERE EXISTS (
+                     SELECT 1
+                     FROM conversation_tail_state ts
+                     WHERE ts.conversation_id = c.id
+                       AND ts.last_message_idx IS NOT NULL
+                 )"
+            }
+            (false, false) => unreachable!("checked before covered_sql selection"),
+        };
+        let covered_conversations: i64 = self
+            .conn
+            .query_row_map(covered_sql, fparams![], |row| row.get_typed(0))
+            .with_context(
+                || "counting conversations covered by lexical rebuild tail footprint metadata",
+            )?;
+        let covered_conversations =
+            usize::try_from(covered_conversations.max(0)).unwrap_or(usize::MAX);
+
+        Ok(lexical_rebuild_tail_metadata_coverage_is_sufficient(
+            total_conversations,
+            covered_conversations,
+        ))
     }
 
     fn raise_lexical_rebuild_footprints_to_exact_message_counts(
@@ -8448,6 +8505,44 @@ impl FrankenStorage {
                     continue;
                 }
             };
+
+            // #247 (coding_agent_session_search-r8pcy): if a per-bundle progress
+            // checkpoint already covers the backup's entire conversation row-id
+            // space, the bundle was effectively fully imported but the daemon was
+            // killed (e.g. OOM) before the completion ledger marker landed.
+            // Re-scanning it is a pure O(n) no-op — every batch commits
+            // imported=0 while taking 5-12 min. Detect it via the high-water
+            // checkpoint, write the ledger marker, drop the checkpoint, and skip.
+            if let Some(progress) = self.load_historical_bundle_progress(&bundle)? {
+                let backup_max_conversation_id: i64 = source
+                    .conn
+                    .query_row_map(
+                        "SELECT COALESCE(MAX(id), 0) FROM conversations",
+                        fparams![],
+                        |row| row.get_typed(0),
+                    )
+                    .unwrap_or(0);
+                if backup_max_conversation_id > 0
+                    && progress.last_completed_source_row_id >= backup_max_conversation_id
+                {
+                    self.record_historical_bundle_import(
+                        &bundle,
+                        source.method,
+                        progress.conversations_imported,
+                        progress.messages_imported,
+                    )?;
+                    self.clear_historical_bundle_progress(&bundle)?;
+                    tracing::info!(
+                        path = %bundle.root_path.display(),
+                        last_completed_source_row_id = progress.last_completed_source_row_id,
+                        backup_max_conversation_id,
+                        conversations_imported = progress.conversations_imported,
+                        messages_imported = progress.messages_imported,
+                        "historical bundle already fully imported per checkpoint; marking salvaged and skipping O(n) re-scan"
+                    );
+                    continue;
+                }
+            }
 
             self.import_historical_sources(&source.conn)?;
             let (imported_conversations, imported_messages) =
@@ -19541,6 +19636,110 @@ mod tests {
         let second = storage.salvage_historical_databases(&canonical_db).unwrap();
         assert_eq!(second.bundles_imported, 0);
         assert_eq!(second.messages_imported, 0);
+    }
+
+    #[test]
+    fn salvage_historical_databases_skips_bundle_when_checkpoint_covers_backup() {
+        // Regression for issue #247 (coding_agent_session_search-r8pcy): a bundle
+        // whose progress checkpoint already covers the backup's entire conversation
+        // row-id space (daemon OOM-killed after the last batch committed but before
+        // the completion ledger marker landed) must be ledgered + skipped, not
+        // re-scanned O(n) with imported=0 every batch.
+        use crate::model::types::{Conversation, Message, MessageRole};
+        use std::path::PathBuf;
+
+        fn make_conv(source_path: &str, idx_seed: i64) -> Conversation {
+            Conversation {
+                id: None,
+                agent_slug: "codex".into(),
+                workspace: Some(PathBuf::from("/tmp/workspace")),
+                external_id: Some(format!("conv-{idx_seed}")),
+                title: Some(format!("Recovered {idx_seed}")),
+                source_path: PathBuf::from(source_path),
+                started_at: Some(1_700_000_000_000 + idx_seed),
+                ended_at: Some(1_700_000_000_100 + idx_seed),
+                approx_tokens: None,
+                metadata_json: serde_json::Value::Null,
+                messages: vec![Message {
+                    id: None,
+                    idx: 0,
+                    role: MessageRole::User,
+                    author: None,
+                    created_at: Some(1_700_000_000_000 + idx_seed),
+                    content: format!("message-{idx_seed}"),
+                    extra_json: serde_json::Value::Null,
+                    snippets: Vec::new(),
+                }],
+                source_id: LOCAL_SOURCE_ID.into(),
+                origin_host: None,
+            }
+        }
+
+        let dir = TempDir::new().unwrap();
+        let canonical_db = dir.path().join("agent_search.db");
+        let backup_db = dir
+            .path()
+            .join("backups/agent_search.db.20260322T020200.bak");
+        let storage = SqliteStorage::open(&canonical_db).unwrap();
+        seed_historical_db_direct(
+            &backup_db,
+            &[
+                make_conv("/tmp/one.jsonl", 1),
+                make_conv("/tmp/two.jsonl", 2),
+                make_conv("/tmp/three.jsonl", 3),
+            ],
+        );
+
+        let bundle = discover_historical_database_bundles(&canonical_db)
+            .into_iter()
+            .find(|bundle| bundle.root_path == backup_db)
+            .unwrap();
+
+        // Checkpoint high-water mark == backup's max conversation id.
+        let backup_max_id: i64 = FrankenConnection::open(backup_db.to_string_lossy().into_owned())
+            .unwrap()
+            .query_row_map(
+                "SELECT COALESCE(MAX(id), 0) FROM conversations",
+                fparams![],
+                |row| row.get_typed(0),
+            )
+            .unwrap();
+        assert!(backup_max_id > 0, "seeded backup should have conversations");
+        storage
+            .record_historical_bundle_progress(&bundle, "direct-readonly", backup_max_id, 3, 3)
+            .unwrap();
+
+        let outcome = storage.salvage_historical_databases(&canonical_db).unwrap();
+        assert_eq!(
+            outcome.bundles_imported, 0,
+            "fully-checkpointed bundle must not be re-scanned"
+        );
+        assert_eq!(outcome.conversations_imported, 0);
+        assert_eq!(outcome.messages_imported, 0);
+        assert_eq!(
+            storage.list_conversations(10, 0).unwrap().len(),
+            0,
+            "skip path must not import anything"
+        );
+        assert!(
+            storage.historical_bundle_already_imported(&bundle).unwrap(),
+            "skipped bundle must be ledgered as salvaged so future runs short-circuit"
+        );
+
+        let progress_key = SqliteStorage::historical_bundle_progress_key(&bundle);
+        let progress_left: Option<String> = storage
+            .conn
+            .query_row_map(
+                "SELECT value FROM meta WHERE key = ?1",
+                fparams![progress_key.as_str()],
+                |row| row.get_typed(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(
+            progress_left.is_none(),
+            "skip path must clear the bundle progress checkpoint"
+        );
     }
 
     #[test]
