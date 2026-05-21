@@ -87,6 +87,7 @@ type SqliteFtsHydratedRow = (
 const SQLITE_FTS5_HYDRATE_PARAM_CHUNK: usize = 30_000;
 const SQLITE_MAX_VARIABLE_NUMBER: usize = 32_766;
 const SEARCH_SQLITE_HYDRATION_CACHE_KIB: i64 = 4_096;
+const SEMANTIC_EXACT_CHUNK_OVERFETCH_MULTIPLIER: usize = 4;
 
 // Safety: Rc fields inside Connection are not cloned or shared externally.
 // The Mutex<Option<SendConnection>> in SearchClient ensures exclusive access.
@@ -2063,6 +2064,12 @@ struct SemanticCandidateSearchRequest<'a> {
     ann_index: Option<&'a Arc<FsHnswIndex>>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct SemanticCandidateRetryState {
+    has_more_candidates: bool,
+    exact_window_may_omit_competitor: bool,
+}
+
 struct SemanticQueryEmbedding {
     context_token: Arc<()>,
     vector: Vec<f32>,
@@ -3990,6 +3997,36 @@ impl SearchClient {
         collapsed
     }
 
+    fn semantic_exact_candidate_limit(fetch_limit: usize, record_count: usize) -> usize {
+        fetch_limit
+            .saturating_mul(SEMANTIC_EXACT_CHUNK_OVERFETCH_MULTIPLIER)
+            .max(fetch_limit)
+            .min(record_count)
+    }
+
+    fn semantic_window_may_omit_competitor(
+        collapsed: &[VectorSearchResult],
+        fetch_limit: usize,
+        max_omitted_score: Option<f32>,
+    ) -> bool {
+        if fetch_limit == 0 {
+            return false;
+        }
+        let Some(max_omitted_score) = max_omitted_score else {
+            return false;
+        };
+        if collapsed.len() < fetch_limit {
+            return true;
+        }
+        let Some(last_in_requested_window) = collapsed.get(fetch_limit - 1) else {
+            return true;
+        };
+        !last_in_requested_window
+            .score
+            .total_cmp(&max_omitted_score)
+            .is_gt()
+    }
+
     fn record_fs_semantic_hit(
         best_by_message: &mut HashMap<u64, VectorSearchResult>,
         hit: &FsVectorHit,
@@ -4017,46 +4054,92 @@ impl SearchClient {
         embedding: &[f32],
         fetch_limit: usize,
         fs_filter: Option<&dyn FsSearchFilter>,
-    ) -> Result<(Vec<VectorSearchResult>, bool)> {
+    ) -> Result<(Vec<VectorSearchResult>, SemanticCandidateRetryState)> {
         if context.fs_semantic_indexes.len() == 1 {
+            let record_count = context.fs_semantic_index.record_count();
+            let candidate_limit = Self::semantic_exact_candidate_limit(fetch_limit, record_count);
             let fs_hits = context
                 .fs_semantic_index
-                .search_top_k(embedding, fetch_limit, fs_filter)
+                .search_top_k(embedding, candidate_limit, fs_filter)
                 .map_err(|err| anyhow!("frankensearch semantic search failed: {err}"))?;
             let mut best_by_message = HashMap::with_capacity(fs_hits.len());
             for hit in &fs_hits {
                 Self::record_fs_semantic_hit(&mut best_by_message, hit);
             }
+            let collapsed = Self::collapse_semantic_results(best_by_message, candidate_limit);
+            let has_more_candidates =
+                fs_hits.len() >= candidate_limit && candidate_limit < record_count;
+            let max_omitted_score = if has_more_candidates {
+                fs_hits.last().map(|hit| hit.score)
+            } else {
+                None
+            };
+            let exact_window_may_omit_competitor = Self::semantic_window_may_omit_competitor(
+                &collapsed,
+                fetch_limit,
+                max_omitted_score,
+            );
             return Ok((
-                Self::collapse_semantic_results(best_by_message, fetch_limit),
-                fs_hits.len() >= fetch_limit,
+                collapsed,
+                SemanticCandidateRetryState {
+                    has_more_candidates,
+                    exact_window_may_omit_competitor,
+                },
             ));
         }
 
         let mut best_by_message = HashMap::new();
         let mut raw_hits = 0usize;
+        let mut max_omitted_score: Option<f32> = None;
+        let mut has_more_candidates = false;
         for index in context.fs_semantic_indexes.iter() {
-            let shard_limit = index.record_count();
+            let shard_record_count = index.record_count();
+            // Search chunks, then collapse by message. A message can have many
+            // high-scoring chunks, so per-shard top-k chunks alone is not a
+            // proof of per-message top-k. Use a bounded overfetch window and
+            // retry only when the omitted-score bound can still beat the last
+            // collapsed message in the requested window.
+            let shard_limit = Self::semantic_exact_candidate_limit(fetch_limit, shard_record_count);
             if shard_limit == 0 {
                 continue;
             }
             let fs_hits = index
                 .search_top_k(embedding, shard_limit, fs_filter)
                 .map_err(|err| anyhow!("frankensearch sharded semantic search failed: {err}"))?;
+            if fs_hits.len() >= shard_limit
+                && shard_limit < shard_record_count
+                && let Some(last_hit) = fs_hits.last()
+            {
+                has_more_candidates = true;
+                max_omitted_score = Some(
+                    max_omitted_score
+                        .map(|current| current.max(last_hit.score))
+                        .unwrap_or(last_hit.score),
+                );
+            }
             raw_hits = raw_hits.saturating_add(fs_hits.len());
             best_by_message.reserve(fs_hits.len());
             for hit in &fs_hits {
                 Self::record_fs_semantic_hit(&mut best_by_message, hit);
             }
         }
-        let collapsed = Self::collapse_semantic_results(best_by_message, fetch_limit);
+        let candidate_return_limit = Self::semantic_exact_candidate_limit(fetch_limit, raw_hits);
+        let collapsed = Self::collapse_semantic_results(best_by_message, candidate_return_limit);
+        let exact_window_may_omit_competitor =
+            Self::semantic_window_may_omit_competitor(&collapsed, fetch_limit, max_omitted_score);
         tracing::debug!(
             shard_count = context.fs_semantic_indexes.len(),
             raw_hits,
             returned = collapsed.len(),
             "semantic sharded exact merge complete"
         );
-        Ok((collapsed, false))
+        Ok((
+            collapsed,
+            SemanticCandidateRetryState {
+                has_more_candidates,
+                exact_window_may_omit_competitor,
+            },
+        ))
     }
 
     fn search_semantic_candidates(
@@ -4067,7 +4150,7 @@ impl SearchClient {
         request: SemanticCandidateSearchRequest<'_>,
     ) -> Result<(
         Vec<VectorSearchResult>,
-        bool,
+        SemanticCandidateRetryState,
         Option<crate::search::ann_index::AnnSearchStats>,
     )> {
         let mut semantic_filter =
@@ -4119,7 +4202,10 @@ impl SearchClient {
 
                 return Ok((
                     Self::collapse_semantic_results(best_by_message, request.fetch_limit),
-                    tier_hits.len() >= request.fetch_limit,
+                    SemanticCandidateRetryState {
+                        has_more_candidates: tier_hits.len() >= request.fetch_limit,
+                        exact_window_may_omit_competitor: false,
+                    },
                     None,
                 ));
             }
@@ -4199,7 +4285,10 @@ impl SearchClient {
 
             return Ok((
                 Self::collapse_semantic_results(best_by_message, request.fetch_limit),
-                ann_results.len() >= candidate,
+                SemanticCandidateRetryState {
+                    has_more_candidates: ann_results.len() >= candidate,
+                    exact_window_may_omit_competitor: false,
+                },
                 ann_stats,
             ));
         }
@@ -5241,7 +5330,7 @@ impl SearchClient {
                     Ok(self.postprocess_hits_page(hits, query, &filters, limit, offset))
                 };
 
-            let (results, search_was_truncated, mut ann_stats) = self.search_semantic_candidates(
+            let (results, retry_state, mut ann_stats) = self.search_semantic_candidates(
                 &candidate_context,
                 &embedding,
                 &filters,
@@ -5259,9 +5348,9 @@ impl SearchClient {
             }
             let (mut available_hits, mut paged_hits) = finalize_hits(&results)?;
 
-            let needs_retry = available_hits < target_hits
-                && search_was_truncated
-                && initial_fetch_limit < fallback_fetch_limit;
+            let needs_retry = initial_fetch_limit < fallback_fetch_limit
+                && ((available_hits < target_hits && retry_state.has_more_candidates)
+                    || retry_state.exact_window_may_omit_competitor);
 
             if needs_retry {
                 tracing::debug!(
@@ -5270,7 +5359,7 @@ impl SearchClient {
                     available_hits,
                     initial_fetch_limit,
                     fallback_fetch_limit,
-                    "retrying semantic fetch due to post-filter shortfall"
+                    "retrying semantic fetch due to candidate-window shortfall"
                 );
                 let (retry_results, _, retry_ann_stats) = self.search_semantic_candidates(
                     &candidate_context,
@@ -7689,6 +7778,52 @@ mod tests {
             hasher.update(ts.to_string().as_bytes());
         }
         hasher.digest()
+    }
+
+    fn vector_result(message_id: u64, score: f32) -> VectorSearchResult {
+        VectorSearchResult {
+            message_id,
+            chunk_idx: 0,
+            score,
+        }
+    }
+
+    #[test]
+    fn semantic_exact_candidate_limit_overfetches_chunks_without_full_scan() {
+        assert_eq!(SearchClient::semantic_exact_candidate_limit(10, 1_000), 40);
+        assert_eq!(SearchClient::semantic_exact_candidate_limit(10, 25), 25);
+        assert_eq!(SearchClient::semantic_exact_candidate_limit(0, 1_000), 0);
+        assert_eq!(SearchClient::semantic_exact_candidate_limit(10, 0), 0);
+    }
+
+    #[test]
+    fn semantic_window_detects_possible_hidden_chunk_competitors() {
+        let complete = vec![
+            vector_result(1, 0.9),
+            vector_result(2, 0.8),
+            vector_result(3, 0.7),
+        ];
+        assert!(
+            !SearchClient::semantic_window_may_omit_competitor(&complete, 3, Some(0.6)),
+            "strictly lower omitted chunks cannot alter the top message window"
+        );
+        assert!(
+            SearchClient::semantic_window_may_omit_competitor(&complete, 3, Some(0.7)),
+            "equal-score omitted chunks can still alter deterministic tie-breaking"
+        );
+
+        let duplicate_collapsed_shortfall = vec![vector_result(1, 0.9)];
+        assert!(
+            SearchClient::semantic_window_may_omit_competitor(
+                &duplicate_collapsed_shortfall,
+                3,
+                Some(0.2),
+            ),
+            "a short collapsed window means high-scoring duplicate chunks may have hidden messages"
+        );
+        assert!(!SearchClient::semantic_window_may_omit_competitor(
+            &complete, 3, None
+        ));
     }
 
     #[test]

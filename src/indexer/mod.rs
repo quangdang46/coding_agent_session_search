@@ -6634,6 +6634,14 @@ fn live_tantivy_doc_count(index_path: &Path) -> Result<Option<usize>> {
 fn validate_lexical_rebuild_shard_build_result(
     result: &LexicalRebuildShardBuildResult,
 ) -> Result<LexicalRebuildShardMergeArtifact> {
+    crate::search::tantivy::validate_searchable_index_contract(&result.shard_index_path)
+        .with_context(|| {
+            format!(
+                "validating built lexical rebuild shard {} at {}",
+                result.shard.shard_index,
+                result.shard_index_path.display()
+            )
+        })?;
     let observed_docs = live_tantivy_doc_count(&result.shard_index_path)?.ok_or_else(|| {
         anyhow::anyhow!(
             "built lexical rebuild shard {} at {} is not searchable",
@@ -7300,11 +7308,9 @@ struct IncrementalCanonicalLexicalRepairContext {
     tantivy_requires_rebuild: bool,
     observed_tantivy_docs: Option<usize>,
     /// True when a completed lexical-rebuild checkpoint records this exact
-    /// canonical data (matching storage fingerprint). Under the atomic-swap
-    /// publish invariant the live index IS that valid generation, so a sparse
-    /// live-doc reading after an interrupted/OOM-killed rebuild is stale and a
-    /// from-scratch full rebuild would only loop (issue #248,
-    /// coding_agent_session_search-raoug).
+    /// canonical data (matching storage fingerprint). This is diagnostic
+    /// context only: SQLite remains authoritative, and a fresh sparse live-doc
+    /// observation must still repair the derived lexical index.
     published_index_validated_for_current_data: bool,
 }
 
@@ -7357,18 +7363,12 @@ fn choose_incremental_canonical_lexical_repair_plan(
 
     let observed_tantivy_docs = context.observed_tantivy_docs?;
     if observed_tantivy_docs < context.canonical_messages {
-        // #248 (coding_agent_session_search-raoug): if a completed rebuild
-        // checkpoint already covers exactly this canonical data (matching storage
-        // fingerprint), the live index IS that valid published generation under
-        // the atomic-swap invariant. A sparse live-doc reading here is stale
-        // (e.g. a later rebuild was OOM-killed mid-merge), and a from-scratch
-        // `deferred_authoritative_db_rebuild` would just loop on every restart.
-        // Trust the checkpoint and skip the redundant full rebuild. (A genuinely
-        // missing/unopenable index is handled above via `tantivy_requires_rebuild`
-        // and is unaffected; changed data shifts the fingerprint and falls through
-        // to a rebuild.)
         if context.published_index_validated_for_current_data {
-            return None;
+            tracing::warn!(
+                canonical_messages = context.canonical_messages,
+                observed_tantivy_docs,
+                "completed lexical checkpoint matches the canonical DB, but the live lexical index is sparse; repairing derived search assets from SQLite"
+            );
         }
         return Some(IncrementalCanonicalLexicalRepairPlan {
             canonical_messages: context.canonical_messages,
@@ -11234,7 +11234,18 @@ pub fn run_index(
         if !tantivy_requires_rebuild {
             match crate::search::tantivy::searchable_index_summary(&index_path) {
                 Ok(Some(summary)) => {
-                    observed_tantivy_docs = Some(summary.docs);
+                    if let Err(e) =
+                        crate::search::tantivy::validate_searchable_index_contract(&index_path)
+                    {
+                        tracing::warn!(
+                            error = %e,
+                            path = %index_path.display(),
+                            "tantivy contract preflight failed; forcing rebuild"
+                        );
+                        tantivy_requires_rebuild = true;
+                    } else {
+                        observed_tantivy_docs = Some(summary.docs);
+                    }
                 }
                 Ok(None) => {
                     tantivy_requires_rebuild = true;
@@ -11475,20 +11486,30 @@ pub fn run_index(
             canonical_messages: 0,
             tantivy_requires_rebuild,
             observed_tantivy_docs,
-            // #248: recognize an already-published, still-valid lexical generation
-            // (completed checkpoint + matching storage fingerprint) so a sparse
-            // live-doc reading after an OOM-killed shard merge does not trigger a
-            // looping from-scratch full rebuild (coding_agent_session_search-raoug).
-            published_index_validated_for_current_data:
-                published_lexical_index_validated_for_current_data(&index_path, &opts.db_path),
+            // Placeholder: validating the published index opens the DB read-only
+            // and runs COUNT scans, so it is computed lazily below — only when the
+            // live index actually looks sparse — to keep normal index/watch runs
+            // cheap (#248, coding_agent_session_search-raoug).
+            published_index_validated_for_current_data: false,
         };
         let incremental_canonical_lexical_repair = if canonical_sessions_before_salvage > 0
             && should_evaluate_incremental_canonical_lexical_repair(&repair_context)
         {
             let canonical_messages = count_total_messages_exact(&storage)?;
+            // #248 (coding_agent_session_search-raoug): only pay for the
+            // published-index validation (a read-only DB open + fingerprint COUNT
+            // scans) when the live index actually looks sparse — i.e. when it would
+            // otherwise trigger a from-scratch rebuild. A genuinely missing/invalid
+            // index rebuilds regardless (handled in
+            // choose_incremental_canonical_lexical_repair_plan via
+            // tantivy_requires_rebuild), so skip the check then.
+            let published_index_validated_for_current_data = !tantivy_requires_rebuild
+                && observed_tantivy_docs.is_some_and(|docs| docs < canonical_messages)
+                && published_lexical_index_validated_for_current_data(&index_path, &opts.db_path);
             choose_incremental_canonical_lexical_repair_plan(
                 IncrementalCanonicalLexicalRepairContext {
                     canonical_messages,
+                    published_index_validated_for_current_data,
                     ..repair_context
                 },
             )
@@ -14898,12 +14919,14 @@ fn finalize_staged_lexical_rebuild_publish_artifact_from_artifacts(
             publish_path = %publish_path.display(),
             "reusing already-final staged lexical rebuild artifact without redundant final merge"
         );
-        if !crate::search::tantivy::searchable_index_exists(&publish_path) {
-            return Err(anyhow::anyhow!(
-                "single-input staged lexical rebuild artifact is not searchable: {}",
-                publish_path.display()
-            ));
-        }
+        crate::search::tantivy::validate_searchable_index_contract(&publish_path).with_context(
+            || {
+                format!(
+                    "single-input staged lexical rebuild artifact is not searchable: {}",
+                    publish_path.display()
+                )
+            },
+        )?;
         return Ok(LexicalRebuildFinalMergeArtifact {
             publish_path,
             docs: artifact.docs,
@@ -16096,6 +16119,12 @@ fn rebuild_tantivy_from_db_via_staged_shards(
     publish_staged_lexical_index(&final_merge_artifact.publish_path, index_path)?;
     log_lexical_generation_manifest_published(&generation_manifest, &equivalence_evidence);
 
+    crate::search::tantivy::validate_searchable_index_contract(index_path).with_context(|| {
+        format!(
+            "validating staged lexical rebuild after publish: {}",
+            index_path.display()
+        )
+    })?;
     if let Some(observed_tantivy_docs) = live_tantivy_doc_count(index_path)?
         && observed_tantivy_docs != indexed_docs
     {
@@ -17066,6 +17095,12 @@ fn rebuild_tantivy_from_db_with_options(
     }
 
     drop(t_index);
+    crate::search::tantivy::validate_searchable_index_contract(&index_path).with_context(|| {
+        format!(
+            "validating lexical rebuild after commit: {}",
+            index_path.display()
+        )
+    })?;
     if let Some(observed_tantivy_docs) = live_tantivy_doc_count(&index_path)?
         && observed_tantivy_docs != indexed_docs
     {
@@ -22593,13 +22628,8 @@ pub mod persist {
         }
 
         #[test]
-        fn incremental_canonical_lexical_repair_plan_skips_rebuild_when_published_index_validated()
+        fn incremental_canonical_lexical_repair_plan_repairs_sparse_live_index_despite_checkpoint()
         {
-            // #248 (coding_agent_session_search-raoug): a sparse live-doc reading
-            // must NOT trigger a from-scratch rebuild when a completed checkpoint
-            // already validated the published index for exactly this data. The
-            // sparse reading is stale (e.g. a later rebuild was OOM-killed mid
-            // merge) and a full rebuild would loop on every restart.
             assert_eq!(
                 crate::indexer::choose_incremental_canonical_lexical_repair_plan(
                     crate::indexer::IncrementalCanonicalLexicalRepairContext {
@@ -22614,8 +22644,12 @@ pub mod persist {
                         published_index_validated_for_current_data: true,
                     },
                 ),
-                None,
-                "a validated published generation must suppress the sparse-triggered full rebuild"
+                Some(crate::indexer::IncrementalCanonicalLexicalRepairPlan {
+                    canonical_messages: 42,
+                    observed_tantivy_docs: Some(3),
+                    reason: "incremental_index_repairs_sparse_tantivy_from_authoritative_canonical_db_before_scan",
+                }),
+                "a matching checkpoint is not proof that the current live derived index covers SQLite"
             );
 
             // The validation flag must NOT mask a genuinely missing/unopenable
