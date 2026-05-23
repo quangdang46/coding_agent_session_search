@@ -100,7 +100,10 @@ impl ExportEngine {
                 Connection::open(&output_path).context("Failed to create output database")?;
 
             dest.execute_batch(
-                "PRAGMA journal_mode = WAL;
+                // Pages exports are encrypted/copied as one portable SQLite file.
+                // WAL would allow committed schema/data to remain in a sidecar
+                // that is not part of the encrypted payload.
+                "PRAGMA journal_mode = 'delete';
                  PRAGMA synchronous = NORMAL;
                  PRAGMA busy_timeout = 5000;
                  PRAGMA foreign_keys = ON;",
@@ -185,30 +188,27 @@ impl ExportEngine {
                 // (otherwise the exported archive silently omits them).
                 // Agent filter becomes an EXISTS guard against the agents
                 // table so it works correctly without the joined column.
-                let mut query = String::from(
-                "SELECT c.id, COALESCE(a.slug, 'unknown') as agent, w.path as workspace, c.title, c.source_path, c.started_at, c.ended_at,
-             (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) as message_count,
-             c.metadata_json
-             FROM conversations c
+                let mut from_where = String::from(
+                    " FROM conversations c
              LEFT JOIN agents a ON c.agent_id = a.id
              LEFT JOIN workspaces w ON c.workspace_id = w.id
-             WHERE 1=1"
-            );
+             WHERE 1=1",
+                );
                 let mut params: Vec<ParamValue> = Vec::new();
 
                 if let Some(agents) = &self.filter.agents {
                     if agents.is_empty() {
-                        query.push_str(" AND 1=0");
+                        from_where.push_str(" AND 1=0");
                     } else {
-                        query.push_str(" AND EXISTS (SELECT 1 FROM agents a2 WHERE a2.id = c.agent_id AND a2.slug IN (");
+                        from_where.push_str(" AND EXISTS (SELECT 1 FROM agents a2 WHERE a2.id = c.agent_id AND a2.slug IN (");
                         for (i, agent) in agents.iter().enumerate() {
                             if i > 0 {
-                                query.push_str(", ");
+                                from_where.push_str(", ");
                             }
-                            query.push('?');
+                            from_where.push('?');
                             params.push(ParamValue::from(agent.clone()));
                         }
-                        query.push_str("))");
+                        from_where.push_str("))");
                     }
                 }
 
@@ -216,32 +216,39 @@ impl ExportEngine {
                 // Assuming strict matching for now.
                 if let Some(workspaces) = &self.filter.workspaces {
                     if workspaces.is_empty() {
-                        query.push_str(" AND 1=0");
+                        from_where.push_str(" AND 1=0");
                     } else {
-                        query.push_str(" AND w.path IN (");
+                        from_where.push_str(" AND w.path IN (");
                         for (i, ws) in workspaces.iter().enumerate() {
                             if i > 0 {
-                                query.push_str(", ");
+                                from_where.push_str(", ");
                             }
-                            query.push('?');
+                            from_where.push('?');
                             params.push(ParamValue::from(ws.to_string_lossy().to_string()));
                         }
-                        query.push(')');
+                        from_where.push(')');
                     }
                 }
 
                 if let Some(since) = self.filter.since {
-                    query.push_str(" AND c.started_at >= ?");
+                    from_where.push_str(" AND c.started_at >= ?");
                     params.push(ParamValue::from(since.timestamp_millis()));
                 }
 
                 if let Some(until) = self.filter.until {
-                    query.push_str(" AND c.started_at <= ?");
+                    from_where.push_str(" AND c.started_at <= ?");
                     params.push(ParamValue::from(until.timestamp_millis()));
                 }
 
-                // Count total for progress
-                let count_query = format!("SELECT COUNT(*) FROM ({})", query);
+                let query = format!(
+                    "SELECT c.id, COALESCE(a.slug, 'unknown') as agent, w.path as workspace, c.title, c.source_path, c.started_at, c.ended_at,
+             (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) as message_count,
+             c.metadata_json
+             {from_where}"
+                );
+
+                let mut count_query = String::from("SELECT COUNT(*)");
+                count_query.push_str(&from_where);
                 let total_convs: usize =
                     src.query_row_map(&count_query, &params, |row: &FrankenRow| {
                         row.get_typed::<i64>(0).map(|v| v as usize)

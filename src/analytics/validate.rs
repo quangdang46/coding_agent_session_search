@@ -15,7 +15,8 @@ use frankensqlite::compat::{ConnectionExt, RowExt};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-use super::query::table_exists;
+use super::query::{query_breakdown, query_tokens_timeseries, table_exists};
+use super::types::{AnalyticsFilter, Dim, GroupBy, Metric};
 
 // ---------------------------------------------------------------------------
 // Output types
@@ -1095,7 +1096,8 @@ pub struct PerfMeasurement {
 pub fn perf_query_guardrail(conn: &Connection) -> PerfMeasurement {
     let start = std::time::Instant::now();
 
-    // Run a basic rollup query — same as query_tokens_timeseries with no filters.
+    // Exercise the same query path used by `cass analytics tokens` so a
+    // malformed rollup table cannot pass a shallow schema probe.
     let budget_ms = 500_u64; // 500ms budget for rollup timeseries query
     if !table_exists(conn, "usage_daily") {
         let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -1109,18 +1111,20 @@ pub fn perf_query_guardrail(conn: &Connection) -> PerfMeasurement {
         };
     }
 
-    let sql = "SELECT COUNT(DISTINCT day_id) FROM usage_daily";
-    let row_count = conn.query_row_map(sql, &[], |r: &Row| r.get_typed::<i64>(0));
+    let result = query_tokens_timeseries(conn, &AnalyticsFilter::default(), GroupBy::Day);
     let elapsed_ms = start.elapsed().as_millis() as u64;
 
-    match row_count {
-        Ok(row_count) => PerfMeasurement {
+    match result {
+        Ok(result) => PerfMeasurement {
             id: "perf.query_timeseries".into(),
             elapsed_ms,
             budget_ms,
             within_budget: elapsed_ms <= budget_ms,
             error: None,
-            details: format!("Timeseries rollup query: {row_count} day buckets in {elapsed_ms}ms"),
+            details: format!(
+                "Timeseries rollup query: {} day buckets in {elapsed_ms}ms",
+                result.buckets.len()
+            ),
         },
         Err(err) => PerfMeasurement {
             id: "perf.query_timeseries".into(),
@@ -1150,18 +1154,26 @@ pub fn perf_breakdown_guardrail(conn: &Connection) -> PerfMeasurement {
         };
     }
 
-    let sql = "SELECT COUNT(DISTINCT agent_slug) FROM usage_daily";
-    let row_count = conn.query_row_map(sql, &[], |r: &Row| r.get_typed::<i64>(0));
+    let result = query_breakdown(
+        conn,
+        &AnalyticsFilter::default(),
+        Dim::Agent,
+        Metric::ApiTotal,
+        25,
+    );
     let elapsed_ms = start.elapsed().as_millis() as u64;
 
-    match row_count {
-        Ok(row_count) => PerfMeasurement {
+    match result {
+        Ok(result) => PerfMeasurement {
             id: "perf.query_breakdown".into(),
             elapsed_ms,
             budget_ms,
             within_budget: elapsed_ms <= budget_ms,
             error: None,
-            details: format!("Breakdown query: {row_count} agent groups in {elapsed_ms}ms"),
+            details: format!(
+                "Breakdown query: {} agent groups in {elapsed_ms}ms",
+                result.rows.len()
+            ),
         },
         Err(err) => PerfMeasurement {
             id: "perf.query_breakdown".into(),
