@@ -11,14 +11,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
+fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
+    match result {
+        Ok(value) => value,
+        Err(err) => std::panic::panic_any(format!("{context}: {err}")),
+    }
+}
+
 fn fixture(path: &str) -> PathBuf {
-    fs::canonicalize(PathBuf::from(path)).expect("fixture path")
+    must(fs::canonicalize(PathBuf::from(path)), "fixture path")
 }
 
 fn isolated_home() -> tempfile::TempDir {
-    let home = tempfile::TempDir::new().unwrap();
-    fs::write(home.path().join(".bashrc"), "").unwrap();
-    fs::write(home.path().join(".zshrc"), "").unwrap();
+    let home = must(tempfile::TempDir::new(), "create isolated home");
+    must(fs::write(home.path().join(".bashrc"), ""), "seed bashrc");
+    must(fs::write(home.path().join(".zshrc"), ""), "seed zshrc");
     home
 }
 
@@ -55,6 +62,11 @@ fn make_executable_script(path: &std::path::Path, body: &str) {
     let mut perms = fs::metadata(path).unwrap().permissions();
     perms.set_mode(0o755);
     fs::set_permissions(path, perms).unwrap();
+}
+
+#[cfg(not(unix))]
+fn make_executable_script(path: &std::path::Path, body: &str) {
+    drop(fs::write(path, body));
 }
 
 struct HttpFixtureServer {

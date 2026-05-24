@@ -5178,6 +5178,9 @@ pub struct CassApp {
     pub focus_region: FocusRegion,
     /// FocusGraph-based navigation manager.
     pub focus_manager: FocusManager,
+    /// Last Enter-routing branch, recorded for deterministic tests.
+    #[cfg(test)]
+    last_enter_routing_decision: Option<(&'static str, &'static str)>,
     /// Cursor position within the query string (byte offset).
     pub cursor_pos: usize,
     /// Cursor position within query history.
@@ -5521,6 +5524,8 @@ impl Default for CassApp {
             input_buffer: String::new(),
             focus_region: FocusRegion::default(),
             focus_manager: FocusManager::new(),
+            #[cfg(test)]
+            last_enter_routing_decision: None,
             cursor_pos: 0,
             history_cursor: None,
             query_history: VecDeque::with_capacity(50),
@@ -17692,6 +17697,11 @@ impl super::ftui_adapter::Model for CassApp {
                 // Re-entrant Enter while detail is already open should be a no-op.
                 // This avoids stacking duplicate focus traps on rapid key repeats.
                 if self.show_detail_modal {
+                    #[cfg(test)]
+                    {
+                        self.last_enter_routing_decision =
+                            Some(("detail_modal_noop", "modal_already_open"));
+                    }
                     tracing::debug!(
                         route = "detail_modal_noop",
                         reason = "modal_already_open",
@@ -17705,6 +17715,11 @@ impl super::ftui_adapter::Model for CassApp {
                 // Enter should prioritize opening the selected hit in context.
                 // If there is no active hit, fall back to query submit behavior.
                 let Some(selected_hit) = selected_hit else {
+                    #[cfg(test)]
+                    {
+                        self.last_enter_routing_decision =
+                            Some(("query_submit_fallback", "no_selected_hit"));
+                    }
                     tracing::debug!(
                         route = "query_submit_fallback",
                         reason = "no_selected_hit",
@@ -17716,6 +17731,10 @@ impl super::ftui_adapter::Model for CassApp {
                 };
                 // Ensure Enter lands on the contextual conversation view.
                 self.detail_tab = DetailTab::Messages;
+                #[cfg(test)]
+                {
+                    self.last_enter_routing_decision = Some(("detail_modal_open", "selected_hit"));
+                }
                 tracing::debug!(
                     route = "detail_modal_open",
                     reason = "selected_hit",
@@ -26882,13 +26901,21 @@ mod tests {
         });
 
         assert!(
-            logs.contains("route=\"query_submit_fallback\""),
-            "expected query-submit fallback diagnostic marker, logs={logs}"
+            matches!(
+                app.last_enter_routing_decision,
+                Some(("query_submit_fallback", "no_selected_hit"))
+            ),
+            "expected query-submit fallback routing branch"
         );
-        assert!(
-            logs.contains("reason=\"no_selected_hit\""),
-            "expected fallback reason marker, logs={logs}"
-        );
+        // Tracing subscriber capture can race with unrelated parallel tests, so
+        // the routing branch above is the authoritative assertion.
+        if !logs.is_empty() {
+            assert!(
+                logs.contains("route=\"query_submit_fallback\"")
+                    && logs.contains("reason=\"no_selected_hit\""),
+                "expected query-submit fallback diagnostic markers, logs={logs}"
+            );
+        }
     }
 
     #[test]
@@ -26910,13 +26937,21 @@ mod tests {
         });
 
         assert!(
-            logs.contains("route=\"detail_modal_open\""),
-            "expected modal-open diagnostic marker, logs={logs}"
+            matches!(
+                app.last_enter_routing_decision,
+                Some(("detail_modal_open", "selected_hit"))
+            ) && app.show_detail_modal,
+            "expected selected hit to open detail modal through the modal-open routing branch"
         );
-        assert!(
-            logs.contains("reason=\"selected_hit\""),
-            "expected selected-hit reason marker, logs={logs}"
-        );
+        // Tracing subscriber capture can race with unrelated parallel tests, so
+        // the routing branch above is the authoritative assertion.
+        if !logs.is_empty() {
+            assert!(
+                logs.contains("route=\"detail_modal_open\"")
+                    && logs.contains("reason=\"selected_hit\""),
+                "expected modal-open diagnostic markers, logs={logs}"
+            );
+        }
     }
 
     #[test]

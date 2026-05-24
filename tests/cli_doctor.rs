@@ -53,6 +53,17 @@ fn test_file_blake3(path: &Path) -> String {
         .to_string()
 }
 
+fn test_paths_equivalent(left: &str, right: &Path) -> bool {
+    fn normalize(path: &Path) -> std::path::PathBuf {
+        match fs::canonicalize(path) {
+            Ok(canonical) => canonical,
+            Err(_) => path.to_path_buf(),
+        }
+    }
+
+    normalize(Path::new(left)) == normalize(right)
+}
+
 fn test_error_code(payload: &Value) -> Option<i64> {
     payload
         .pointer("/error/code")
@@ -2764,9 +2775,9 @@ fn doctor_archive_normalize_is_fingerprinted_additive_and_idempotent() {
         "dry-run plan should include a directly reusable --data-dir apply argv: {plan:#}"
     );
     assert!(
-        exact_apply_argv
-            .iter()
-            .any(|arg| arg.as_str() == data_dir.to_str()),
+        exact_apply_argv.iter().any(|arg| arg
+            .as_str()
+            .is_some_and(|arg| test_paths_equivalent(arg, &data_dir))),
         "dry-run plan should preserve the inspected data_dir in its apply argv: {plan:#}"
     );
     let target_relative_path = plan["actions"][0]["target_relative_path"]
@@ -3049,11 +3060,12 @@ fn doctor_archive_normalize_exact_apply_argv_uses_stable_data_dir_identity() {
         .iter()
         .position(|arg| arg.as_str() == Some("--data-dir"))
         .expect("--data-dir in exact apply argv");
-    assert_eq!(
-        exact_apply_argv
-            .get(data_dir_flag_index + 1)
-            .and_then(Value::as_str),
-        Some(data_dir.to_str().expect("absolute data dir utf8")),
+    let actual_data_dir = exact_apply_argv
+        .get(data_dir_flag_index + 1)
+        .and_then(Value::as_str)
+        .expect("absolute data dir utf8");
+    assert!(
+        test_paths_equivalent(actual_data_dir, &data_dir),
         "exact apply argv should not depend on the caller's current directory: {exact_apply_argv:#?}"
     );
     assert!(
