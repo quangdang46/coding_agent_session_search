@@ -262,6 +262,9 @@ fn ensure_parent_chain_has_no_symlinks(path: &Path) -> Result<()> {
             Ok(metadata) => {
                 let file_type = metadata.file_type();
                 if file_type.is_symlink() {
+                    if is_allowed_system_symlink_ancestor(&ancestor) {
+                        continue;
+                    }
                     bail!(
                         "asciicast output parent must not contain symlinks: {}",
                         ancestor.display()
@@ -284,6 +287,16 @@ fn ensure_parent_chain_has_no_symlinks(path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn is_allowed_system_symlink_ancestor(path: &Path) -> bool {
+    path == Path::new("/var") || path == Path::new("/tmp")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_allowed_system_symlink_ancestor(_path: &Path) -> bool {
+    false
 }
 
 fn detect_terminal_size() -> (u16, u16) {

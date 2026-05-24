@@ -2066,6 +2066,9 @@ fn ensure_parent_chain_has_no_symlinks(path: &Path) -> anyhow::Result<()> {
             Ok(metadata) => {
                 let file_type = metadata.file_type();
                 if file_type.is_symlink() {
+                    if is_allowed_system_symlink_ancestor(&ancestor) {
+                        continue;
+                    }
                     return Err(anyhow::anyhow!(
                         "latency trace output directory must not contain symlinks: {}",
                         ancestor.display()
@@ -2089,6 +2092,16 @@ fn ensure_parent_chain_has_no_symlinks(path: &Path) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn is_allowed_system_symlink_ancestor(path: &Path) -> bool {
+    path == Path::new("/var") || path == Path::new("/tmp")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_allowed_system_symlink_ancestor(_path: &Path) -> bool {
+    false
 }
 
 #[cfg(test)]

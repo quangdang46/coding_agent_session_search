@@ -95,6 +95,20 @@ fn isolated_search_demo_data() -> Result<TempDir, Box<dyn Error>> {
     Ok(tmp)
 }
 
+fn isolated_search_demo_data_for_current_workspace() -> Result<TempDir, Box<dyn Error>> {
+    use frankensqlite::compat::ConnectionExt;
+
+    let tmp = isolated_search_demo_data()?;
+    let current_workspace = std::env::current_dir()?.to_string_lossy().into_owned();
+    let db_path = tmp.path().join("agent_search.db");
+    let conn = frankensqlite::Connection::open(db_path.to_string_lossy().into_owned())?;
+    conn.execute_compat(
+        "UPDATE workspaces SET path = ?1 WHERE id = 1",
+        frankensqlite::params![current_workspace],
+    )?;
+    Ok(tmp)
+}
+
 fn decoded_cursor_offset(cursor: &str) -> u64 {
     let decoded = BASE64_STANDARD
         .decode(cursor)
@@ -980,45 +994,42 @@ fn html_export_aliases_route_to_export_html_command() {
 
 #[test]
 fn current_session_aliases_route_to_sessions_current() {
+    let data_dir = isolated_search_demo_data_for_current_workspace().unwrap();
+    let data_dir_arg = data_dir.path().to_string_lossy().into_owned();
+    let expected_workspace = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
     for args in [
-        vec![
-            "current",
-            "--json",
-            "--data-dir",
-            "tests/fixtures/search_demo_data",
-        ],
+        vec!["current", "--json", "--data-dir", data_dir_arg.as_str()],
         vec![
             "current-session",
             "--json",
             "--data-dir",
-            "tests/fixtures/search_demo_data",
+            data_dir_arg.as_str(),
         ],
         vec![
             "current_session",
             "--json",
             "--data-dir",
-            "tests/fixtures/search_demo_data",
+            data_dir_arg.as_str(),
         ],
         vec![
             "sessions",
             "current",
             "--json",
             "--data-dir",
-            "tests/fixtures/search_demo_data",
+            data_dir_arg.as_str(),
         ],
         vec![
             "session",
             "current",
             "--json",
             "--data-dir",
-            "tests/fixtures/search_demo_data",
+            data_dir_arg.as_str(),
         ],
-        vec![
-            "--json",
-            "current",
-            "--data-dir",
-            "tests/fixtures/search_demo_data",
-        ],
+        vec!["--json", "current", "--data-dir", data_dir_arg.as_str()],
     ] {
         let mut cmd = base_cmd();
         cmd.args(args);
@@ -1031,7 +1042,7 @@ fn current_session_aliases_route_to_sessions_current() {
         assert_eq!(sessions[0]["agent"].as_str(), Some("aider"));
         assert_eq!(
             sessions[0]["workspace"].as_str(),
-            Some("/data/projects/coding_agent_session_search")
+            Some(expected_workspace.as_str())
         );
     }
 }

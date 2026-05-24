@@ -453,6 +453,9 @@ fn ensure_existing_parent_ancestors_are_real_dirs(path: &Path, label: &str) -> R
             Ok(metadata) => {
                 let file_type = metadata.file_type();
                 if file_type.is_symlink() {
+                    if is_allowed_system_symlink_ancestor(&ancestor) {
+                        continue;
+                    }
                     bail!(
                         "{label} parent must not contain symlinks: {}",
                         ancestor.display()
@@ -472,6 +475,16 @@ fn ensure_existing_parent_ancestors_are_real_dirs(path: &Path, label: &str) -> R
     }
 
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn is_allowed_system_symlink_ancestor(path: &Path) -> bool {
+    path == Path::new("/var") || path == Path::new("/tmp")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_allowed_system_symlink_ancestor(_path: &Path) -> bool {
+    false
 }
 
 fn replace_dir_from_temp(temp_dir: &Path, final_dir: &Path) -> Result<()> {

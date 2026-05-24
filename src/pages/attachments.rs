@@ -625,6 +625,9 @@ fn ensure_existing_ancestors_have_no_symlinks(path: &Path, label: &str) -> Resul
             Ok(metadata) => {
                 let file_type = metadata.file_type();
                 if file_type.is_symlink() {
+                    if is_allowed_system_symlink_ancestor(&ancestor) {
+                        continue;
+                    }
                     bail!("{label} must not contain symlinks: {}", ancestor.display());
                 }
                 if !file_type.is_dir() {
@@ -643,6 +646,16 @@ fn ensure_existing_ancestors_have_no_symlinks(path: &Path, label: &str) -> Resul
     }
 
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn is_allowed_system_symlink_ancestor(path: &Path) -> bool {
+    path == Path::new("/var") || path == Path::new("/tmp")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_allowed_system_symlink_ancestor(_path: &Path) -> bool {
+    false
 }
 
 fn write_ciphertext_file(path: &Path, bytes: &[u8], label: &str) -> Result<()> {

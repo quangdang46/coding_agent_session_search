@@ -1137,7 +1137,7 @@ identity_file = "{identity}"
 paths = ["/root/.claude/projects"]
 sync_schedule = "manual"
 
-[[path_mappings]]
+[[sources.path_mappings]]
 from = "/root"
 to = "/home/testuser"
 "#,

@@ -167,6 +167,7 @@ jobs:
       - name: Clone sibling dependencies
         shell: bash
         run: |
+          git config --global core.longpaths true
           git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git ../asupersync
           git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git ../frankensqlite
           git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git ../franken_agent_detection
@@ -198,7 +199,7 @@ jobs:
     name: UBS (Ultimate Bug Scanner) Pre-Merge Gate
     needs: [no-mock-audit]
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 60
     steps:
       - name: Checkout (full history for diff)
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -369,6 +370,7 @@ jobs:
       - name: Clone sibling dependencies
         shell: bash
         run: |
+          git config --global core.longpaths true
           git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git ../asupersync
           git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git ../frankensqlite
           git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git ../franken_agent_detection

@@ -1698,7 +1698,7 @@ pub enum MappingsAction {
     /// List path mappings for a source
     List {
         /// Source name
-        source: String,
+        source: Option<String>,
         /// Output as JSON (`--robot` also works)
         #[arg(long, visible_alias = "robot")]
         json: bool,
@@ -85914,7 +85914,7 @@ fn run_mappings_command(action: MappingsAction, cli: &Cli) -> CliResult<()> {
     match action {
         MappingsAction::List { source, json } => {
             let structured_format = resolve_subcommand_structured_format(cli, json);
-            run_mappings_list(&source, structured_format)?;
+            run_mappings_list(source.as_deref(), structured_format)?;
         }
         MappingsAction::Add {
             source,
@@ -85939,7 +85939,10 @@ fn run_mappings_command(action: MappingsAction, cli: &Cli) -> CliResult<()> {
 }
 
 /// List path mappings for a source (P6.3)
-fn run_mappings_list(source_name: &str, output_format: Option<RobotFormat>) -> CliResult<()> {
+fn run_mappings_list(
+    source_name: Option<&str>,
+    output_format: Option<RobotFormat>,
+) -> CliResult<()> {
     use crate::sources::config::SourcesConfig;
 
     let config = SourcesConfig::load().map_err(|e| CliError {
@@ -85947,14 +85950,6 @@ fn run_mappings_list(source_name: &str, output_format: Option<RobotFormat>) -> C
         kind: CliErrorKind::Config.kind_str(),
         message: format!("Failed to load sources config: {e}"),
         hint: None,
-        retryable: false,
-    })?;
-
-    let source = config.find_source(source_name).ok_or_else(|| CliError {
-        code: 12,
-        kind: CliErrorKind::Source.kind_str(),
-        message: format!("Source '{}' not found", source_name),
-        hint: Some("Use 'cass sources list' to see available sources".into()),
         retryable: false,
     })?;
 
@@ -85966,36 +85961,73 @@ fn run_mappings_list(source_name: &str, output_format: Option<RobotFormat>) -> C
         }
     });
 
-    if let Some(_fmt) = structured_format {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "source": source_name,
-                "mappings": source.path_mappings,
-            }))
-            .unwrap_or_default()
-        );
+    let sources = if let Some(source_name) = source_name {
+        let source = config.find_source(source_name).ok_or_else(|| CliError {
+            code: 12,
+            kind: CliErrorKind::Source.kind_str(),
+            message: format!("Source '{}' not found", source_name),
+            hint: Some("Use 'cass sources list' to see available sources".into()),
+            retryable: false,
+        })?;
+        vec![source]
     } else {
-        println!("Path mappings for source '{}':", source_name);
-        println!();
+        config.sources.iter().collect()
+    };
 
-        if source.path_mappings.is_empty() {
-            println!("  No path mappings configured.");
-            println!();
-            println!("Add mappings with:");
+    if let Some(_fmt) = structured_format {
+        if let Some(source_name) = source_name {
+            let source = sources[0];
             println!(
-                "  cass sources mappings add {} --from /remote/path --to /local/path",
-                source_name
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "source": source_name,
+                    "mappings": &source.path_mappings,
+                }))
+                .unwrap_or_default()
             );
         } else {
-            for (idx, mapping) in source.path_mappings.iter().enumerate() {
-                println!("  [{}] {} → {}", idx, mapping.from, mapping.to);
-                if let Some(ref agents) = mapping.agents {
-                    println!("      agents: {}", agents.join(", "));
+            let source_mappings: Vec<_> = sources
+                .iter()
+                .map(|source| {
+                    serde_json::json!({
+                        "source": source.name,
+                        "mappings": &source.path_mappings,
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "sources": source_mappings,
+                }))
+                .unwrap_or_default()
+            );
+        }
+    } else if sources.is_empty() {
+        println!("No sources configured.");
+    } else {
+        for source in sources {
+            println!("Path mappings for source '{}':", source.name);
+            println!();
+
+            if source.path_mappings.is_empty() {
+                println!("  No path mappings configured.");
+                println!();
+                println!("Add mappings with:");
+                println!(
+                    "  cass sources mappings add {} --from /remote/path --to /local/path",
+                    source.name
+                );
+            } else {
+                for (idx, mapping) in source.path_mappings.iter().enumerate() {
+                    println!("  [{}] {} -> {}", idx, mapping.from, mapping.to);
+                    if let Some(ref agents) = mapping.agents {
+                        println!("      agents: {}", agents.join(", "));
+                    }
                 }
             }
+            println!();
         }
-        println!();
     }
 
     Ok(())
