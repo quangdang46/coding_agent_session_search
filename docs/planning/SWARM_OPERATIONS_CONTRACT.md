@@ -142,6 +142,57 @@ The work packet closeout section may include commands such as `br close ...`,
 but these remain suggestions. Agents still need an artifact-backed proof summary,
 an Agent Mail closeout, and the normal Beads state transition.
 
+## Coordination Lint Surface
+
+`cass swarm lint --json` is a read-only protocol checker over the same Beads,
+Agent Mail, git, reservation, and evidence snapshots used by status and
+work-packet. It detects hygiene problems before an agent starts or closes work:
+missing start mail, missing closeout mail, unacknowledged `ack_required`
+messages, stale or dead-agent reservations, bead status mismatches, missing
+close reasons, missing proof references, dirty peer files, unsafe takeover
+language, and unavailable Agent Mail.
+
+The lint command never acknowledges messages, sends mail, updates Beads,
+releases reservations, edits files, or runs git commands. Its `safe_next_action`
+fields are suggestions only.
+
+```json
+{
+  "schema_version": "cass.swarm.coordination_lint.v1",
+  "status": "ok",
+  "summary": {
+    "finding_count": 0,
+    "error_count": 0,
+    "warning_count": 0,
+    "info_count": 0,
+    "mutation_performed": false,
+    "recommended_action": "coordination-clean"
+  },
+  "findings": [],
+  "mutation_contract": {
+    "read_only": true,
+    "agent_mail_mutations": false,
+    "bead_mutations": false,
+    "reservation_mutations": false,
+    "git_mutations": false,
+    "safe_next_actions_are_suggestions": true
+  }
+}
+```
+
+Findings are deterministic and metadata-only:
+
+| Field | Type | Contract |
+|-------|------|----------|
+| `id` | string | Stable `code:subject_kind:subject_id` identifier. |
+| `severity` | enum | `error`, `warning`, or `info`. |
+| `code` | string | Branchable finding code such as `missing-closeout-mail`. |
+| `subject_kind` | string | `bead`, `message`, `reservation`, `provider`, or `git`. |
+| `subject_id` | string | Bead id, message id/thread id, reservation reason, or provider name. |
+| `evidence_refs` | array[string] | Provider paths used for the finding. |
+| `safe_next_action` | string | Suggested non-mutating or explicitly operator-chosen next step. |
+| `redacted_snippet` | string/null | Optional redacted subject/snippet only; full mail bodies stay omitted. |
+
 ## Exit Semantics
 
 | Exit | Meaning | JSON shape |

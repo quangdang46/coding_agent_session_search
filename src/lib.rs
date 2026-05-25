@@ -1392,6 +1392,28 @@ pub enum SwarmCommand {
         #[arg(long)]
         bead: Option<String>,
     },
+    /// Lint coordination hygiene without mutating Agent Mail, Beads, git, or reservations.
+    Lint {
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
+
+        /// Read provider input from a single swarm fixture file.
+        #[arg(long, value_hint = ValueHint::FilePath, conflicts_with = "fixture_dir")]
+        fixture: Option<PathBuf>,
+
+        /// Read provider input from a swarm fixture directory.
+        #[arg(long, value_hint = ValueHint::DirPath)]
+        fixture_dir: Option<PathBuf>,
+
+        /// Fixture id within --fixture-dir. Defaults to healthy for the pinned command shape.
+        #[arg(long, default_value = "healthy")]
+        fixture_id: String,
+
+        /// Restrict findings to a specific bead id.
+        #[arg(long)]
+        bead: Option<String>,
+    },
     /// Assemble verification evidence for recent commits or a named bead.
     Evidence {
         /// Output as JSON (`--robot` also works)
@@ -7453,6 +7475,20 @@ fn run_swarm_command(cmd: SwarmCommand, cli: &Cli) -> CliResult<()> {
             &fixture_id,
             bead.as_deref(),
         ),
+        SwarmCommand::Lint {
+            json,
+            fixture,
+            fixture_dir,
+            fixture_id,
+            bead,
+        } => run_swarm_lint(
+            cli,
+            json,
+            fixture.as_deref(),
+            fixture_dir.as_deref(),
+            &fixture_id,
+            bead.as_deref(),
+        ),
         SwarmCommand::Evidence {
             json,
             fixture,
@@ -7575,6 +7611,63 @@ fn run_swarm_work_packet(
             .and_then(serde_json::Value::as_str)
         {
             println!("Bead: {bead_id}");
+        }
+    }
+
+    Ok(())
+}
+
+fn run_swarm_lint(
+    cli: &Cli,
+    json: bool,
+    fixture: Option<&Path>,
+    fixture_dir: Option<&Path>,
+    fixture_id: &str,
+    bead: Option<&str>,
+) -> CliResult<()> {
+    let structured_format = resolve_subcommand_structured_format(cli, json).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+
+    let payload = if let Some(path) = resolve_swarm_fixture_path(fixture, fixture_dir, fixture_id)?
+    {
+        let set = crate::swarm_status::FixtureSwarmAdapterSet::from_fixture_path(&path).map_err(
+            |err| CliError {
+                code: 10,
+                kind: CliErrorKind::Config.kind_str(),
+                message: err.to_string(),
+                hint: Some("Use --fixture <file> or --fixture-dir <dir> --fixture-id <id> with a checked-in swarm fixture.".to_string()),
+                retryable: false,
+            },
+        )?;
+        let privacy_probe = swarm_fixture_privacy_probe(&path)?;
+        let collection = set.collect_required();
+        render_swarm_lint_fixture(set.input(), &collection, privacy_probe.as_ref(), bead)
+    } else {
+        render_swarm_lint_live_partial(bead)
+    };
+
+    if let Some(fmt) = structured_format {
+        output_structured_value(payload, fmt)?;
+    } else {
+        println!(
+            "Swarm coordination lint: {}",
+            payload
+                .get("summary")
+                .and_then(|summary| summary.get("recommended_action"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+        );
+        if let Some(count) = payload
+            .get("summary")
+            .and_then(|summary| summary.get("finding_count"))
+            .and_then(serde_json::Value::as_u64)
+        {
+            println!("Findings: {count}");
         }
     }
 
@@ -7757,6 +7850,46 @@ fn render_swarm_work_packet_fixture(
     render_swarm_work_packet_from_status(&status, bead_filter)
 }
 
+fn render_swarm_lint_live_partial(bead_filter: Option<&str>) -> serde_json::Value {
+    use crate::swarm_status::{REQUIRED_SWARM_SOURCE_PROVIDERS, SwarmSourceCollection};
+
+    let collection = SwarmSourceCollection {
+        snapshots: REQUIRED_SWARM_SOURCE_PROVIDERS
+            .iter()
+            .copied()
+            .map(swarm_lint_live_unavailable_snapshot)
+            .collect(),
+    };
+
+    render_swarm_lint_payload("live", &collection, None, bead_filter, true)
+}
+
+fn swarm_lint_live_unavailable_snapshot(
+    provider: crate::swarm_status::SwarmProviderName,
+) -> crate::swarm_status::SwarmSourceSnapshot {
+    crate::swarm_status::SwarmSourceSnapshot::unavailable(
+        provider,
+        format!("live:{}", provider.fixture_key()),
+        "live-provider-unimplemented",
+        format!("live provider {provider} is not wired yet; fixture-backed lint is available"),
+    )
+}
+
+fn render_swarm_lint_fixture(
+    input: &crate::swarm_status::SwarmFixtureInput,
+    collection: &crate::swarm_status::SwarmSourceCollection,
+    privacy_probe: Option<&serde_json::Value>,
+    bead_filter: Option<&str>,
+) -> serde_json::Value {
+    render_swarm_lint_payload(
+        input.fixture_id(),
+        collection,
+        privacy_probe,
+        bead_filter,
+        false,
+    )
+}
+
 fn render_swarm_evidence_live_partial(bead_filter: Option<&str>) -> serde_json::Value {
     use crate::swarm_status::{
         REQUIRED_SWARM_SOURCE_PROVIDERS, SwarmSourceCollection, SwarmSourceSnapshot,
@@ -7803,6 +7936,585 @@ fn render_swarm_evidence_fixture(
         bead_filter,
         false,
     )
+}
+
+fn render_swarm_lint_payload(
+    fixture_id: &str,
+    collection: &crate::swarm_status::SwarmSourceCollection,
+    privacy_probe: Option<&serde_json::Value>,
+    bead_filter: Option<&str>,
+    live_partial: bool,
+) -> serde_json::Value {
+    use crate::swarm_status::SwarmProviderName;
+
+    let agent_mail = swarm_provider_payload(collection, SwarmProviderName::AgentMail);
+    let beads = swarm_provider_payload(collection, SwarmProviderName::Beads);
+    let evidence_source = swarm_provider_payload(collection, SwarmProviderName::Evidence);
+    let git = swarm_provider_payload(collection, SwarmProviderName::Git);
+    let messages = swarm_json_array(&agent_mail, "messages");
+    let evidence = swarm_evidence(&messages, privacy_probe, &evidence_source);
+    let partial = collection.partial() || live_partial;
+    let findings = swarm_lint_findings(&beads, &agent_mail, &git, &evidence, bead_filter, partial);
+    let error_count = swarm_lint_severity_count(&findings, "error");
+    let warning_count = swarm_lint_severity_count(&findings, "warning");
+    let info_count = swarm_lint_severity_count(&findings, "info");
+    let live_fixture = fixture_id.eq("live");
+    let busy_fixture = fixture_id.eq("busy");
+
+    serde_json::json!({
+        "schema_version": "cass.swarm.coordination_lint.v1",
+        "status": if collection.partial() { "partial" } else { "ok" },
+        "_meta": {
+            "request_id": if live_fixture {
+                "live:coordination-lint".to_string()
+            } else {
+                format!("fixture-{fixture_id}:coordination-lint")
+            },
+            "generated_at_ms": 0,
+            "elapsed_ms": if busy_fixture { 2 } else { 1 },
+            "repo": if live_fixture { "[LIVE_REPO]" } else { "[FIXTURE_REPO]" },
+            "project_key": if live_fixture { "[LIVE_REPO]" } else { "[FIXTURE_REPO]" },
+            "hostname": if live_fixture { "live-host" } else { "fixture-host" },
+            "partial": partial,
+            "warnings": swarm_meta_warnings(collection, fixture_id),
+        },
+        "providers": swarm_provider_statuses(collection),
+        "filter": {
+            "bead_id": bead_filter,
+        },
+        "summary": {
+            "finding_count": findings.len(),
+            "error_count": error_count,
+            "warning_count": warning_count,
+            "info_count": info_count,
+            "mutation_performed": false,
+            "recommended_action": swarm_lint_recommended_action(partial, error_count, warning_count, info_count),
+        },
+        "findings": findings,
+        "mutation_contract": {
+            "read_only": true,
+            "agent_mail_mutations": false,
+            "bead_mutations": false,
+            "reservation_mutations": false,
+            "git_mutations": false,
+            "safe_next_actions_are_suggestions": true,
+        },
+        "privacy": {
+            "raw_session_content_included": false,
+            "mail_body_snippets_included": false,
+            "redaction_policy": crate::pages::redact::SWARM_REDACTION_POLICY,
+            "redaction_applied": evidence
+                .get("redaction_applied")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        },
+    })
+}
+
+fn swarm_lint_findings(
+    beads: &serde_json::Value,
+    agent_mail: &serde_json::Value,
+    git: &serde_json::Value,
+    evidence: &serde_json::Value,
+    bead_filter: Option<&str>,
+    partial: bool,
+) -> Vec<serde_json::Value> {
+    let messages = swarm_json_array(agent_mail, "messages");
+    let reservations = swarm_json_array(agent_mail, "reservations");
+    let agents = swarm_json_array(agent_mail, "agents");
+    let mut findings = Vec::new();
+
+    if partial || agent_mail.is_null() {
+        findings.push(swarm_lint_finding(
+            "agent-mail-unavailable",
+            "warning",
+            "provider",
+            "agent_mail",
+            &["providers.agent_mail"],
+            "inspect-unavailable-providers",
+            "Agent Mail data is unavailable; takeover and closeout checks are advisory-only.",
+        ));
+    }
+
+    for message in messages
+        .iter()
+        .filter(|message| swarm_evidence_matches_bead(message, bead_filter))
+    {
+        if swarm_lint_message_ack_required(message) && !swarm_lint_message_acknowledged(message) {
+            let mut finding = swarm_lint_finding(
+                "unacked-required-mail",
+                "error",
+                "message",
+                &swarm_lint_message_id(message),
+                &["agent_mail.messages"],
+                "acknowledge-message-before-editing",
+                "Message requires acknowledgement and no acknowledgement evidence was found.",
+            );
+            swarm_lint_attach_snippet(&mut finding, swarm_lint_message_snippet(message));
+            findings.push(finding);
+        }
+        if let Some(snippet) = swarm_lint_unsafe_takeover_snippet(message) {
+            let mut finding = swarm_lint_finding(
+                "unsafe-takeover-language",
+                "warning",
+                "message",
+                &swarm_lint_message_id(message),
+                &["agent_mail.messages"],
+                "coordinate-with-holder-before-force-release-or-reopen",
+                "Coordination text suggests takeover or force-release before a manual review step.",
+            );
+            swarm_lint_attach_snippet(&mut finding, Some(snippet));
+            findings.push(finding);
+        }
+    }
+
+    let bead_status = swarm_lint_bead_status_map(beads);
+    swarm_lint_push_bead_findings(beads, &messages, evidence, bead_filter, &mut findings);
+    swarm_lint_push_reservation_findings(
+        &reservations,
+        &agents,
+        &bead_status,
+        bead_filter,
+        &mut findings,
+    );
+    swarm_lint_push_git_findings(git, bead_filter, &mut findings);
+
+    findings.sort_by(|left, right| {
+        swarm_lint_finding_sort_key(left).cmp(&swarm_lint_finding_sort_key(right))
+    });
+    findings
+}
+
+fn swarm_lint_push_bead_findings(
+    beads: &serde_json::Value,
+    messages: &[serde_json::Value],
+    evidence: &serde_json::Value,
+    bead_filter: Option<&str>,
+    findings: &mut Vec<serde_json::Value>,
+) {
+    let categories = [
+        ("ready", "open"),
+        ("in_progress", "in_progress"),
+        ("blocked", "blocked"),
+        ("closed", "closed"),
+    ];
+
+    for (category, expected_status) in categories {
+        for bead in swarm_json_array(beads, category)
+            .iter()
+            .filter(|bead| swarm_evidence_matches_bead(bead, bead_filter))
+        {
+            let Some(bead_id) = bead.get("id").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            if let Some(status) = bead.get("status").and_then(serde_json::Value::as_str)
+                && !status.eq(expected_status)
+            {
+                findings.push(swarm_lint_finding(
+                    "bead-status-mismatch",
+                    "warning",
+                    "bead",
+                    bead_id,
+                    &[swarm_lint_bead_bucket_ref(category)],
+                    "refresh-beads-before-claim-or-closeout",
+                    "Bead appears in one status bucket while carrying a different status value.",
+                ));
+            }
+
+            match category {
+                "in_progress" if !swarm_lint_has_mail_thread(bead_id, messages, evidence) => {
+                    findings.push(swarm_lint_finding(
+                        "missing-start-mail",
+                        "warning",
+                        "bead",
+                        bead_id,
+                        &["beads.in_progress", "agent_mail.messages"],
+                        "send-agent-mail-intro-before-editing",
+                        "In-progress bead has no matching Agent Mail thread.",
+                    ));
+                }
+                "closed" => {
+                    if !swarm_lint_has_mail_thread(bead_id, messages, evidence) {
+                        findings.push(swarm_lint_finding(
+                            "missing-closeout-mail",
+                            "error",
+                            "bead",
+                            bead_id,
+                            &["beads.closed", "agent_mail.messages"],
+                            "send-closeout-mail-with-proof-summary",
+                            "Closed bead has no matching Agent Mail closeout thread.",
+                        ));
+                    }
+                    if bead
+                        .get("close_reason")
+                        .and_then(serde_json::Value::as_str)
+                        .is_none_or(|reason| reason.trim().is_empty())
+                    {
+                        findings.push(swarm_lint_finding(
+                            "missing-close-reason",
+                            "error",
+                            "bead",
+                            bead_id,
+                            &["beads.closed"],
+                            "record-close-reason-with-proof-summary",
+                            "Closed bead has no close reason.",
+                        ));
+                    }
+                    if !swarm_lint_has_proof(bead_id, evidence) {
+                        findings.push(swarm_lint_finding(
+                            "missing-proof-reference",
+                            "error",
+                            "bead",
+                            bead_id,
+                            &["beads.closed", "evidence.recent_proofs"],
+                            "attach-rch-proof-before-or-during-closeout",
+                            "Closed bead has no linked proof artifact.",
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn swarm_lint_bead_bucket_ref(category: &str) -> &'static str {
+    match category {
+        "ready" => "beads.ready",
+        "in_progress" => "beads.in_progress",
+        "blocked" => "beads.blocked",
+        "closed" => "beads.closed",
+        _ => "beads",
+    }
+}
+
+fn swarm_lint_push_reservation_findings(
+    reservations: &[serde_json::Value],
+    agents: &[serde_json::Value],
+    bead_status: &BTreeMap<String, String>,
+    bead_filter: Option<&str>,
+    findings: &mut Vec<serde_json::Value>,
+) {
+    let active_agents = swarm_lint_active_agent_map(agents);
+    for reservation in reservations
+        .iter()
+        .filter(|reservation| swarm_evidence_matches_bead(reservation, bead_filter))
+    {
+        let reason = reservation
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("[unknown-bead]");
+        let holder = reservation
+            .get("holder")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("[unknown-holder]");
+
+        if !swarm_reservation_active(reservation) {
+            findings.push(swarm_lint_finding(
+                "stale-reservation",
+                "warning",
+                "reservation",
+                reason,
+                &["agent_mail.reservations"],
+                "renew-or-release-reservation-after-coordination",
+                "Reservation has expired and should be reviewed before new work starts.",
+            ));
+        }
+
+        if swarm_reservation_active(reservation)
+            && matches!(active_agents.get(holder).copied(), Some(false))
+        {
+            findings.push(swarm_lint_finding(
+                "dead-agent-stale-reservation",
+                "warning",
+                "reservation",
+                reason,
+                &["agent_mail.reservations", "agent_mail.agents"],
+                "coordinate-before-force-release",
+                "Active reservation is held by an inactive agent.",
+            ));
+        }
+
+        match bead_status.get(reason).map(String::as_str) {
+            Some("closed") if swarm_reservation_active(reservation) => {
+                findings.push(swarm_lint_finding(
+                    "reservation-on-closed-bead",
+                    "warning",
+                    "reservation",
+                    reason,
+                    &["agent_mail.reservations", "beads.closed"],
+                    "release-reservation-after-closeout",
+                    "Active reservation is still attached to a closed bead.",
+                ))
+            }
+            None => findings.push(swarm_lint_finding(
+                "reservation-without-known-bead",
+                "info",
+                "reservation",
+                reason,
+                &["agent_mail.reservations", "beads"],
+                "inspect-reservation-reason-before-reuse",
+                "Reservation reason does not match any known bead in this snapshot.",
+            )),
+            _ => {}
+        }
+    }
+}
+
+fn swarm_lint_push_git_findings(
+    git: &serde_json::Value,
+    bead_filter: Option<&str>,
+    findings: &mut Vec<serde_json::Value>,
+) {
+    if bead_filter.is_some()
+        || !git
+            .get("dirty")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    {
+        return;
+    }
+
+    let dirty_count = git
+        .get("dirty_paths")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    findings.push(swarm_lint_finding(
+        "dirty-peer-files",
+        "warning",
+        "git",
+        "worktree",
+        &["git.dirty_paths"],
+        "inspect-dirty-paths-and-reserve-before-editing",
+        &format!("Worktree has {dirty_count} dirty path(s); avoid overlapping peer work."),
+    ));
+}
+
+fn swarm_lint_bead_status_map(beads: &serde_json::Value) -> BTreeMap<String, String> {
+    let categories = [
+        ("ready", "open"),
+        ("in_progress", "in_progress"),
+        ("blocked", "blocked"),
+        ("closed", "closed"),
+    ];
+    let mut statuses = BTreeMap::new();
+    for (category, default_status) in categories {
+        for bead in swarm_json_array(beads, category) {
+            swarm_lint_record_bead_status(&mut statuses, &bead, default_status);
+        }
+    }
+    statuses
+}
+
+fn swarm_lint_record_bead_status(
+    statuses: &mut BTreeMap<String, String>,
+    bead: &serde_json::Value,
+    default_status: &str,
+) {
+    if let Some(bead_id) = bead.get("id").and_then(serde_json::Value::as_str) {
+        statuses.insert(
+            bead_id.to_string(),
+            bead.get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(default_status)
+                .to_string(),
+        );
+    }
+}
+
+fn swarm_lint_active_agent_map(agents: &[serde_json::Value]) -> BTreeMap<String, bool> {
+    agents
+        .iter()
+        .filter_map(|agent| {
+            let name = agent.get("name").and_then(serde_json::Value::as_str)?;
+            Some((name.to_string(), swarm_agent_active(agent)))
+        })
+        .collect()
+}
+
+fn swarm_lint_has_mail_thread(
+    bead_id: &str,
+    messages: &[serde_json::Value],
+    evidence: &serde_json::Value,
+) -> bool {
+    messages.iter().any(|message| {
+        message
+            .get("thread_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|thread_id| thread_id.eq(bead_id))
+    }) || evidence
+        .get("recent_threads")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|thread| {
+            thread
+                .get("thread_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|thread_id| thread_id.eq(bead_id))
+        })
+}
+
+fn swarm_lint_has_proof(bead_id: &str, evidence: &serde_json::Value) -> bool {
+    evidence
+        .get("recent_proofs")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|proof| swarm_evidence_matches_bead(proof, Some(bead_id)))
+}
+
+fn swarm_lint_message_ack_required(message: &serde_json::Value) -> bool {
+    message
+        .get("ack_required")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn swarm_lint_message_acknowledged(message: &serde_json::Value) -> bool {
+    if message
+        .get("acknowledged")
+        .or_else(|| message.get("ack"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    ["ack_ts", "acknowledged_at"]
+        .iter()
+        .filter_map(|key| message.get(*key).and_then(serde_json::Value::as_str))
+        .any(|value| !value.trim().is_empty())
+}
+
+fn swarm_lint_message_id(message: &serde_json::Value) -> String {
+    message
+        .get("id")
+        .and_then(serde_json::Value::as_i64)
+        .map(|id| id.to_string())
+        .or_else(|| {
+            message
+                .get("thread_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "[message]".to_string())
+}
+
+fn swarm_lint_message_snippet(message: &serde_json::Value) -> Option<String> {
+    message
+        .get("subject")
+        .and_then(serde_json::Value::as_str)
+        .map(crate::pages::redact::redact_swarm_text)
+}
+
+fn swarm_lint_unsafe_takeover_snippet(message: &serde_json::Value) -> Option<String> {
+    let subject = message
+        .get("subject")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let body_snippet = message
+        .get("body_snippet")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let combined = format!("{subject}\n{body_snippet}");
+    let lower = combined.to_ascii_lowercase();
+    let unsafe_phrase = [
+        "force release",
+        "force-release",
+        "take over",
+        "takeover",
+        "reopen stale",
+    ]
+    .iter()
+    .any(|phrase| lower.contains(phrase));
+    unsafe_phrase.then(|| crate::pages::redact::redact_swarm_text(subject))
+}
+
+fn swarm_lint_finding(
+    code: &str,
+    severity: &str,
+    subject_kind: &str,
+    subject_id: &str,
+    evidence_refs: &[&str],
+    safe_next_action: &str,
+    summary: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": format!("{code}:{subject_kind}:{subject_id}"),
+        "severity": severity,
+        "code": code,
+        "subject_kind": subject_kind,
+        "subject_id": subject_id,
+        "evidence_refs": evidence_refs,
+        "safe_next_action": safe_next_action,
+        "summary": summary,
+        "redaction_status": "metadata_only",
+    })
+}
+
+fn swarm_lint_attach_snippet(finding: &mut serde_json::Value, redacted_snippet: Option<String>) {
+    if let Some(snippet) = redacted_snippet
+        && let Some(object) = finding.as_object_mut()
+    {
+        object.insert("redacted_snippet".to_string(), serde_json::json!(snippet));
+    }
+}
+
+fn swarm_lint_severity_count(findings: &[serde_json::Value], severity: &str) -> usize {
+    findings
+        .iter()
+        .filter(|finding| {
+            finding
+                .get("severity")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|actual| actual.eq(severity))
+        })
+        .count()
+}
+
+fn swarm_lint_recommended_action(
+    partial: bool,
+    error_count: usize,
+    warning_count: usize,
+    info_count: usize,
+) -> &'static str {
+    if partial {
+        "inspect-unavailable-providers"
+    } else if error_count > 0 {
+        "fix-coordination-before-closeout"
+    } else if warning_count > 0 {
+        "coordinate-before-editing"
+    } else if info_count > 0 {
+        "review-advisories"
+    } else {
+        "coordination-clean"
+    }
+}
+
+fn swarm_lint_finding_sort_key(finding: &serde_json::Value) -> (u8, String, String) {
+    let severity = finding
+        .get("severity")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("info");
+    let code = finding
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let subject = finding
+        .get("subject_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    (swarm_lint_severity_rank(severity), code, subject)
+}
+
+fn swarm_lint_severity_rank(severity: &str) -> u8 {
+    match severity {
+        "error" => 0,
+        "warning" => 1,
+        _ => 2,
+    }
 }
 
 fn render_swarm_evidence_payload(

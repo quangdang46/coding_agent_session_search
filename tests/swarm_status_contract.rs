@@ -546,6 +546,276 @@ fn swarm_work_packet_cli_reports_missing_requested_bead() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn swarm_coordination_lint_cli_reports_clean_read_only_fixture() -> Result<(), Box<dyn Error>> {
+    let fixture_path = repo_path("tests/fixtures/swarm_status/healthy.inputs.json");
+    let output = run_swarm_lint_fixture(&fixture_path, None)?;
+
+    require_value_eq(
+        get_path(&output, &["schema_version"]),
+        json!("cass.swarm.coordination_lint.v1"),
+        "schema version",
+    )?;
+    require_value_eq(get_path(&output, &["status"]), json!("ok"), "status")?;
+    require_value_eq(
+        get_path(&output, &["summary", "finding_count"]),
+        json!(0),
+        "finding count",
+    )?;
+    require_value_eq(
+        get_path(&output, &["summary", "recommended_action"]),
+        json!("coordination-clean"),
+        "recommended action",
+    )?;
+    require_value_eq(
+        get_path(&output, &["mutation_contract", "read_only"]),
+        json!(true),
+        "read-only contract",
+    )?;
+    require_value_eq(
+        get_path(&output, &["summary", "mutation_performed"]),
+        json!(false),
+        "mutation flag",
+    )?;
+    assert_no_forbidden_fixture_leaks("coordination-lint-clean", &output);
+    Ok(())
+}
+
+#[test]
+fn swarm_coordination_lint_cli_catches_protocol_findings() -> Result<(), Box<dyn Error>> {
+    let (_tmp, fixture_path) = write_swarm_evidence_fixture(
+        "coordination-lint-problems",
+        json!({
+            "beads": {
+                "ready": [],
+                "in_progress": [
+                    {
+                        "id": "cass-start-missing",
+                        "title": "Missing intro mail",
+                        "status": "in_progress",
+                        "updated_at": "2026-05-08T12:00:00Z"
+                    },
+                    {
+                        "id": "cass-owned-stale",
+                        "title": "Old but actively owned work",
+                        "status": "in_progress",
+                        "updated_at": "2026-05-08T12:00:00Z"
+                    }
+                ],
+                "blocked": [],
+                "closed": [
+                    {
+                        "id": "cass-closed-missing",
+                        "title": "Closed without proof",
+                        "status": "closed",
+                        "close_reason": ""
+                    }
+                ]
+            },
+            "agent_mail": {
+                "agents": [
+                    {
+                        "name": "ActiveOwner",
+                        "last_active_ts": "2026-05-08T15:59:00Z"
+                    },
+                    {
+                        "name": "DeadOwner",
+                        "last_active_ts": "2026-05-08T12:00:00Z"
+                    }
+                ],
+                "messages": [
+                    {
+                        "id": 77,
+                        "thread_id": "cass-unacked",
+                        "subject": "Please ack before editing",
+                        "from": "ActiveOwner",
+                        "ack_required": true,
+                        "created_ts": "2026-05-08T15:50:00Z"
+                    },
+                    {
+                        "id": 78,
+                        "thread_id": "cass-unsafe",
+                        "subject": "force release stale reservation now",
+                        "from": "ActiveOwner",
+                        "created_ts": "2026-05-08T15:52:00Z"
+                    },
+                    {
+                        "id": 79,
+                        "thread_id": "cass-owned-stale",
+                        "subject": "still working cass-owned-stale",
+                        "from": "ActiveOwner",
+                        "created_ts": "2026-05-08T15:55:00Z"
+                    }
+                ],
+                "reservations": [
+                    {
+                        "holder": "ActiveOwner",
+                        "path_pattern": "src/lib.rs",
+                        "exclusive": true,
+                        "reason": "cass-owned-stale",
+                        "expires_ts": "2026-05-08T17:00:00Z"
+                    },
+                    {
+                        "holder": "DeadOwner",
+                        "path_pattern": "tests/**",
+                        "exclusive": true,
+                        "reason": "cass-dead-reservation",
+                        "expires_ts": "2026-05-08T17:00:00Z"
+                    },
+                    {
+                        "holder": "ActiveOwner",
+                        "path_pattern": "docs/**",
+                        "exclusive": true,
+                        "reason": "cass-expired-reservation",
+                        "expires_ts": "2026-05-08T12:30:00Z"
+                    },
+                    {
+                        "holder": "ActiveOwner",
+                        "path_pattern": "src/lib.rs",
+                        "exclusive": true,
+                        "reason": "cass-closed-missing",
+                        "expires_ts": "2026-05-08T17:00:00Z"
+                    }
+                ]
+            },
+            "git": {
+                "dirty": true,
+                "dirty_paths": [{"status": "M", "path": "src/lib.rs"}],
+                "recent_commits": []
+            },
+            "processes": {},
+            "cass_health": {},
+            "cass_status": {},
+            "evidence": {
+                "recent_threads": [],
+                "recent_proofs": [],
+                "proof_gaps": [],
+                "redaction_applied": false
+            }
+        }),
+    )?;
+    let output = run_swarm_lint_fixture(&fixture_path, None)?;
+    let findings = get_path(&output, &["findings"])
+        .and_then(Value::as_array)
+        .ok_or_else(|| test_error("findings missing"))?;
+    let codes = findings
+        .iter()
+        .filter_map(|finding| finding.get("code").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+
+    for (expected, missing_message) in [
+        (
+            "unacked-required-mail",
+            "missing unacked-required-mail finding",
+        ),
+        (
+            "unsafe-takeover-language",
+            "missing unsafe-takeover-language finding",
+        ),
+        ("missing-start-mail", "missing missing-start-mail finding"),
+        (
+            "missing-closeout-mail",
+            "missing missing-closeout-mail finding",
+        ),
+        (
+            "missing-close-reason",
+            "missing missing-close-reason finding",
+        ),
+        (
+            "missing-proof-reference",
+            "missing missing-proof-reference finding",
+        ),
+        ("stale-reservation", "missing stale-reservation finding"),
+        (
+            "dead-agent-stale-reservation",
+            "missing dead-agent-stale-reservation finding",
+        ),
+        (
+            "reservation-on-closed-bead",
+            "missing reservation-on-closed-bead finding",
+        ),
+        (
+            "reservation-without-known-bead",
+            "missing reservation-without-known-bead finding",
+        ),
+        ("dirty-peer-files", "missing dirty-peer-files finding"),
+    ] {
+        require(codes.contains(expected), missing_message)?;
+    }
+    require(
+        !findings.iter().any(|finding| {
+            finding.get("code").and_then(Value::as_str) == Some("missing-start-mail")
+                && finding.get("subject_id").and_then(Value::as_str) == Some("cass-owned-stale")
+        }),
+        "stale-but-owned work should not be treated as missing coordination",
+    )?;
+    require_value_eq(
+        get_path(&output, &["summary", "recommended_action"]),
+        json!("fix-coordination-before-closeout"),
+        "recommended action",
+    )?;
+    require_value_eq(
+        get_path(&output, &["mutation_contract", "agent_mail_mutations"]),
+        json!(false),
+        "Agent Mail mutation flag",
+    )?;
+    assert_no_forbidden_fixture_leaks("coordination-lint-problems", &output);
+    Ok(())
+}
+
+#[test]
+fn swarm_coordination_lint_cli_reports_offline_agent_mail() -> Result<(), Box<dyn Error>> {
+    let (_tmp, fixture_path) = write_swarm_evidence_fixture(
+        "coordination-lint-offline-mail",
+        json!({
+            "beads": {
+                "ready": [],
+                "in_progress": [],
+                "blocked": []
+            },
+            "git": {
+                "dirty": false,
+                "dirty_paths": [],
+                "recent_commits": []
+            },
+            "processes": {},
+            "cass_health": {},
+            "cass_status": {},
+            "evidence": {
+                "recent_threads": [],
+                "recent_proofs": [],
+                "proof_gaps": [],
+                "redaction_applied": false
+            }
+        }),
+    )?;
+    let output = run_swarm_lint_fixture(&fixture_path, None)?;
+    let codes = get_path(&output, &["findings"])
+        .and_then(Value::as_array)
+        .ok_or_else(|| test_error("findings missing"))?
+        .iter()
+        .filter_map(|finding| finding.get("code").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+
+    require_value_eq(get_path(&output, &["status"]), json!("partial"), "status")?;
+    require(
+        codes.contains("agent-mail-unavailable"),
+        "missing offline Agent Mail finding",
+    )?;
+    require_value_eq(
+        get_path(&output, &["summary", "recommended_action"]),
+        json!("inspect-unavailable-providers"),
+        "recommended action",
+    )?;
+    require_value_eq(
+        get_path(&output, &["mutation_contract", "bead_mutations"]),
+        json!(false),
+        "Beads mutation flag",
+    )?;
+    assert_no_forbidden_fixture_leaks("coordination-lint-offline", &output);
+    Ok(())
+}
+
+#[test]
 fn swarm_evidence_cli_links_committed_bead_to_proof_and_mail() -> Result<(), Box<dyn Error>> {
     let (_tmp, fixture_path) = write_swarm_evidence_fixture(
         "evidence-linked",
@@ -1293,6 +1563,30 @@ fn run_swarm_work_packet_fixture(
         output.stderr.is_empty(),
         format!(
             "swarm work-packet should not log to stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+fn run_swarm_lint_fixture(
+    fixture_path: &Path,
+    bead: Option<&str>,
+) -> Result<Value, Box<dyn Error>> {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cass")); // ubs:ignore — fixed test binary from assert_cmd.
+    cmd.env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1");
+    cmd.args(["swarm", "lint", "--json", "--fixture"]);
+    cmd.arg(fixture_path);
+    if let Some(bead_id) = bead {
+        cmd.args(["--bead", bead_id]);
+    }
+
+    let assert = cmd.assert().success();
+    let output = assert.get_output();
+    require(
+        output.stderr.is_empty(),
+        format!(
+            "swarm lint should not log to stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         ),
     )?;
