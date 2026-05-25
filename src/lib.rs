@@ -39884,7 +39884,7 @@ fn run_doctor_gc(
     let mut quarantined: Vec<String> = Vec::new();
     let quarantine_root = data_dir.join("doctor").join("quarantine").join("runs");
     std::fs::create_dir_all(&quarantine_root).map_err(|e| CliError {
-        code: 73,
+        code: 14,
         kind: "io",
         message: format!(
             "failed to create quarantine dir {}: {e}",
