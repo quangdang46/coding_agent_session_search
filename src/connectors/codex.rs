@@ -4,6 +4,7 @@ use std::io::{BufRead, BufReader};
 
 use anyhow::Result;
 use serde_json::Value;
+use tracing::warn;
 
 use super::{
     Connector, DetectionResult, DiscoveredSourceFile, NormalizedConversation, NormalizedMessage,
@@ -94,13 +95,31 @@ fn augment_modern_codex_messages(conversation: &mut NormalizedConversation) {
         .map(|message| modern_codex_raw_signature(&message.extra))
         .collect();
     let mut added = false;
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
+    for (line_no_zero, line) in BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .enumerate()
+    {
+        let line_no = line_no_zero + 1;
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let Ok(raw) = serde_json::from_str::<Value>(line) else {
-            continue;
+        let raw = match serde_json::from_str::<Value>(line) {
+            Ok(value) => value,
+            Err(parse_err) => {
+                // Per gauntlet finding CONF-cass-003: surface malformed JSONL lines
+                // to tracing so operators can correlate `cass diag` reports against
+                // unreadable Codex rollout entries. The line is still dropped to
+                // preserve resilience; the warning is purely diagnostic.
+                warn!(
+                    source_path = %conversation.source_path.display(),
+                    line_no = line_no,
+                    error = %parse_err,
+                    "codex rollout JSONL line failed to parse; skipping",
+                );
+                continue;
+            }
         };
         let raw_signature = modern_codex_raw_signature(&raw);
         if seen_raw_entries.contains(&raw_signature) {
