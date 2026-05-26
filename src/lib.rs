@@ -12194,41 +12194,36 @@ fn swarm_work_packet_verification(
     build_pressure: &str,
 ) -> serde_json::Value {
     let labels = swarm_work_packet_labels(bead);
-    let mut commands = Vec::new();
-    if labels.iter().any(|label| label == "swarm") {
-        commands.push("rch exec -- env CARGO_TARGET_DIR=/tmp/cass-swarm-work-packet-target cargo test --test swarm_status_contract -- --nocapture".to_string());
-    }
-    if labels.iter().any(|label| label == "robot-json") {
-        commands.push("rch exec -- env CARGO_TARGET_DIR=/tmp/cass-golden-target cargo test --test golden_robot_json --test golden_robot_docs".to_string());
-    }
-    if commands.is_empty() {
-        commands.push(
-            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target cargo check --all-targets"
-                .to_string(),
-        );
-    }
-    commands.push(
-        "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target cargo clippy --all-targets -- -D warnings"
-            .to_string(),
-    );
-    commands.push(
-        "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target cargo fmt --check".to_string(),
-    );
+    let touched_paths = swarm_work_packet_touched_paths(bead);
+    let file_classes = swarm_work_packet_file_classes(bead, &labels, &touched_paths);
+    let command_plan = swarm_work_packet_verification_commands(&file_classes, &labels);
+    let known_exclusions = swarm_work_packet_known_exclusions(&file_classes, &touched_paths);
+    let commands: Vec<String> = command_plan
+        .iter()
+        .filter_map(|command| command.get("command").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect();
+    let rch_required = !commands.is_empty();
 
     serde_json::json!({
         "commands": commands,
+        "command_plan": command_plan,
+        "file_classes": file_classes,
+        "known_exclusions": known_exclusions,
+        "manual_checks": swarm_work_packet_manual_checks(&file_classes),
         "expected_artifacts": [
             "stdout/stderr transcript",
             "exit status",
             "git diff --check result",
             "proof summary in bead closeout"
         ],
-        "rch_required": true,
-        "target_dir_hint": "/tmp/cass-work-packet-target",
+        "rch_required": rch_required,
+        "target_dir_hint": if rch_required { "/tmp/cass-work-packet-target" } else { "" },
+        "full_gate_required": swarm_work_packet_full_gate_required(&file_classes),
         "rationale": if build_pressure == "high" {
             "Defer expensive verification until build pressure drops; keep commands for the later proof pass."
         } else {
-            "Use focused swarm contract proof first, then standard all-target gates when code changed."
+            swarm_work_packet_verification_rationale(&file_classes)
         },
     })
 }
@@ -12236,10 +12231,395 @@ fn swarm_work_packet_verification(
 fn swarm_work_packet_empty_verification() -> serde_json::Value {
     serde_json::json!({
         "commands": [],
+        "command_plan": [],
+        "file_classes": [],
+        "known_exclusions": [],
+        "manual_checks": [],
         "expected_artifacts": [],
-        "rch_required": true,
-        "target_dir_hint": "/tmp/cass-work-packet-target",
+        "rch_required": false,
+        "target_dir_hint": "",
+        "full_gate_required": false,
         "rationale": "No bead was selected, so no verification plan was generated.",
+    })
+}
+
+fn swarm_work_packet_touched_paths(bead: &serde_json::Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    for key in [
+        "touched_paths",
+        "proposed_paths",
+        "changed_paths",
+        "paths",
+        "files",
+    ] {
+        paths.extend(
+            bead.get(key)
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string),
+        );
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn swarm_work_packet_file_classes(
+    bead: &serde_json::Value,
+    labels: &[String],
+    touched_paths: &[String],
+) -> Vec<serde_json::Value> {
+    let mut classes = BTreeMap::new();
+    let title = bead
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let issue_type = bead
+        .get("issue_type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if labels.iter().any(|label| matches!(label.as_str(), "swarm")) {
+        swarm_work_packet_add_file_class(
+            &mut classes,
+            "swarm-contract",
+            "label:swarm",
+            "focused swarm coordination contract",
+        );
+    }
+    if labels
+        .iter()
+        .any(|label| matches!(label.as_str(), "robot-json"))
+    {
+        swarm_work_packet_add_file_class(
+            &mut classes,
+            "golden-json",
+            "label:robot-json",
+            "robot JSON or robot docs contract",
+        );
+    }
+    if labels.iter().any(|label| matches!(label.as_str(), "docs"))
+        || matches!(issue_type.as_str(), "docs")
+    {
+        swarm_work_packet_add_file_class(
+            &mut classes,
+            "docs",
+            "label-or-type:docs",
+            "documentation-only surface",
+        );
+    }
+    if labels.iter().any(|label| matches!(label.as_str(), "beads")) {
+        swarm_work_packet_add_file_class(
+            &mut classes,
+            "beads-only",
+            "label:beads",
+            "tracker-only metadata",
+        );
+    }
+
+    for path in touched_paths {
+        let normalized = path.trim();
+        if normalized.is_empty() {
+            continue;
+        }
+        let lower = normalized.to_ascii_lowercase();
+        let evidence = normalized;
+
+        if lower.contains("e2e_large_dataset") {
+            swarm_work_packet_add_file_class(
+                &mut classes,
+                "large-e2e-excluded",
+                evidence,
+                "known expensive large-dataset e2e surface",
+            );
+        }
+        if lower.ends_with(".rs") && lower.starts_with("src/") {
+            swarm_work_packet_add_file_class(
+                &mut classes,
+                "rust-source",
+                evidence,
+                "Rust production source",
+            );
+        }
+        if lower.ends_with(".rs") && lower.starts_with("tests/") {
+            swarm_work_packet_add_file_class(
+                &mut classes,
+                "rust-test",
+                evidence,
+                "Rust test source",
+            );
+        }
+        if lower.starts_with("tests/golden/") || lower.ends_with(".golden") {
+            swarm_work_packet_add_file_class(
+                &mut classes,
+                "golden-json",
+                evidence,
+                "golden contract artifact",
+            );
+        }
+        if lower.starts_with("docs/")
+            || matches!(
+                lower.as_str(),
+                "readme.md" | "agents.md" | "changelog.md" | "install.md"
+            )
+        {
+            swarm_work_packet_add_file_class(
+                &mut classes,
+                "docs",
+                evidence,
+                "documentation surface",
+            );
+        }
+        if lower.starts_with(".beads/") || matches!(lower.as_str(), ".beads/beads.jsonl") {
+            swarm_work_packet_add_file_class(
+                &mut classes,
+                "beads-only",
+                evidence,
+                "tracker metadata",
+            );
+        }
+        if matches!(lower.as_str(), "cargo.toml" | "cargo.lock" | "build.rs")
+            || lower.starts_with(".cargo/")
+        {
+            swarm_work_packet_add_file_class(
+                &mut classes,
+                "sibling-dependency",
+                evidence,
+                "Cargo or sibling dependency contract",
+            );
+        }
+        if lower.starts_with("src/ui/")
+            || lower.starts_with("tests/snapshots/")
+            || lower.contains("tui")
+            || lower.contains("ftui")
+        {
+            swarm_work_packet_add_file_class(
+                &mut classes,
+                "ui-snapshot",
+                evidence,
+                "TUI or UI snapshot surface",
+            );
+        }
+    }
+
+    if title.contains("sibling") || title.contains("dependency pin") {
+        swarm_work_packet_add_file_class(
+            &mut classes,
+            "sibling-dependency",
+            "title:sibling-dependency",
+            "Cargo or sibling dependency contract",
+        );
+    }
+    if labels
+        .iter()
+        .any(|label| matches!(label.as_str(), "testing" | "e2e" | "test"))
+        || matches!(issue_type.as_str(), "test")
+    {
+        swarm_work_packet_add_file_class(
+            &mut classes,
+            "rust-test",
+            "label-or-type:testing",
+            "test-focused change",
+        );
+    }
+
+    const ORDER: &[&str] = &[
+        "rust-source",
+        "rust-test",
+        "swarm-contract",
+        "golden-json",
+        "docs",
+        "beads-only",
+        "sibling-dependency",
+        "ui-snapshot",
+        "large-e2e-excluded",
+    ];
+    ORDER
+        .iter()
+        .filter_map(|kind| classes.remove(*kind))
+        .collect()
+}
+
+fn swarm_work_packet_add_file_class(
+    classes: &mut BTreeMap<String, serde_json::Value>,
+    kind: &str,
+    evidence: &str,
+    summary: &str,
+) {
+    let entry = classes.entry(kind.to_string()).or_insert_with(|| {
+        serde_json::json!({
+            "kind": kind,
+            "summary": summary,
+            "evidence": [],
+        })
+    });
+    if let Some(evidence_items) = entry
+        .get_mut("evidence")
+        .and_then(serde_json::Value::as_array_mut)
+        && !evidence_items
+            .iter()
+            .any(|item| item.as_str().is_some_and(|item| item.cmp(evidence).is_eq()))
+    {
+        evidence_items.push(serde_json::json!(evidence));
+    }
+}
+
+fn swarm_work_packet_verification_commands(
+    file_classes: &[serde_json::Value],
+    labels: &[String],
+) -> Vec<serde_json::Value> {
+    let has_class = |kind: &str| swarm_work_packet_has_file_class(file_classes, kind);
+    let mut commands = Vec::new();
+
+    if has_class("swarm-contract") {
+        commands.push(swarm_work_packet_command_step(
+            "focused-swarm-contract",
+            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-swarm-work-packet-target cargo test --test swarm_status_contract -- --nocapture",
+            "Swarm work-packet/status contract changed or is directly relevant.",
+        ));
+    }
+    if has_class("golden-json") {
+        commands.push(swarm_work_packet_command_step(
+            "robot-golden-contract",
+            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-golden-target cargo test --test golden_robot_json --test golden_robot_docs",
+            "Robot JSON or robot docs contracts need deterministic golden coverage.",
+        ));
+    }
+    if has_class("docs") && !has_class("golden-json") {
+        commands.push(swarm_work_packet_command_step(
+            "robot-docs-contract",
+            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-docs-target cargo test --test golden_robot_docs",
+            "Documentation changes that touch robot-facing help should keep docs goldens stable.",
+        ));
+    }
+    if has_class("sibling-dependency") {
+        commands.push(swarm_work_packet_command_step(
+            "sibling-dependency-contract",
+            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-strict-target cargo check --features strict-path-dep-validation",
+            "Sibling dependency pins or build.rs contract checks changed.",
+        ));
+    }
+    if has_class("ui-snapshot") {
+        commands.push(swarm_work_packet_command_step(
+            "tui-snapshot-contract",
+            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-tui-target cargo test --test tui_flows",
+            "TUI flow or snapshot surface changed.",
+        ));
+    }
+
+    let code_changed = file_classes.is_empty()
+        || has_class("rust-source")
+        || has_class("rust-test")
+        || has_class("swarm-contract")
+        || has_class("sibling-dependency")
+        || has_class("ui-snapshot")
+        || labels
+            .iter()
+            .any(|label| matches!(label.as_str(), "testing"));
+    if code_changed {
+        commands.push(swarm_work_packet_command_step(
+            "cargo-check-all-targets",
+            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target cargo check --all-targets",
+            "Rust code or tests changed; compile every target before closeout.",
+        ));
+        commands.push(swarm_work_packet_command_step(
+            "clippy-all-targets",
+            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target cargo clippy --all-targets -- -D warnings",
+            "Repo gate treats warnings as errors.",
+        ));
+        commands.push(swarm_work_packet_command_step(
+            "fmt-check",
+            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target cargo fmt --check",
+            "Formatting must stay stable.",
+        ));
+    }
+
+    commands
+}
+
+fn swarm_work_packet_command_step(kind: &str, command: &str, rationale: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kind": kind,
+        "command": command,
+        "rationale": rationale,
+        "uses_rch": command.starts_with("rch exec -- env "),
+    })
+}
+
+fn swarm_work_packet_known_exclusions(
+    file_classes: &[serde_json::Value],
+    touched_paths: &[String],
+) -> Vec<serde_json::Value> {
+    if !swarm_work_packet_has_file_class(file_classes, "large-e2e-excluded")
+        && !touched_paths
+            .iter()
+            .any(|path| path.to_ascii_lowercase().contains("e2e_large_dataset"))
+    {
+        return Vec::new();
+    }
+
+    vec![serde_json::json!({
+        "pattern": "e2e_large_dataset",
+        "reason": "Known expensive routine gate; run only when explicitly fixing that suite.",
+        "recommended_alternative": "Use focused unit/integration tests plus cargo check/clippy/fmt for unrelated changes.",
+    })]
+}
+
+fn swarm_work_packet_manual_checks(file_classes: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let mut checks = Vec::new();
+    if swarm_work_packet_has_file_class(file_classes, "beads-only") {
+        checks.push(serde_json::json!({
+            "kind": "beads-flush",
+            "command": "br sync --flush-only",
+            "rationale": "Tracker-only changes need JSONL export before commit.",
+        }));
+    }
+    if swarm_work_packet_has_file_class(file_classes, "golden-json") {
+        checks.push(serde_json::json!({
+            "kind": "golden-diff-review",
+            "command": "git diff -- tests/golden tests/fixtures",
+            "rationale": "Every golden change must be reviewed before commit.",
+        }));
+    }
+    checks
+}
+
+fn swarm_work_packet_full_gate_required(file_classes: &[serde_json::Value]) -> bool {
+    file_classes.iter().any(|class| {
+        class
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|kind| {
+                matches!(
+                    kind,
+                    "rust-source" | "rust-test" | "swarm-contract" | "sibling-dependency"
+                )
+            })
+    })
+}
+
+fn swarm_work_packet_verification_rationale(file_classes: &[serde_json::Value]) -> &'static str {
+    if file_classes.is_empty() {
+        "No touched-file hints were provided; fall back to the minimal safe repo gate when code changes are possible."
+    } else if swarm_work_packet_has_file_class(file_classes, "beads-only")
+        && file_classes.len() == 1
+    {
+        "Tracker-only work does not need an rch cargo proof; flush Beads state and review the JSONL diff."
+    } else {
+        "Use the narrowest file-class playbook first, then standard all-target gates when Rust code or contracts changed."
+    }
+}
+
+fn swarm_work_packet_has_file_class(file_classes: &[serde_json::Value], kind: &str) -> bool {
+    file_classes.iter().any(|class| {
+        class
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|actual| actual.cmp(kind).is_eq())
     })
 }
 

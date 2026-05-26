@@ -879,6 +879,165 @@ fn swarm_work_packet_cli_reports_missing_requested_bead() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn swarm_work_packet_verification_playbook_classifies_file_areas() -> Result<(), Box<dyn Error>> {
+    let (_tmp, fixture_path) = write_swarm_evidence_fixture(
+        "verification-playbook",
+        json!({
+            "beads": {
+                "ready": [
+                    verification_playbook_bead("cass-rust", "Rust source change", ["src/search/query.rs"], ["testing"]),
+                    verification_playbook_bead("cass-golden", "Robot golden change", ["tests/golden/robot/health.json.golden"], ["robot-json"]),
+                    verification_playbook_bead("cass-docs", "Docs only change", ["docs/planning/operator.md"], ["docs"]),
+                    verification_playbook_bead("cass-beads", "Beads only change", [".beads/beads.jsonl"], ["beads"]),
+                    verification_playbook_bead("cass-sibling", "Sibling dependency pin update", ["Cargo.toml", "build.rs"], []),
+                    verification_playbook_bead("cass-ui", "TUI snapshot change", ["src/ui/app.rs", "tests/snapshots/tui.snap"], []),
+                    verification_playbook_bead("cass-large-e2e", "Large e2e avoidance", ["tests/e2e_large_dataset.rs"], ["testing"])
+                ],
+                "in_progress": [],
+                "blocked": [],
+                "graph": {
+                    "node_count": 7,
+                    "edge_count": 0,
+                    "has_cycles": false
+                }
+            },
+            "agent_mail": {
+                "agents": [],
+                "messages": [],
+                "reservations": []
+            },
+            "git": {
+                "branch": "main",
+                "upstream": "origin/main",
+                "ahead": 0,
+                "behind": 0,
+                "dirty": false,
+                "dirty_paths": [],
+                "recent_commits": []
+            },
+            "processes": {
+                "active_rch_jobs": 0,
+                "active_cargo_jobs": 0,
+                "load_average_1m": 0.2,
+                "cpu_count": 64
+            },
+            "cass_health": {
+                "status": "healthy",
+                "healthy": true,
+                "initialized": true,
+                "recommended_action": null
+            },
+            "cass_status": {
+                "search_ready": true,
+                "semantic_fallback_mode": "lexical",
+                "active_rebuild": false
+            },
+            "evidence": {
+                "recent_threads": [],
+                "recent_proofs": [],
+                "proof_gaps": [],
+                "redaction_applied": false
+            }
+        }),
+    )?;
+
+    assert_verification_playbook(
+        &fixture_path,
+        "cass-rust",
+        "rust-source",
+        Some("cargo check --all-targets"),
+    )?;
+    assert_verification_playbook(
+        &fixture_path,
+        "cass-golden",
+        "golden-json",
+        Some("golden_robot_json"),
+    )?;
+    let docs_packet = assert_verification_playbook(
+        &fixture_path,
+        "cass-docs",
+        "docs",
+        Some("golden_robot_docs"),
+    )?;
+    require(
+        !verification_commands(&docs_packet)
+            .iter()
+            .any(|command| command.contains("clippy --all-targets")),
+        format!("docs-only playbook should not recommend the full Rust lint gate: {docs_packet:#}"),
+    )?;
+
+    let beads_packet =
+        assert_verification_playbook(&fixture_path, "cass-beads", "beads-only", None)?;
+    require_value_eq(
+        get_path(
+            &beads_packet,
+            &["work_packet", "verification", "rch_required"],
+        ),
+        json!(false),
+        "beads-only rch requirement",
+    )?;
+    require(
+        get_path(
+            &beads_packet,
+            &["work_packet", "verification", "manual_checks"],
+        )
+        .and_then(Value::as_array)
+        .is_some_and(|checks| {
+            checks.iter().any(|check| {
+                check
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .is_some_and(|command| matches!(command, "br sync --flush-only"))
+            })
+        }),
+        "beads-only playbook should include br sync --flush-only",
+    )?;
+
+    assert_verification_playbook(
+        &fixture_path,
+        "cass-sibling",
+        "sibling-dependency",
+        Some("strict-path-dep-validation"),
+    )?;
+    assert_verification_playbook(
+        &fixture_path,
+        "cass-ui",
+        "ui-snapshot",
+        Some("cargo test --test tui_flows"),
+    )?;
+    let large_packet = assert_verification_playbook(
+        &fixture_path,
+        "cass-large-e2e",
+        "large-e2e-excluded",
+        Some("cargo check --all-targets"),
+    )?;
+    require(
+        get_path(
+            &large_packet,
+            &["work_packet", "verification", "known_exclusions"],
+        )
+        .and_then(Value::as_array)
+        .is_some_and(|exclusions| {
+            exclusions.iter().any(|exclusion| {
+                exclusion
+                    .get("pattern")
+                    .and_then(Value::as_str)
+                    .is_some_and(|pattern| matches!(pattern, "e2e_large_dataset"))
+            })
+        }),
+        "large e2e playbook should report the known exclusion",
+    )?;
+    require(
+        !verification_commands(&large_packet)
+            .iter()
+            .any(|command| command.contains("e2e_large_dataset")),
+        format!("large e2e playbook must not suggest the known expensive suite: {large_packet:#}"),
+    )?;
+
+    Ok(())
+}
+
+#[test]
 fn swarm_coordination_lint_cli_reports_clean_read_only_fixture() -> Result<(), Box<dyn Error>> {
     let fixture_path = repo_path("tests/fixtures/swarm_status/healthy.inputs.json");
     let output = run_swarm_lint_fixture(&fixture_path, None)?;
@@ -2360,6 +2519,80 @@ impl SyntheticSwarmScale {
     fn total_bead_count(self) -> usize {
         self.ready_count + self.in_progress_count + self.blocked_count
     }
+}
+
+fn verification_playbook_bead<const P: usize, const L: usize>(
+    id: &str,
+    title: &str,
+    touched_paths: [&str; P],
+    labels: [&str; L],
+) -> Value {
+    let touched_paths: Vec<&str> = touched_paths.into_iter().collect();
+    let labels: Vec<&str> = labels.into_iter().collect();
+    json!({
+        "id": id,
+        "title": title,
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "labels": labels,
+        "touched_paths": touched_paths,
+        "updated_at": "2026-05-08T15:55:00Z"
+    })
+}
+
+fn assert_verification_playbook(
+    fixture_path: &Path,
+    bead_id: &str,
+    expected_class: &str,
+    expected_command_fragment: Option<&str>,
+) -> Result<Value, Box<dyn Error>> {
+    let output = run_swarm_work_packet_fixture(fixture_path, Some(bead_id))?;
+    require_value_eq(
+        get_path(&output, &["summary", "bead_id"]),
+        json!(bead_id),
+        &format!("{bead_id} selected bead"),
+    )?;
+    require(
+        get_path(&output, &["work_packet", "verification", "file_classes"])
+            .and_then(Value::as_array)
+            .is_some_and(|classes| {
+                classes.iter().any(|class| {
+                    class
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .is_some_and(|kind| kind.cmp(expected_class).is_eq())
+                })
+            }),
+        format!("{bead_id} missing expected file class {expected_class}"),
+    )?;
+    if let Some(fragment) = expected_command_fragment {
+        let commands = verification_commands(&output);
+        require(
+            commands.iter().any(|command| command.contains(fragment)),
+            format!(
+                "{bead_id} missing expected verification command fragment {fragment}: {commands:?}"
+            ),
+        )?;
+        require(
+            commands
+                .iter()
+                .all(|command| command.starts_with("rch exec -- env ")),
+            format!("{bead_id} verification commands must use rch: {commands:?}"),
+        )?;
+    }
+    assert_no_forbidden_fixture_leaks(&format!("work-packet-{bead_id}"), &output);
+    Ok(output)
+}
+
+fn verification_commands(output: &Value) -> Vec<String> {
+    get_path(output, &["work_packet", "verification", "commands"])
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
 }
 
 fn write_synthetic_swarm_status_fixture(
