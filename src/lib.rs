@@ -12356,34 +12356,38 @@ fn swarm_work_packet_collision_simulation(
             assignment_blockers.insert("active-reservation".to_string());
             requires_coordination = true;
             advisories.push(swarm_work_packet_collision_advisory(
-                "blocked-by-active-holder",
-                "high",
-                "Proposed work overlaps an active exclusive reservation.",
-                &candidate_path,
-                Some(path_pattern),
-                Some(holder),
-                &match_kind,
-                vec![
-                    format!("reservations[{reservation_index}]"),
-                    "work_packet.collision_simulation.proposed_paths".to_string(),
-                ],
+                SwarmCollisionAdvisoryInput {
+                    class: "blocked-by-active-holder",
+                    severity: "high",
+                    summary: "Proposed work overlaps an active exclusive reservation.",
+                    path: &candidate_path,
+                    compared_path: Some(path_pattern),
+                    holder: Some(holder),
+                    match_kind: &match_kind,
+                    evidence_refs: vec![
+                        format!("reservations[{reservation_index}]"),
+                        "work_packet.collision_simulation.proposed_paths".to_string(),
+                    ],
+                },
             ));
         } else if active {
             classes.insert("needs-coordination".to_string());
             assignment_blockers.insert("active-reservation".to_string());
             requires_coordination = true;
             advisories.push(swarm_work_packet_collision_advisory(
-                "needs-coordination",
-                "medium",
-                "Proposed work overlaps an active non-exclusive reservation.",
-                &candidate_path,
-                Some(path_pattern),
-                Some(holder),
-                &match_kind,
-                vec![
-                    format!("reservations[{reservation_index}]"),
-                    "work_packet.collision_simulation.proposed_paths".to_string(),
-                ],
+                SwarmCollisionAdvisoryInput {
+                    class: "needs-coordination",
+                    severity: "medium",
+                    summary: "Proposed work overlaps an active non-exclusive reservation.",
+                    path: &candidate_path,
+                    compared_path: Some(path_pattern),
+                    holder: Some(holder),
+                    match_kind: &match_kind,
+                    evidence_refs: vec![
+                        format!("reservations[{reservation_index}]"),
+                        "work_packet.collision_simulation.proposed_paths".to_string(),
+                    ],
+                },
             ));
         } else {
             classes.insert("stale-holder-review".to_string());
@@ -12391,17 +12395,19 @@ fn swarm_work_packet_collision_simulation(
             requires_coordination = true;
             requires_operator_review = true;
             advisories.push(swarm_work_packet_collision_advisory(
-                "stale-holder-review",
-                "medium",
-                "Proposed work overlaps an expired reservation; review before reuse.",
-                &candidate_path,
-                Some(path_pattern),
-                Some(holder),
-                &match_kind,
-                vec![
-                    format!("reservations[{reservation_index}]"),
-                    "work_packet.collision_simulation.proposed_paths".to_string(),
-                ],
+                SwarmCollisionAdvisoryInput {
+                    class: "stale-holder-review",
+                    severity: "medium",
+                    summary: "Proposed work overlaps an expired reservation; review before reuse.",
+                    path: &candidate_path,
+                    compared_path: Some(path_pattern),
+                    holder: Some(holder),
+                    match_kind: &match_kind,
+                    evidence_refs: vec![
+                        format!("reservations[{reservation_index}]"),
+                        "work_packet.collision_simulation.proposed_paths".to_string(),
+                    ],
+                },
             ));
         }
     }
@@ -12416,17 +12422,19 @@ fn swarm_work_packet_collision_simulation(
             assignment_blockers.insert("dirty-peer-work".to_string());
             requires_coordination = true;
             advisories.push(swarm_work_packet_collision_advisory(
-                "needs-coordination",
-                "high",
-                "Proposed work overlaps peer dirty worktree state.",
-                &candidate_path,
-                Some(dirty_path),
-                None,
-                &match_kind,
-                vec![
-                    format!("git.dirty_paths[{dirty_index}]"),
-                    "work_packet.collision_simulation.proposed_paths".to_string(),
-                ],
+                SwarmCollisionAdvisoryInput {
+                    class: "needs-coordination",
+                    severity: "high",
+                    summary: "Proposed work overlaps peer dirty worktree state.",
+                    path: &candidate_path,
+                    compared_path: Some(dirty_path),
+                    holder: None,
+                    match_kind: &match_kind,
+                    evidence_refs: vec![
+                        format!("git.dirty_paths[{dirty_index}]"),
+                        "work_packet.collision_simulation.proposed_paths".to_string(),
+                    ],
+                },
             ));
         }
     }
@@ -12451,17 +12459,19 @@ fn swarm_work_packet_collision_simulation(
             assignment_blockers.insert("recent-commit".to_string());
             requires_coordination = true;
             advisories.push(swarm_work_packet_collision_advisory(
-                "needs-coordination",
-                "medium",
-                "A recent commit touched the same path; inspect ownership before claiming.",
-                &candidate_path,
-                Some(changed_path),
-                Some(commit_ref),
-                &match_kind,
-                vec![
-                    "git.recent_commits".to_string(),
-                    "work_packet.collision_simulation.proposed_paths".to_string(),
-                ],
+                SwarmCollisionAdvisoryInput {
+                    class: "needs-coordination",
+                    severity: "medium",
+                    summary: "A recent commit touched the same path; inspect ownership before claiming.",
+                    path: &candidate_path,
+                    compared_path: Some(changed_path),
+                    holder: Some(commit_ref),
+                    match_kind: &match_kind,
+                    evidence_refs: vec![
+                        "git.recent_commits".to_string(),
+                        "work_packet.collision_simulation.proposed_paths".to_string(),
+                    ],
+                },
             ));
         }
     }
@@ -12471,14 +12481,18 @@ fn swarm_work_packet_collision_simulation(
             classes.insert("generated-artifact-risk".to_string());
             requires_operator_review = true;
             advisories.push(swarm_work_packet_collision_advisory(
-                "generated-artifact-risk",
-                "medium",
-                "Proposed work includes a generated or build-output path.",
-                path,
-                None,
-                None,
-                "generated",
-                vec!["work_packet.collision_simulation.proposed_paths".to_string()],
+                SwarmCollisionAdvisoryInput {
+                    class: "generated-artifact-risk",
+                    severity: "medium",
+                    summary: "Proposed work includes a generated or build-output path.",
+                    path,
+                    compared_path: None,
+                    holder: None,
+                    match_kind: "generated",
+                    evidence_refs: vec![
+                        "work_packet.collision_simulation.proposed_paths".to_string(),
+                    ],
+                },
             ));
         }
     }
@@ -12692,26 +12706,30 @@ fn swarm_work_packet_expression_has_glob(expression: &str) -> bool {
         .any(|ch| matches!(ch, '*' | '?' | '[' | ']'))
 }
 
-fn swarm_work_packet_collision_advisory(
-    class: &str,
-    severity: &str,
-    summary: &str,
-    path: &str,
-    compared_path: Option<&str>,
-    holder: Option<&str>,
-    match_kind: &str,
+struct SwarmCollisionAdvisoryInput<'a> {
+    class: &'a str,
+    severity: &'a str,
+    summary: &'a str,
+    path: &'a str,
+    compared_path: Option<&'a str>,
+    holder: Option<&'a str>,
+    match_kind: &'a str,
     evidence_refs: Vec<String>,
+}
+
+fn swarm_work_packet_collision_advisory(
+    input: SwarmCollisionAdvisoryInput<'_>,
 ) -> serde_json::Value {
     serde_json::json!({
-        "class": class,
-        "kind": class,
-        "severity": severity,
-        "summary": summary,
-        "path": path,
-        "compared_path": compared_path,
-        "holder": holder,
-        "match_kind": match_kind,
-        "evidence_refs": evidence_refs,
+        "class": input.class,
+        "kind": input.class,
+        "severity": input.severity,
+        "summary": input.summary,
+        "path": input.path,
+        "compared_path": input.compared_path,
+        "holder": input.holder,
+        "match_kind": input.match_kind,
+        "evidence_refs": input.evidence_refs,
     })
 }
 
