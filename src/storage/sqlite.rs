@@ -5431,16 +5431,41 @@ fn collect_message_ids_for_conversation_gap(
 
 fn delete_rows_by_i64_chunks(
     tx: &FrankenTransaction<'_>,
-    delete_sql: &'static str,
+    delete_many_sql_prefix: &'static str,
     ids: &[i64],
 ) -> Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let full_chunk_sql = delete_rows_by_i64_sql(delete_many_sql_prefix, ORPHAN_FK_ID_CHUNK_SIZE);
+    let tail_len = ids.len() % ORPHAN_FK_ID_CHUNK_SIZE;
+    let tail_sql =
+        (tail_len != 0).then(|| delete_rows_by_i64_sql(delete_many_sql_prefix, tail_len));
+
     let mut deleted = 0;
     for chunk in ids.chunks(ORPHAN_FK_ID_CHUNK_SIZE) {
-        for id in chunk {
-            deleted += tx.execute_with_params(delete_sql, &[SqliteValue::from(*id)])?;
-        }
+        let sql = if chunk.len() == ORPHAN_FK_ID_CHUNK_SIZE {
+            &full_chunk_sql
+        } else {
+            tail_sql.as_ref().unwrap_or(&full_chunk_sql)
+        };
+        let params = chunk
+            .iter()
+            .map(|id| SqliteValue::from(*id))
+            .collect::<Vec<_>>();
+        deleted += tx.execute_with_params(sql, &params)?;
     }
     Ok(deleted)
+}
+
+fn delete_rows_by_i64_sql(delete_many_sql_prefix: &'static str, count: usize) -> String {
+    let placeholders = sql_placeholders(count);
+    format!("{delete_many_sql_prefix} ({placeholders})")
+}
+
+fn sql_placeholders(count: usize) -> String {
+    vec!["?"; count].join(", ")
 }
 
 fn delete_orphan_message_ids_bisecting_oom(conn: &FrankenConnection, ids: &[i64]) -> Result<usize> {
@@ -5480,7 +5505,7 @@ fn delete_orphan_message_id_chunk_once(conn: &FrankenConnection, ids: &[i64]) ->
     let mut tx = conn.transaction()?;
     let mut deleted = 0usize;
     for entry in ORPHAN_MESSAGE_DEPENDENT_TABLES {
-        match delete_rows_by_i64_chunks(&tx, entry.delete_sql, ids) {
+        match delete_rows_by_i64_chunks(&tx, entry.delete_many_sql_prefix, ids) {
             Ok(count) => {
                 deleted = deleted.saturating_add(count);
             }
@@ -5503,7 +5528,7 @@ fn delete_orphan_message_id_chunk_once(conn: &FrankenConnection, ids: &[i64]) ->
         }
     }
     deleted = deleted.saturating_add(
-        delete_rows_by_i64_chunks(&tx, "DELETE FROM messages WHERE id = ?1", ids)
+        delete_rows_by_i64_chunks(&tx, "DELETE FROM messages WHERE id IN", ids)
             .context("deleting orphan rows from messages")?,
     );
     tx.commit()?;
@@ -5569,30 +5594,9 @@ fn delete_direct_orphan_id_chunk_once(
     ids: &[i64],
 ) -> Result<usize> {
     let mut tx = conn.transaction()?;
-    let deleted = delete_rows_by_i64_chunk_bulk(&tx, entry.delete_many_sql_prefix, ids)?;
+    let deleted = delete_rows_by_i64_chunks(&tx, entry.delete_many_sql_prefix, ids)?;
     tx.commit()?;
     Ok(deleted)
-}
-
-fn delete_rows_by_i64_chunk_bulk(
-    tx: &FrankenTransaction<'_>,
-    delete_many_sql_prefix: &'static str,
-    ids: &[i64],
-) -> Result<usize> {
-    if ids.is_empty() {
-        return Ok(0);
-    }
-
-    let placeholders = (1..=ids.len())
-        .map(|idx| format!("?{idx}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!("{delete_many_sql_prefix} ({placeholders})");
-    let params = ids
-        .iter()
-        .map(|id| SqliteValue::from(*id))
-        .collect::<Vec<_>>();
-    Ok(tx.execute_with_params(&sql, &params)?)
 }
 
 /// Tables whose FK parent rows can go missing when an index transaction is
@@ -5610,7 +5614,10 @@ const ORPHAN_DIRECT_CHILD_TABLES: &[OrphanFkTable] = &[
     OrphanFkTable {
         child_table: "message_metrics",
         orphan_id_page_sql: "SELECT message_id FROM message_metrics \
-                             WHERE message_id NOT IN (SELECT id FROM messages) \
+                             WHERE NOT EXISTS (\
+                                 SELECT 1 FROM messages \
+                                 WHERE messages.id = message_metrics.message_id\
+                             ) \
                              ORDER BY message_id \
                              LIMIT ?1",
         delete_many_sql_prefix: "DELETE FROM message_metrics WHERE message_id IN",
@@ -5618,7 +5625,10 @@ const ORPHAN_DIRECT_CHILD_TABLES: &[OrphanFkTable] = &[
     OrphanFkTable {
         child_table: "token_usage",
         orphan_id_page_sql: "SELECT message_id FROM token_usage \
-                             WHERE message_id NOT IN (SELECT id FROM messages) \
+                             WHERE NOT EXISTS (\
+                                 SELECT 1 FROM messages \
+                                 WHERE messages.id = token_usage.message_id\
+                             ) \
                              ORDER BY message_id \
                              LIMIT ?1",
         delete_many_sql_prefix: "DELETE FROM token_usage WHERE message_id IN",
@@ -5626,7 +5636,10 @@ const ORPHAN_DIRECT_CHILD_TABLES: &[OrphanFkTable] = &[
     OrphanFkTable {
         child_table: "snippets",
         orphan_id_page_sql: "SELECT message_id FROM snippets \
-                             WHERE message_id NOT IN (SELECT id FROM messages) \
+                             WHERE NOT EXISTS (\
+                                 SELECT 1 FROM messages \
+                                 WHERE messages.id = snippets.message_id\
+                             ) \
                              ORDER BY message_id \
                              LIMIT ?1",
         delete_many_sql_prefix: "DELETE FROM snippets WHERE message_id IN",
@@ -5634,7 +5647,10 @@ const ORPHAN_DIRECT_CHILD_TABLES: &[OrphanFkTable] = &[
     OrphanFkTable {
         child_table: "conversation_tags",
         orphan_id_page_sql: "SELECT conversation_id FROM conversation_tags \
-                             WHERE conversation_id NOT IN (SELECT id FROM conversations) \
+                             WHERE NOT EXISTS (\
+                                 SELECT 1 FROM conversations \
+                                 WHERE conversations.id = conversation_tags.conversation_id\
+                             ) \
                              ORDER BY conversation_id \
                              LIMIT ?1",
         delete_many_sql_prefix: "DELETE FROM conversation_tags WHERE conversation_id IN",
@@ -5643,21 +5659,21 @@ const ORPHAN_DIRECT_CHILD_TABLES: &[OrphanFkTable] = &[
 
 struct OrphanMessageDependentTable {
     child_table: &'static str,
-    delete_sql: &'static str,
+    delete_many_sql_prefix: &'static str,
 }
 
 const ORPHAN_MESSAGE_DEPENDENT_TABLES: &[OrphanMessageDependentTable] = &[
     OrphanMessageDependentTable {
         child_table: "message_metrics",
-        delete_sql: "DELETE FROM message_metrics WHERE message_id = ?1",
+        delete_many_sql_prefix: "DELETE FROM message_metrics WHERE message_id IN",
     },
     OrphanMessageDependentTable {
         child_table: "token_usage",
-        delete_sql: "DELETE FROM token_usage WHERE message_id = ?1",
+        delete_many_sql_prefix: "DELETE FROM token_usage WHERE message_id IN",
     },
     OrphanMessageDependentTable {
         child_table: "snippets",
-        delete_sql: "DELETE FROM snippets WHERE message_id = ?1",
+        delete_many_sql_prefix: "DELETE FROM snippets WHERE message_id IN",
     },
 ];
 

@@ -133,6 +133,17 @@ The `.env` file exists and **MUST NEVER be overwritten**.
 - `asupersync` — Async runtime (multi-thread, fs, spawn_blocking, signals)
 - `toon` — Token-optimized serialization
 
+**Sibling dependency contract:**
+
+| Dependency | Pinned revision |
+|------------|-----------------|
+| `frankensqlite` / `fsqlite-types` | `68426d3e` |
+| `franken-agent-detection` | `a0ce134b` |
+| `asupersync` | `0.3.1` |
+| `frankensearch` | `128d134a` |
+| `frankentui` | `5f78cfa0` |
+| `toon` (`tru`) | `5669b72a` |
+
 ### Release Profile
 
 The release build optimizes for speed with LTO + single-codegen-unit + stripped binary:
