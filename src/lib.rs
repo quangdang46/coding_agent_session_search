@@ -11871,11 +11871,32 @@ fn render_swarm_work_packet_from_status(
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
     });
-    let claim_blockers = selected_bead
+    let mut claim_blockers = selected_bead
         .and_then(|bead| bead.get("claim_blockers"))
         .and_then(serde_json::Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let candidate_reservations = selected_bead
+        .map(swarm_work_packet_suggested_reservations)
+        .unwrap_or_default();
+    let verification = selected_bead
+        .map(|bead| swarm_work_packet_verification(bead, build_pressure))
+        .unwrap_or_else(swarm_work_packet_empty_verification);
+    let collision_simulation = swarm_work_packet_collision_simulation(
+        status,
+        selected_bead,
+        &candidate_reservations,
+        &verification,
+    );
+    for blocker in swarm_work_packet_collision_claim_blockers(&collision_simulation) {
+        if !claim_blockers.iter().any(|existing| {
+            existing
+                .as_str()
+                .is_some_and(|existing| existing == blocker.as_str())
+        }) {
+            claim_blockers.push(serde_json::json!(blocker));
+        }
+    }
 
     let readiness_state = swarm_work_packet_readiness_state(
         selected.is_some(),
@@ -11903,15 +11924,10 @@ fn render_swarm_work_packet_from_status(
         .map(swarm_work_packet_bead_summary)
         .unwrap_or_else(|| serde_json::json!(null));
     let suggested_reservations = if safe_to_start {
-        selected_bead
-            .map(swarm_work_packet_suggested_reservations)
-            .unwrap_or_default()
+        candidate_reservations
     } else {
         Vec::new()
     };
-    let verification = selected_bead
-        .map(|bead| swarm_work_packet_verification(bead, build_pressure))
-        .unwrap_or_else(swarm_work_packet_empty_verification);
     let coordination = swarm_work_packet_coordination(bead_id, safe_to_start);
     let closeout = swarm_work_packet_closeout(bead_id);
     let fallback_actions = swarm_work_packet_fallback_actions(
@@ -11951,6 +11967,14 @@ fn render_swarm_work_packet_from_status(
             "requires_coordination": !safe_to_start,
             "claim_blocker_count": claim_blockers.len(),
             "suggested_reservation_count": suggested_reservations.len(),
+            "collision_class": collision_simulation
+                .get("overall_class")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!("unknown")),
+            "collision_advisory_count": collision_simulation
+                .get("advisories")
+                .and_then(serde_json::Value::as_array)
+                .map_or(0, Vec::len),
             "proof_command_count": verification
                 .get("commands")
                 .and_then(serde_json::Value::as_array)
@@ -11966,6 +11990,7 @@ fn render_swarm_work_packet_from_status(
                 "evidence_refs": evidence_refs,
             },
             "suggested_reservations": suggested_reservations,
+            "collision_simulation": collision_simulation,
             "coordination": coordination,
             "verification": verification,
             "closeout": closeout,
@@ -12241,6 +12266,509 @@ fn swarm_work_packet_empty_verification() -> serde_json::Value {
         "full_gate_required": false,
         "rationale": "No bead was selected, so no verification plan was generated.",
     })
+}
+
+fn swarm_work_packet_collision_claim_blockers(simulation: &serde_json::Value) -> Vec<String> {
+    simulation
+        .get("assignment_blockers")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+fn swarm_work_packet_collision_simulation(
+    status: &serde_json::Value,
+    bead: Option<&serde_json::Value>,
+    candidate_reservations: &[serde_json::Value],
+    verification: &serde_json::Value,
+) -> serde_json::Value {
+    let Some(bead) = bead else {
+        return serde_json::json!({
+            "mode": "read_only_advisory",
+            "overall_class": "no-selected-bead",
+            "classes": [],
+            "requires_coordination": false,
+            "requires_operator_review": false,
+            "assignment_blocked": false,
+            "assignment_blockers": [],
+            "proposed_paths": [],
+            "advisories": [],
+            "inputs": {
+                "selected_bead": false,
+                "reservation_count": 0,
+                "dirty_path_count": 0,
+                "recent_commit_count": 0
+            },
+            "mutation_policy": swarm_work_packet_collision_mutation_policy(),
+        });
+    };
+
+    let bead_id = bead
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("[UNKNOWN_BEAD]");
+    let proposed_paths = swarm_work_packet_collision_proposed_paths(bead, candidate_reservations);
+    let reservations = status
+        .get("reservations")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let dirty_paths = swarm_work_packet_collision_dirty_paths(status);
+    let recent_commit_paths = swarm_work_packet_collision_recent_commit_paths(status);
+    let mut classes = BTreeSet::new();
+    let mut assignment_blockers = BTreeSet::new();
+    let mut advisories = Vec::new();
+    let mut requires_coordination = false;
+    let mut requires_operator_review = false;
+
+    for (reservation_index, reservation) in reservations.iter().enumerate() {
+        let Some(path_pattern) = reservation
+            .get("path_pattern")
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        let Some((candidate_path, match_kind)) =
+            swarm_work_packet_collision_first_match(&proposed_paths, path_pattern)
+        else {
+            continue;
+        };
+
+        let holder = reservation
+            .get("holder")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("[UNKNOWN_HOLDER]");
+        let active = reservation
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(|state| state != "expired")
+            && swarm_reservation_active(reservation);
+        let exclusive = reservation
+            .get("exclusive")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+
+        if active && exclusive {
+            classes.insert("blocked-by-active-holder".to_string());
+            assignment_blockers.insert("active-reservation".to_string());
+            requires_coordination = true;
+            advisories.push(swarm_work_packet_collision_advisory(
+                "blocked-by-active-holder",
+                "high",
+                "Proposed work overlaps an active exclusive reservation.",
+                &candidate_path,
+                Some(path_pattern),
+                Some(holder),
+                &match_kind,
+                vec![
+                    format!("reservations[{reservation_index}]"),
+                    "work_packet.collision_simulation.proposed_paths".to_string(),
+                ],
+            ));
+        } else if active {
+            classes.insert("needs-coordination".to_string());
+            assignment_blockers.insert("active-reservation".to_string());
+            requires_coordination = true;
+            advisories.push(swarm_work_packet_collision_advisory(
+                "needs-coordination",
+                "medium",
+                "Proposed work overlaps an active non-exclusive reservation.",
+                &candidate_path,
+                Some(path_pattern),
+                Some(holder),
+                &match_kind,
+                vec![
+                    format!("reservations[{reservation_index}]"),
+                    "work_packet.collision_simulation.proposed_paths".to_string(),
+                ],
+            ));
+        } else {
+            classes.insert("stale-holder-review".to_string());
+            assignment_blockers.insert("stale-reservation".to_string());
+            requires_coordination = true;
+            requires_operator_review = true;
+            advisories.push(swarm_work_packet_collision_advisory(
+                "stale-holder-review",
+                "medium",
+                "Proposed work overlaps an expired reservation; review before reuse.",
+                &candidate_path,
+                Some(path_pattern),
+                Some(holder),
+                &match_kind,
+                vec![
+                    format!("reservations[{reservation_index}]"),
+                    "work_packet.collision_simulation.proposed_paths".to_string(),
+                ],
+            ));
+        }
+    }
+
+    let mut dirty_overlap = false;
+    for (dirty_index, dirty_path) in dirty_paths.iter().enumerate() {
+        if let Some((candidate_path, match_kind)) =
+            swarm_work_packet_collision_first_match(&proposed_paths, dirty_path)
+        {
+            dirty_overlap = true;
+            classes.insert("needs-coordination".to_string());
+            assignment_blockers.insert("dirty-peer-work".to_string());
+            requires_coordination = true;
+            advisories.push(swarm_work_packet_collision_advisory(
+                "needs-coordination",
+                "high",
+                "Proposed work overlaps peer dirty worktree state.",
+                &candidate_path,
+                Some(dirty_path),
+                None,
+                &match_kind,
+                vec![
+                    format!("git.dirty_paths[{dirty_index}]"),
+                    "work_packet.collision_simulation.proposed_paths".to_string(),
+                ],
+            ));
+        }
+    }
+    if !dirty_paths.is_empty() && !dirty_overlap {
+        advisories.push(serde_json::json!({
+            "class": "safe",
+            "kind": "peer-dirty-unrelated",
+            "severity": "info",
+            "summary": "Peer dirty paths are present but do not overlap the proposed work.",
+            "path": dirty_paths[0],
+            "match_kind": "none",
+            "holder": null,
+            "evidence_refs": ["git.dirty_paths", "work_packet.collision_simulation.proposed_paths"],
+        }));
+    }
+
+    for (commit_ref, changed_path) in &recent_commit_paths {
+        if let Some((candidate_path, match_kind)) =
+            swarm_work_packet_collision_first_match(&proposed_paths, changed_path)
+        {
+            classes.insert("needs-coordination".to_string());
+            assignment_blockers.insert("recent-commit".to_string());
+            requires_coordination = true;
+            advisories.push(swarm_work_packet_collision_advisory(
+                "needs-coordination",
+                "medium",
+                "A recent commit touched the same path; inspect ownership before claiming.",
+                &candidate_path,
+                Some(changed_path),
+                Some(commit_ref),
+                &match_kind,
+                vec![
+                    "git.recent_commits".to_string(),
+                    "work_packet.collision_simulation.proposed_paths".to_string(),
+                ],
+            ));
+        }
+    }
+
+    for path in &proposed_paths {
+        if swarm_work_packet_generated_artifact_path(path) {
+            classes.insert("generated-artifact-risk".to_string());
+            requires_operator_review = true;
+            advisories.push(swarm_work_packet_collision_advisory(
+                "generated-artifact-risk",
+                "medium",
+                "Proposed work includes a generated or build-output path.",
+                path,
+                None,
+                None,
+                "generated",
+                vec!["work_packet.collision_simulation.proposed_paths".to_string()],
+            ));
+        }
+    }
+
+    if swarm_work_packet_collision_has_sibling_risk(&proposed_paths, verification) {
+        classes.insert("sibling-repo-risk".to_string());
+        classes.insert("needs-coordination".to_string());
+        assignment_blockers.insert("sibling-repo-risk".to_string());
+        requires_coordination = true;
+        requires_operator_review = true;
+        advisories.push(serde_json::json!({
+            "class": "sibling-repo-risk",
+            "kind": "sibling-dependency-surface",
+            "severity": "medium",
+            "summary": "Proposed work touches sibling dependency or path-dependency contract surfaces.",
+            "path": proposed_paths
+                .iter()
+                .find(|path| swarm_work_packet_sibling_path(path))
+                .cloned()
+                .unwrap_or_else(|| "Cargo.toml".to_string()),
+            "match_kind": "class",
+            "holder": null,
+            "evidence_refs": [
+                "work_packet.verification.file_classes",
+                "work_packet.collision_simulation.proposed_paths"
+            ],
+        }));
+    }
+
+    let owners = bead
+        .get("owners")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if !owners.is_empty() && !classes.contains("blocked-by-active-holder") {
+        classes.insert("needs-coordination".to_string());
+        assignment_blockers.insert("owned-bead".to_string());
+        requires_coordination = true;
+        advisories.push(serde_json::json!({
+            "class": "needs-coordination",
+            "kind": "bead-owner-present",
+            "severity": "medium",
+            "summary": "Selected bead already has ownership evidence.",
+            "path": null,
+            "match_kind": "owner",
+            "holder": owners,
+            "evidence_refs": ["work_packet.bead.owners"],
+        }));
+    }
+
+    if classes.is_empty() {
+        classes.insert("safe".to_string());
+    }
+    let overall_class = swarm_work_packet_collision_overall_class(&classes);
+    let class_values = classes
+        .into_iter()
+        .map(serde_json::Value::String)
+        .collect::<Vec<_>>();
+    let blocker_values = assignment_blockers
+        .into_iter()
+        .map(serde_json::Value::String)
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "mode": "read_only_advisory",
+        "bead_id": bead_id,
+        "overall_class": overall_class,
+        "classes": class_values,
+        "requires_coordination": requires_coordination,
+        "requires_operator_review": requires_operator_review,
+        "assignment_blocked": !blocker_values.is_empty(),
+        "assignment_blockers": blocker_values,
+        "proposed_paths": proposed_paths,
+        "advisories": advisories,
+        "inputs": {
+            "selected_bead": true,
+            "reservation_count": reservations.len(),
+            "dirty_path_count": dirty_paths.len(),
+            "recent_commit_count": recent_commit_paths.len(),
+        },
+        "mutation_policy": swarm_work_packet_collision_mutation_policy(),
+    })
+}
+
+fn swarm_work_packet_collision_mutation_policy() -> serde_json::Value {
+    serde_json::json!({
+        "beads_mutated": false,
+        "agent_mail_mutated": false,
+        "git_mutated": false,
+        "reservations_mutated": false,
+        "files_rewritten": false,
+        "raw_session_content_inspected": false,
+    })
+}
+
+fn swarm_work_packet_collision_proposed_paths(
+    bead: &serde_json::Value,
+    candidate_reservations: &[serde_json::Value],
+) -> Vec<String> {
+    let mut paths = BTreeSet::new();
+    paths.extend(swarm_work_packet_touched_paths(bead));
+    paths.extend(candidate_reservations.iter().filter_map(|reservation| {
+        reservation
+            .get("path_pattern")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    }));
+    paths.into_iter().collect()
+}
+
+fn swarm_work_packet_collision_dirty_paths(status: &serde_json::Value) -> Vec<String> {
+    status
+        .get("git")
+        .and_then(|git| git.get("dirty_paths"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|path| path.get("path").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
+fn swarm_work_packet_collision_recent_commit_paths(
+    status: &serde_json::Value,
+) -> Vec<(String, String)> {
+    let mut paths = Vec::new();
+    for commit in status
+        .get("git")
+        .and_then(|git| git.get("recent_commits"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let commit_ref = commit
+            .get("hash")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| commit.get("subject").and_then(serde_json::Value::as_str))
+            .unwrap_or("recent-commit")
+            .to_string();
+        paths.extend(
+            commit
+                .get("changed_paths")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .map(|path| (commit_ref.clone(), path.to_string())),
+        );
+    }
+    paths
+}
+
+fn swarm_work_packet_collision_first_match(
+    proposed_paths: &[String],
+    expression: &str,
+) -> Option<(String, String)> {
+    proposed_paths
+        .iter()
+        .find(|path| swarm_work_packet_path_expressions_overlap(path, expression))
+        .map(|path| {
+            (
+                path.clone(),
+                swarm_work_packet_collision_match_kind(path, expression).to_string(),
+            )
+        })
+}
+
+fn swarm_work_packet_path_expressions_overlap(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    if swarm_path_pattern_matches(left, right) || swarm_path_pattern_matches(right, left) {
+        return true;
+    }
+    let left_prefix = swarm_work_packet_static_path_prefix(left);
+    let right_prefix = swarm_work_packet_static_path_prefix(right);
+    !left_prefix.is_empty()
+        && !right_prefix.is_empty()
+        && (left_prefix.starts_with(&right_prefix) || right_prefix.starts_with(&left_prefix))
+}
+
+fn swarm_work_packet_static_path_prefix(expression: &str) -> String {
+    let first_glob = expression
+        .char_indices()
+        .find_map(|(index, ch)| matches!(ch, '*' | '?' | '[').then_some(index))
+        .unwrap_or(expression.len());
+    expression[..first_glob]
+        .trim_end_matches("/**")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn swarm_work_packet_collision_match_kind(left: &str, right: &str) -> &'static str {
+    if left == right {
+        "exact"
+    } else if swarm_work_packet_expression_has_glob(left)
+        || swarm_work_packet_expression_has_glob(right)
+    {
+        "glob"
+    } else {
+        "path"
+    }
+}
+
+fn swarm_work_packet_expression_has_glob(expression: &str) -> bool {
+    expression
+        .chars()
+        .any(|ch| matches!(ch, '*' | '?' | '[' | ']'))
+}
+
+fn swarm_work_packet_collision_advisory(
+    class: &str,
+    severity: &str,
+    summary: &str,
+    path: &str,
+    compared_path: Option<&str>,
+    holder: Option<&str>,
+    match_kind: &str,
+    evidence_refs: Vec<String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "class": class,
+        "kind": class,
+        "severity": severity,
+        "summary": summary,
+        "path": path,
+        "compared_path": compared_path,
+        "holder": holder,
+        "match_kind": match_kind,
+        "evidence_refs": evidence_refs,
+    })
+}
+
+fn swarm_work_packet_generated_artifact_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower == "target"
+        || lower.starts_with("target/")
+        || lower.contains("/target/")
+        || lower.starts_with("/tmp/cass-")
+        || lower.contains("cargo_target_dir")
+        || lower.ends_with(".profraw")
+}
+
+fn swarm_work_packet_collision_has_sibling_risk(
+    proposed_paths: &[String],
+    verification: &serde_json::Value,
+) -> bool {
+    proposed_paths
+        .iter()
+        .any(|path| swarm_work_packet_sibling_path(path))
+        || verification
+            .get("file_classes")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|class| {
+                class
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|kind| kind == "sibling-dependency")
+            })
+}
+
+fn swarm_work_packet_sibling_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.starts_with("../")
+        || matches!(lower.as_str(), "cargo.toml" | "cargo.lock" | "build.rs")
+        || lower.starts_with(".cargo/")
+        || lower.contains("../franken")
+        || lower.contains("../asupersync")
+        || lower.contains("../toon")
+}
+
+fn swarm_work_packet_collision_overall_class(classes: &BTreeSet<String>) -> &'static str {
+    for class in [
+        "blocked-by-active-holder",
+        "stale-holder-review",
+        "sibling-repo-risk",
+        "needs-coordination",
+        "generated-artifact-risk",
+        "safe",
+    ] {
+        if classes.contains(class) {
+            return class;
+        }
+    }
+    "safe"
 }
 
 fn swarm_work_packet_touched_paths(bead: &serde_json::Value) -> Vec<String> {
