@@ -25488,21 +25488,20 @@ mod tests {
     /// `read_search_maintenance_snapshot` to verify the value flows
     /// end-to-end into the same data the status JSON consumes.
     #[test]
-    fn acquire_index_run_lock_writes_last_progress_at_ms_field() {
+    fn acquire_index_run_lock_writes_last_progress_at_ms_field() -> Result<()> {
         use crate::search::asset_state::read_search_maintenance_snapshot;
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new()?;
         let db_path = tmp.path().join("agent_search.db");
-        std::fs::write(&db_path, b"placeholder").unwrap();
+        std::fs::write(&db_path, b"placeholder")?;
         let before_ms = crate::storage::sqlite::FrankenStorage::now_millis();
-        let guard = acquire_index_run_lock(tmp.path(), &db_path, SearchMaintenanceMode::Index)
-            .expect("acquire index run lock");
+        let guard = acquire_index_run_lock(tmp.path(), &db_path, SearchMaintenanceMode::Index)?;
         let after_ms = crate::storage::sqlite::FrankenStorage::now_millis();
 
         // The on-disk lock file must include the `last_progress_at_ms`
         // key with a fresh timestamp. Parsing it lets a future change
         // to the field's value type surface as a precise test failure.
         let lock_path = tmp.path().join("index-run.lock");
-        let raw = std::fs::read_to_string(&lock_path).expect("read lock file");
+        let raw = std::fs::read_to_string(&lock_path)?;
         let last_progress_lines: Vec<&str> = raw
             .lines()
             .filter_map(|line| line.strip_prefix("last_progress_at_ms="))
@@ -25512,9 +25511,11 @@ mod tests {
             1,
             "lock file must contain exactly one last_progress_at_ms line; got {raw:?}",
         );
-        let value: i64 = last_progress_lines[0]
+        let value: i64 = last_progress_lines
+            .first()
+            .context("last_progress_at_ms line missing")?
             .parse()
-            .expect("last_progress_at_ms must parse as i64");
+            .context("last_progress_at_ms must parse as i64")?;
         assert!(
             (before_ms..=after_ms).contains(&value),
             "last_progress_at_ms ({value}) must be within [before_ms={before_ms}, after_ms={after_ms}] of the acquire_index_run_lock call",
@@ -25531,6 +25532,7 @@ mod tests {
         );
 
         drop(guard);
+        Ok(())
     }
 
     /// Regression for #258. The heartbeat thread must refresh
