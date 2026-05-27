@@ -218,7 +218,61 @@ pub(crate) fn validate_supported_payload_format(config: &EncryptionConfig) -> Re
         );
     }
 
+    for (index, file) in config.payload.files.iter().enumerate() {
+        if !payload_chunk_path_matches_index(file, index) {
+            return Err(invalid_payload_file_entry(index, file));
+        }
+    }
+
     Ok(())
+}
+
+fn payload_chunk_path_matches_index(path: &str, index: usize) -> bool {
+    const PREFIX: &str = "payload/chunk-";
+    const SUFFIX: &str = ".bin";
+
+    let Some(digits) = path
+        .strip_prefix(PREFIX)
+        .and_then(|rest| rest.strip_suffix(SUFFIX))
+    else {
+        return false;
+    };
+
+    let expected_digit_count = decimal_digit_count(index).max(5);
+    if digits.len().cmp(&expected_digit_count).is_ne() {
+        return false;
+    }
+
+    let mut parsed = 0usize;
+    for byte in digits.bytes() {
+        if !byte.is_ascii_digit() {
+            return false;
+        }
+        let Some(next) = parsed
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(usize::from(byte - b'0')))
+        else {
+            return false;
+        };
+        parsed = next;
+    }
+
+    parsed.cmp(&index).is_eq()
+}
+
+fn decimal_digit_count(mut value: usize) -> usize {
+    let mut count = 1;
+    while value >= 10 {
+        value /= 10;
+        count += 1;
+    }
+    count
+}
+
+fn invalid_payload_file_entry(index: usize, actual: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Invalid archive payload metadata: payload file entry {index} is '{actual}'; expected 'payload/chunk-{index:05}.bin'"
+    )
 }
 
 /// Encryption engine for pages export
@@ -1725,6 +1779,29 @@ mod tests {
             rendered.contains("chunk_count") && rendered.contains("file list length"),
             "unexpected mismatched-chunk-count error: {err:#}"
         );
+    }
+
+    #[test]
+    fn test_validate_rejects_unexpected_payload_file_name() -> Result<()> {
+        let (_temp_dir, _output_dir, mut config) = encrypt_test_file();
+        let first_file = config
+            .payload
+            .files
+            .first_mut()
+            .context("test archive should include one payload file")?;
+        *first_file = "payload/chunk-99999.bin".to_string();
+
+        let err = validate_supported_payload_format(&config)
+            .err()
+            .context("unexpected payload file name must fail validation")?;
+        let rendered = err.to_string();
+        if !rendered.contains("payload file entry 0")
+            || !rendered.contains("payload/chunk-00000.bin")
+        {
+            bail!("unexpected payload-file-name error: {err:#}");
+        }
+
+        Ok(())
     }
 
     #[test]
