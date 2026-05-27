@@ -18,6 +18,21 @@
 //! (mirrored here as `DOCUMENTED_EXIT_CODES`).
 
 use std::collections::BTreeSet;
+use std::error::Error;
+
+type TestResult = Result<(), Box<dyn Error>>;
+
+fn test_error(message: impl Into<String>) -> Box<dyn Error> {
+    std::io::Error::other(message.into()).into()
+}
+
+fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
+    if condition {
+        Ok(())
+    } else {
+        Err(test_error(message))
+    }
+}
 
 /// The documented exit-code table (`cass robot-docs exit-codes`).
 /// 0-9 are the core semantic codes; 10-15 are domain-specific (branch on
@@ -60,10 +75,10 @@ fn emitted_cli_error_codes(src: &str) -> BTreeSet<i32> {
             .skip(idx + 1)
             .map(|l| l.trim())
             .find(|l| !l.is_empty());
-        if next_non_blank.is_some_and(|l| l.starts_with("kind:")) {
-            if let Ok(code) = digits.parse::<i32>() {
-                codes.insert(code);
-            }
+        if next_non_blank.is_some_and(|l| l.starts_with("kind:"))
+            && let Ok(code) = digits.parse::<i32>()
+        {
+            codes.insert(code);
         }
     }
 
@@ -71,7 +86,7 @@ fn emitted_cli_error_codes(src: &str) -> BTreeSet<i32> {
 }
 
 #[test]
-fn every_emitted_exit_code_is_documented() {
+fn every_emitted_exit_code_is_documented() -> TestResult {
     let documented: BTreeSet<i32> = DOCUMENTED_EXIT_CODES.iter().copied().collect();
 
     let mut undocumented: BTreeSet<i32> = BTreeSet::new();
@@ -83,13 +98,15 @@ fn every_emitted_exit_code_is_documented() {
         }
     }
 
-    assert!(
+    ensure(
         undocumented.is_empty(),
-        "CliError emits undocumented exit code(s) {undocumented:?}. Every emitted code must be in \
+        format!(
+            "CliError emits undocumented exit code(s) {undocumented:?}. Every emitted code must be in \
          the documented table (cass robot-docs exit-codes: 0-15, 20-24). Either add the code to \
          the documented table + ERROR_CODES.md, or fix the construction site to use a documented \
          code. (Regression guard for the shipped `code: 73` defect.)"
-    );
+        ),
+    )
 }
 
 /// Sanity: the extractor must actually find the bulk of the CliError surface.
@@ -97,7 +114,7 @@ fn every_emitted_exit_code_is_documented() {
 /// the real construction shape and `every_emitted_exit_code_is_documented`
 /// would silently pass by finding nothing.
 #[test]
-fn extractor_finds_the_cli_error_surface() {
+fn extractor_finds_the_cli_error_surface() -> TestResult {
     let total: usize = SOURCES
         .iter()
         .map(|(_, src)| emitted_cli_error_codes(src).len())
@@ -108,11 +125,13 @@ fn extractor_finds_the_cli_error_surface() {
         .iter()
         .flat_map(|(_, src)| emitted_cli_error_codes(src))
         .collect();
-    assert!(
+    ensure(
         distinct.len() >= 10 && total >= 10,
-        "exit-code extractor found only {} distinct codes ({} file-totals); the code:/kind: \
+        format!(
+            "exit-code extractor found only {} distinct codes ({} file-totals); the code:/kind: \
          heuristic has likely drifted from the CliError construction shape",
-        distinct.len(),
-        total
-    );
+            distinct.len(),
+            total
+        ),
+    )
 }
