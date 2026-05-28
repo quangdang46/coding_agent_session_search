@@ -13,6 +13,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::PathBuf;
 
 use crate::pages::patterns::{patterns_for_personal, patterns_for_public, patterns_for_team};
@@ -197,9 +198,7 @@ impl ProfilePreferences {
 
         // Atomic write: write to a unique temp file in the same directory, then replace.
         let temp_path = unique_atomic_temp_path(&path);
-        std::fs::write(&temp_path, &content)
-            .with_context(|| format!("Failed to write {}", temp_path.display()))?;
-        sync_file_path(&temp_path)?;
+        write_preferences_temp_file(&temp_path, &content)?;
         replace_file_from_temp(&temp_path, &path)?;
 
         Ok(())
@@ -220,6 +219,25 @@ impl ProfilePreferences {
     pub fn effective_profile(&self) -> ShareProfile {
         self.last_used.unwrap_or(self.default_profile)
     }
+}
+
+fn write_preferences_temp_file(path: &std::path::Path, content: &str) -> Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| {
+            format!(
+                "Failed to create temporary preferences file {}",
+                path.display()
+            )
+        })?;
+
+    file.write_all(content.as_bytes())
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("Failed to sync {}", path.display()))?;
+    Ok(())
 }
 
 fn replace_file_from_temp(temp_path: &std::path::Path, final_path: &std::path::Path) -> Result<()> {
@@ -289,13 +307,6 @@ fn replace_file_from_temp(temp_path: &std::path::Path, final_path: &std::path::P
         })?;
         sync_parent_directory(final_path)
     }
-}
-
-fn sync_file_path(path: &std::path::Path) -> Result<()> {
-    std::fs::File::open(path)
-        .with_context(|| format!("Failed to reopen {} for sync", path.display()))?
-        .sync_all()
-        .with_context(|| format!("Failed to sync {}", path.display()))
 }
 
 #[cfg(not(windows))]
@@ -648,5 +659,39 @@ mod tests {
 
         let content = std::fs::read_to_string(&final_path).unwrap();
         assert!(content.contains("public"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_preferences_temp_file_refuses_existing_symlink() {
+        use std::os::unix::fs::symlink;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let protected = temp_dir.path().join("protected.toml");
+        let temp_path = temp_dir.path().join(".profile_prefs.toml.tmp");
+
+        std::fs::write(&protected, "default_profile = \"team\"\n").unwrap();
+        symlink(&protected, &temp_path).unwrap();
+
+        let err = write_preferences_temp_file(&temp_path, "default_profile = \"public\"\n")
+            .expect_err("pre-existing temp symlink must be rejected");
+
+        assert!(
+            err.to_string()
+                .contains("Failed to create temporary preferences file"),
+            "error should identify refused temp creation: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&protected).unwrap(),
+            "default_profile = \"team\"\n"
+        );
+        assert!(
+            std::fs::symlink_metadata(&temp_path)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "failed temp write should leave the existing symlink untouched"
+        );
     }
 }
