@@ -17,7 +17,30 @@ Repository: <https://github.com/Dicklesworthstone/coding_agent_session_search>
 
 ## Unreleased
 
-- **#256 complete fix (pending v0.6.5 release):** feature-gate `fastembed`/`ort` so a separate `cass-windows-amd64-baseline.zip` artifact ships with embeddings disabled. The v0.6.3 `RUSTFLAGS=-C target-cpu=x86-64-v2` constraint stays as defense-in-depth.
+## [v0.6.5] -- 2026-05-28
+
+**Definitive close-out of cass#256 via a feature-gated `semantic` build, plus the cass#258 follow-on liveness work that v0.6.4's `last_progress_at_ms` plumbing left half-done.**
+
+### Pre-AVX2 Windows + Linux baseline binaries (cass#256 — fully closed)
+
+v0.6.3 added `RUSTFLAGS=-C target-cpu=x86-64-v2` as a defense-in-depth measure for the Windows release codegen. v0.6.4's CHANGELOG correction acknowledged that this was *necessary but not sufficient*: the `fastembed` crate enables `ort-download-binaries-rustls-tls`, which links prebuilt Microsoft ONNX Runtime binaries that already carry AVX/AVX2/FMA-dispatched code. `RUSTFLAGS` only constrains `rustc`'s own codegen and cannot reach object code linked from a vendor prebuilt, so `cass --version` continued to die with `STATUS_ILLEGAL_INSTRUCTION` (`0xC000001D`) on Ivy Bridge hardware (confirmed by reporter @Dlows-Vibe on an i7-3770K). v0.6.5 closes this for good.
+
+- **New `semantic` Cargo feature ([`d9b98126`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/d9b98126)).** `fastembed` is now `optional = true`, and the `frankensqlite/fastembed-reranker` re-pull is gated behind the same flag. The umbrella feature is declared as `semantic = ["dep:fastembed", "frankensearch/fastembed-reranker"]` and is included in `default = ["qr", "encryption", "semantic"]`, so the default `cargo build` / `cargo install` path is byte-for-byte equivalent to v0.6.4 and existing users see no behavioural change. Disabling the feature (`--no-default-features --features qr,encryption`) drops the entire ONNX Runtime stack from the link line, including the AVX2-dispatched prebuilt objects.
+- **Two new baseline-build release artifacts.** The release workflow now produces `cass-windows-amd64-baseline.zip` and `cass-linux-amd64-baseline.tar.gz` alongside the regular artifacts. Both are built with `--no-default-features --features qr,encryption` and have an end-to-end smoke test in CI that asserts `cass --version` runs cleanly on the GitHub-hosted runner. They ship with the same `.sig`/`.crt`/`.sha256` sidecars as every other artifact. Hard-float / SSE2-baseline amd64 hardware (Sandy Bridge, Ivy Bridge, pre-Excavator AMD) can run these binaries; everything except `cass search --mode semantic`, `cass index --backfill quality`, and the embedding-tier maintenance paths continues to work.
+- **install.sh / install.ps1 runtime AVX2 detection ([`fb75daab`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/fb75daab)).** Both installers now probe the host for AVX2 before choosing an asset. On Linux they read `/proc/cpuinfo`; on Windows-under-MSYS they prefer real CPU flags, then fall back to `wmic cpu get name` / `Get-CimInstance Win32_Processor` model-name heuristics and `Avx2.IsSupported` via PowerShell .NET intrinsics; on ARM/macOS they keep the canonical artifact name. When AVX2 is not detected, the installers pull the `-baseline` artifact automatically. `CASS_FORCE_BASELINE=1` forces the baseline selection on AVX2-capable hosts (useful for testing and for operators who do not need embeddings). A startup AVX2 self-check inside the binary itself remains gated to `semantic` builds so the baseline binary does not abort on pre-AVX2 hosts. JSON goldens were refreshed to reflect the new asset-list shape.
+
+The `RUSTFLAGS=-C target-cpu=x86-64-v2` pin on the canonical Windows build stays as defense-in-depth for the Rust-codegen layer.
+
+### `IndexRunLockGuard` atomic progress bump + ms-precision (cass#258 follow-on)
+
+v0.6.4 introduced the separate `last_progress_at_ms` lock-file field that distinguishes "the heartbeat is alive" from "the indexing thread is making forward progress". Field reports on long single-mode indexing runs surfaced a remaining false-positive: when the indexer was busy with a single multi-batch phase that does not trigger `write_metadata`/`set_mode` calls, `last_progress_at_ms` could stay frozen long enough for `cass health --robot` to flip to `status: "stalled"` even though the indexer was healthy and making batch-level progress.
+
+- **`IndexRunLockGuard::last_progress_at_ms_atomic: Arc<AtomicI64>` ([`397d0443`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/397d0443)).** A lock-free atomic now carries the canonical progress timestamp. The indexer calls a cheap `bump_progress()` after every batch (typed-source replay, embed batch, staging write, checkpoint save, publish), and the background `IndexRunLockHeartbeat` thread folds the in-memory atomic into the on-disk `last_progress_at_ms=` field on every refresh tick. The lock-file fold preserves the v0.6.4 invariant — only the indexer can advance `last_progress_at_ms`, the heartbeat just persists what the indexer already wrote in memory — but it eliminates the per-batch lock-file write cost. The result is that `cass status --json` now reports `last_progress_age_ms` on the order of single-digit milliseconds during normal indexing, instead of seconds-old timestamps that only refresh on phase boundaries.
+- **`now_ms` ms-precision plumbing through `InspectSearchAssetsInput`.** The maintenance coordination layer was downgrading the new ms-resolution timestamps to seconds before evaluating the stall threshold, which discarded most of the precision the atomic bump bought us. `InspectSearchAssetsInput` and `evaluate_maintenance_coordination` now thread `now_ms: i64` end-to-end, and the stall threshold comparison is fully ms-precision. Single-mode indexing runs on archives that exceed the v0.6.4 stall threshold no longer false-positive `stalled` in `cass health` / `cass status --json` / the search-side single-flight coordinator.
+
+### Other
+
+- The `## Unreleased` placeholder note added during v0.6.4 has been folded into this entry; the v0.6.3 entry's correction block remains in place as the historical record of the partial-fix → complete-fix transition for cass#256.
 
 ## [v0.6.4] -- 2026-05-27
 
