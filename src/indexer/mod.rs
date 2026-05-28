@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Command;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -2101,7 +2101,10 @@ fn should_try_readonly_canonical_force_rebuild(opts: &IndexOptions) -> bool {
         && opts.db_path.exists()
 }
 
-fn try_readonly_canonical_force_rebuild(opts: &IndexOptions) -> Result<bool> {
+fn try_readonly_canonical_force_rebuild(
+    opts: &IndexOptions,
+    progress_bump: &Arc<AtomicI64>,
+) -> Result<bool> {
     if !should_try_readonly_canonical_force_rebuild(opts) {
         return Ok(false);
     }
@@ -2148,11 +2151,12 @@ fn try_readonly_canonical_force_rebuild(opts: &IndexOptions) -> Result<bool> {
     );
 
     let rebuild_start = Instant::now();
-    let rebuild = rebuild_tantivy_from_db_deferred_startup(
+    let rebuild = rebuild_tantivy_from_db_deferred_startup_with_progress_bump(
         &opts.db_path,
         &opts.data_dir,
         total_conversations,
         opts.progress.clone(),
+        Arc::clone(progress_bump),
     )?;
     if let Some(p) = &opts.progress
         && let Ok(mut stats) = p.stats.lock()
@@ -2347,11 +2351,26 @@ struct IndexRunLockGuard {
     /// thread (cass#258). The background `IndexRunLockHeartbeat` thread
     /// refreshes `updated_at_ms` to prove the process is alive, but it
     /// MUST NOT touch `last_progress_at_ms` — only real mode/phase
-    /// transitions (i.e. `write_metadata` / `set_mode`) advance it.
-    /// Readers (`asset_state::maintenance_stall_age_ms`) compare this
-    /// to wall-clock to flip `status: "stalled"` when the indexer
-    /// wedges while the heartbeat keeps refreshing.
+    /// transitions (i.e. `write_metadata` / `set_mode`) and explicit
+    /// per-batch atomic progress bumps advance it. Readers
+    /// (`asset_state::maintenance_stall_age_ms`) compare this to
+    /// wall-clock to flip `status: "stalled"` when the indexer wedges
+    /// while the heartbeat keeps refreshing.
     last_progress_at_ms: i64,
+    /// F4 (cass tech debt): atomic mirror of `last_progress_at_ms` that
+    /// the indexer's per-batch / per-conversation / per-shard-flush hot
+    /// loops can update with a single `Relaxed` store — no I/O, no
+    /// POSIX-advisory-lock contention with the heartbeat thread. The
+    /// heartbeat thread (which is already paying the I/O cost every ~1 s
+    /// to refresh `updated_at_ms`) consults this atomic and folds the
+    /// most-recent bump into the same on-disk rewrite. This preserves
+    /// the cass#258 ownership invariant — the indexer thread is the
+    /// sole writer of forward progress — while making the indexer
+    /// itself trivially cheap to instrument. A `0` value means
+    /// "indexer has not yet posted a per-batch progress bump"; the
+    /// heartbeat falls back to leaving `last_progress_at_ms` unchanged
+    /// in that case.
+    last_progress_at_ms_atomic: Arc<AtomicI64>,
     db_path: PathBuf,
     job_id: String,
     job_kind: SearchMaintenanceJobKind,
@@ -2383,6 +2402,8 @@ impl IndexRunLockGuard {
         // this field verbatim so a wedged indexer flips
         // `status: "stalled"` instead of silently staying "building".
         self.last_progress_at_ms = now_ms;
+        self.last_progress_at_ms_atomic
+            .store(now_ms, Ordering::Relaxed);
         self.file.set_len(0).with_context(|| {
             format!(
                 "truncating index-run lock file before metadata update: {}",
@@ -2423,13 +2444,46 @@ impl IndexRunLockGuard {
     }
 }
 
+/// Per-batch / per-conversation / per-shard-flush atomic bump that the
+/// indexer hot loops call. Single `Relaxed` store; the heartbeat folds
+/// the value into the on-disk payload on its next tick. Returns the
+/// timestamp that was stored (useful for tracing).
+///
+/// Threading the full `IndexRunLockGuard` reference down through every
+/// layer of the staged lexical rebuild pipeline is a layering
+/// nightmare; the only state the bump actually needs is the shared
+/// atomic, which is `Arc::clone`-able and trivially passable.
+fn bump_index_run_lock_progress_atomic(atomic: &Arc<AtomicI64>) -> i64 {
+    let now_ms = FrankenStorage::now_millis();
+    atomic.store(now_ms, Ordering::Relaxed);
+    now_ms
+}
+
+fn bump_index_run_lock_progress_if_present(progress_bump: Option<&Arc<AtomicI64>>) {
+    if let Some(atomic) = progress_bump {
+        bump_index_run_lock_progress_atomic(atomic);
+    }
+}
+
 struct IndexRunLockHeartbeat {
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
 }
 
 impl IndexRunLockHeartbeat {
-    fn start(data_dir: PathBuf, interval: Duration, metadata_write_lock: Arc<Mutex<()>>) -> Self {
+    fn start(
+        data_dir: PathBuf,
+        interval: Duration,
+        metadata_write_lock: Arc<Mutex<()>>,
+        // F4: indexer hot loops bump this atomic on each batch
+        // commit / shard flush / conversation completion. The heartbeat
+        // thread reads it on every tick and folds the latest value into
+        // the on-disk `last_progress_at_ms=` line in the same rewrite
+        // that already refreshes `updated_at_ms=`, so cass#258's
+        // stall detector flips correctly on a wedged indexer without
+        // making each batch pay the I/O cost.
+        last_progress_at_ms_atomic: Arc<AtomicI64>,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = Arc::clone(&stop);
         // Use `park_timeout` instead of `thread::sleep` so `Drop` below can
@@ -2447,9 +2501,12 @@ impl IndexRunLockHeartbeat {
                 if stop_flag.load(Ordering::Relaxed) {
                     break;
                 }
-                if let Err(err) =
-                    heartbeat_index_run_lock_with_lock(&data_dir, Some(&metadata_write_lock))
-                {
+                let last_progress_at_ms = last_progress_at_ms_atomic.load(Ordering::Relaxed);
+                if let Err(err) = heartbeat_index_run_lock_with_lock_and_progress(
+                    &data_dir,
+                    Some(&metadata_write_lock),
+                    last_progress_at_ms,
+                ) {
                     tracing::debug!(
                         error = %err,
                         path = %data_dir.display(),
@@ -2483,6 +2540,25 @@ fn heartbeat_index_run_lock_with_lock(
     data_dir: &Path,
     metadata_write_lock: Option<&Arc<Mutex<()>>>,
 ) -> Result<()> {
+    // Legacy call site (test-only): when no fresh forward-progress
+    // value is supplied, do NOT touch the `last_progress_at_ms=` line.
+    // cass#258 invariant — heartbeat refreshing the progress field by
+    // itself would silently disable the stall detector.
+    heartbeat_index_run_lock_with_lock_and_progress(data_dir, metadata_write_lock, 0)
+}
+
+/// Production heartbeat that ALSO folds the indexer's most-recent
+/// `last_progress_at_ms` atomic bump into the on-disk rewrite. The
+/// indexer owns the value (it writes the atomic from its hot loops);
+/// the heartbeat thread is purely the I/O layer — it never invents
+/// progress on its own. Pass `0` (or any value ≤ the existing on-disk
+/// value) to leave the field untouched, preserving the legacy heartbeat
+/// behaviour for tests that exercise just the `updated_at_ms` path.
+fn heartbeat_index_run_lock_with_lock_and_progress(
+    data_dir: &Path,
+    metadata_write_lock: Option<&Arc<Mutex<()>>>,
+    last_progress_at_ms: i64,
+) -> Result<()> {
     let _write_guard = metadata_write_lock
         .map(|lock| {
             lock.lock()
@@ -2501,16 +2577,45 @@ fn heartbeat_index_run_lock_with_lock(
         }
     };
 
-    let mut wrote_updated_at = false;
     let now_ms = FrankenStorage::now_millis();
-    let mut itoa_buf = itoa::Buffer::new();
-    let now_ms_str = itoa_buf.format(now_ms);
-    let mut refreshed = String::with_capacity(existing.len() + 32);
+    let mut updated_at_buf = itoa::Buffer::new();
+    let now_ms_str = updated_at_buf.format(now_ms);
+
+    // Read the existing on-disk progress so we only rewrite the
+    // `last_progress_at_ms=` line if the indexer-owned atomic carries a
+    // strictly larger value. This preserves the cass#258 invariant
+    // (heartbeat never invents progress on its own) and avoids racing
+    // with a `write_metadata` call that just wrote a fresh phase
+    // transition.
+    let existing_progress = existing
+        .lines()
+        .find_map(|line| line.strip_prefix("last_progress_at_ms="))
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+    let should_advance_progress = last_progress_at_ms > existing_progress;
+    let mut progress_buf = itoa::Buffer::new();
+    let progress_str = if should_advance_progress {
+        progress_buf.format(last_progress_at_ms)
+    } else {
+        ""
+    };
+
+    let mut wrote_updated_at = false;
+    let mut wrote_progress = !should_advance_progress;
+    let mut refreshed = String::with_capacity(existing.len() + 64);
     for line in existing.lines() {
         if line.strip_prefix("updated_at_ms=").is_some() {
             refreshed.push_str("updated_at_ms=");
             refreshed.push_str(now_ms_str);
             wrote_updated_at = true;
+        } else if line.strip_prefix("last_progress_at_ms=").is_some() {
+            if should_advance_progress {
+                refreshed.push_str("last_progress_at_ms=");
+                refreshed.push_str(progress_str);
+            } else {
+                refreshed.push_str(line);
+            }
+            wrote_progress = true;
         } else {
             refreshed.push_str(line);
         }
@@ -2519,6 +2624,11 @@ fn heartbeat_index_run_lock_with_lock(
     if !wrote_updated_at {
         refreshed.push_str("updated_at_ms=");
         refreshed.push_str(now_ms_str);
+        refreshed.push('\n');
+    }
+    if !wrote_progress {
+        refreshed.push_str("last_progress_at_ms=");
+        refreshed.push_str(progress_str);
         refreshed.push('\n');
     }
 
@@ -5111,8 +5221,12 @@ fn acquire_index_run_lock(
         // cass#258: seed with `now` so the very first `read_search_maintenance_snapshot`
         // call after `acquire_index_run_lock` sees a populated cursor.
         // Forward progress will refresh this on every `write_metadata`
-        // / `set_mode` call.
+        // / `set_mode` call and every per-batch atomic progress bump (F4).
         last_progress_at_ms: now_ms,
+        // F4: indexer-thread mailbox the heartbeat folds into the on-disk
+        // payload. Seed with `now_ms` so a stall-detector that fires
+        // before the first bump cannot false-positive on `0`.
+        last_progress_at_ms_atomic: Arc::new(AtomicI64::new(now_ms)),
         db_path: crate::normalize_path_identity(db_path),
         job_id: String::new(),
         job_kind: maintenance_job_kind_for_mode(mode),
@@ -7227,6 +7341,7 @@ fn maybe_persist_staged_lexical_rebuild_progress(
     progress_heartbeat_interval_conversations: usize,
     last_progress_persist: &mut Instant,
     progress_heartbeat_interval: Duration,
+    progress_bump: Option<&Arc<AtomicI64>>,
     mut perf_profile: Option<&mut LexicalRebuildPerfProfile>,
 ) -> Result<bool> {
     // Staged shard-build resume safety is restart-from-zero, so these persists
@@ -7253,6 +7368,7 @@ fn maybe_persist_staged_lexical_rebuild_progress(
         runtime,
         base_meta_fingerprint_override,
     )?;
+    bump_index_run_lock_progress_if_present(progress_bump);
     if let (Some(profile), Some(started)) = (perf_profile.as_mut(), heartbeat_progress_started) {
         profile.heartbeat_persist_count = profile.heartbeat_persist_count.saturating_add(1);
         profile.heartbeat_progress_duration += started.elapsed();
@@ -11113,7 +11229,15 @@ pub fn run_index(
         opts.data_dir.clone(),
         index_run_lock_heartbeat_interval(),
         Arc::clone(&index_run_lock.metadata_write_lock),
+        Arc::clone(&index_run_lock.last_progress_at_ms_atomic),
     );
+    // F4: clone the atomic so deeply nested batch loops can bump progress
+    // without holding a `&mut IndexRunLockGuard`. The clone is cheap
+    // (single Arc bump) and lives only inside this function.
+    let progress_bump = Arc::clone(&index_run_lock.last_progress_at_ms_atomic);
+    // The atomic-store bump runs once per "interesting" batch boundary
+    // — currently used at the per-conversation completion ingest loop
+    // and the lexical commit boundary; see `bump_index_run_lock_progress_atomic`.
 
     if can_skip_absent_explicit_watch_once_index_run(&opts) {
         let path_count = opts
@@ -11153,11 +11277,12 @@ pub fn run_index(
                     reason = "readonly_fast_resume_incomplete_nonresumable_lexical_rebuild",
                     "selected_lexical_population_strategy"
                 );
-                let rebuild = rebuild_tantivy_from_db_deferred_startup(
+                let rebuild = rebuild_tantivy_from_db_deferred_startup_with_progress_bump(
                     &opts.db_path,
                     &opts.data_dir,
                     total_conversations,
                     opts.progress.clone(),
+                    Arc::clone(&progress_bump),
                 )?;
                 if let Some(p) = &opts.progress
                     && let Ok(mut stats) = p.stats.lock()
@@ -11184,7 +11309,7 @@ pub fn run_index(
             }
         }
     }
-    if try_readonly_canonical_force_rebuild(&opts)? {
+    if try_readonly_canonical_force_rebuild(&opts, &progress_bump)? {
         return Ok(());
     }
 
@@ -11575,18 +11700,20 @@ pub fn run_index(
             "selected_lexical_population_strategy"
         );
         let rebuild = if restart_pending_lexical_rebuild_from_zero {
-            rebuild_tantivy_from_db_deferred_startup(
+            rebuild_tantivy_from_db_deferred_startup_with_progress_bump(
                 &opts.db_path,
                 &opts.data_dir,
                 initial_canonical_sessions_before_salvage,
                 opts.progress.clone(),
+                Arc::clone(&progress_bump),
             )?
         } else {
-            rebuild_tantivy_from_db(
+            rebuild_tantivy_from_db_with_progress_bump(
                 &opts.db_path,
                 &opts.data_dir,
                 initial_canonical_sessions_before_salvage,
                 opts.progress.clone(),
+                Arc::clone(&progress_bump),
             )?
         };
         exact_completed_lexical_checkpoint = rebuild.exact_checkpoint_persisted;
@@ -11777,11 +11904,12 @@ pub fn run_index(
             drop(t_index.take());
             let rebuild_start = std::time::Instant::now();
             let rebuild_convs = canonical_sessions_before_salvage;
-            let rebuild = rebuild_tantivy_from_db_deferred_startup(
+            let rebuild = rebuild_tantivy_from_db_deferred_startup_with_progress_bump(
                 &opts.db_path,
                 &opts.data_dir,
                 rebuild_convs,
                 opts.progress.clone(),
+                Arc::clone(&progress_bump),
             )?;
             exact_completed_lexical_checkpoint = rebuild.exact_checkpoint_persisted;
             let rebuild_ms = rebuild_start.elapsed().as_millis() as u64;
@@ -11836,11 +11964,12 @@ pub fn run_index(
 
                 drop(t_index.take());
                 let rebuild_convs = count_total_conversations_exact(&storage)?;
-                let rebuild = rebuild_tantivy_from_db_deferred_startup(
+                let rebuild = rebuild_tantivy_from_db_deferred_startup_with_progress_bump(
                     &opts.db_path,
                     &opts.data_dir,
                     rebuild_convs,
                     opts.progress.clone(),
+                    Arc::clone(&progress_bump),
                 )?;
                 exact_completed_lexical_checkpoint = rebuild.exact_checkpoint_persisted;
                 if let Some(observed_messages) = rebuild.observed_messages {
@@ -11957,6 +12086,13 @@ pub fn run_index(
                         additional_scan_roots.clone(),
                         scan_start_ts,
                     )?;
+                    // F4 (cass tech debt): a completed scan is a real
+                    // forward-progress boundary; bump the atomic so the
+                    // heartbeat folds the timestamp into the lock file
+                    // on its next tick and a long single-mode scan does
+                    // not false-positive as `status: "stalled"`
+                    // (cass#258 follow-up).
+                    bump_index_run_lock_progress_atomic(&progress_bump);
                     scan_canonical_mutations =
                         scan_canonical_mutations.accumulate(scan_outcome.canonical_mutations);
                     scan_lexical_update_deferred |= scan_outcome.lexical_update_deferred;
@@ -11973,6 +12109,7 @@ pub fn run_index(
                         additional_scan_roots.clone(),
                         scan_start_ts,
                     )?;
+                    bump_index_run_lock_progress_atomic(&progress_bump);
                     scan_canonical_mutations =
                         scan_canonical_mutations.accumulate(scan_outcome.canonical_mutations);
                     scan_lexical_update_deferred |= scan_outcome.lexical_update_deferred;
@@ -11990,11 +12127,12 @@ pub fn run_index(
                     );
                     drop(t_index.take());
                     let rebuild_convs = count_total_conversations_exact(&storage)?;
-                    let rebuild = rebuild_tantivy_from_db_deferred_startup(
+                    let rebuild = rebuild_tantivy_from_db_deferred_startup_with_progress_bump(
                         &opts.db_path,
                         &opts.data_dir,
                         rebuild_convs,
                         opts.progress.clone(),
+                        Arc::clone(&progress_bump),
                     )?;
                     exact_completed_lexical_checkpoint = rebuild.exact_checkpoint_persisted;
                     if let Some(observed_messages) = rebuild.observed_messages {
@@ -12060,11 +12198,12 @@ pub fn run_index(
                     } else {
                         drop(t_index.take());
                         let rebuild_convs = count_total_conversations_exact(&storage)?;
-                        let rebuild = rebuild_tantivy_from_db_deferred_startup(
+                        let rebuild = rebuild_tantivy_from_db_deferred_startup_with_progress_bump(
                             &opts.db_path,
                             &opts.data_dir,
                             rebuild_convs,
                             opts.progress.clone(),
+                            Arc::clone(&progress_bump),
                         )?;
                         exact_completed_lexical_checkpoint = rebuild.exact_checkpoint_persisted;
                         // Update stats to reflect the authoritative rebuild
@@ -13902,6 +14041,24 @@ pub(crate) fn rebuild_tantivy_from_db(
         total_conversations,
         progress,
         LexicalRebuildStartupOptions::default(),
+        None,
+    )
+}
+
+fn rebuild_tantivy_from_db_with_progress_bump(
+    db_path: &Path,
+    data_dir: &Path,
+    total_conversations: usize,
+    progress: Option<Arc<IndexingProgress>>,
+    progress_bump: Arc<AtomicI64>,
+) -> Result<LexicalRebuildOutcome> {
+    rebuild_tantivy_from_db_with_options(
+        db_path,
+        data_dir,
+        total_conversations,
+        progress,
+        LexicalRebuildStartupOptions::default(),
+        Some(progress_bump),
     )
 }
 
@@ -13939,6 +14096,7 @@ pub(crate) fn repair_lexical_index_from_canonical_db_for_search(
         data_dir.to_path_buf(),
         index_run_lock_heartbeat_interval(),
         Arc::clone(&index_run_lock.metadata_write_lock),
+        Arc::clone(&index_run_lock.last_progress_at_ms_atomic),
     );
 
     let storage = FrankenStorage::open_readonly(db_path).with_context(|| {
@@ -13991,18 +14149,56 @@ pub(crate) fn repair_lexical_index_from_canonical_db_for_search(
         )
     })?;
 
-    let rebuild =
-        rebuild_tantivy_from_db_deferred_startup(db_path, data_dir, total_conversations, progress)?;
+    let rebuild = rebuild_tantivy_from_db_deferred_startup_with_progress_bump(
+        db_path,
+        data_dir,
+        total_conversations,
+        progress,
+        Arc::clone(&index_run_lock.last_progress_at_ms_atomic),
+    )?;
     Ok(SearchLexicalRepairOutcome {
         indexed_docs: rebuild.indexed_docs,
     })
 }
 
+#[cfg(test)]
 fn rebuild_tantivy_from_db_deferred_startup(
     db_path: &Path,
     data_dir: &Path,
     total_conversations: usize,
     progress: Option<Arc<IndexingProgress>>,
+) -> Result<LexicalRebuildOutcome> {
+    rebuild_tantivy_from_db_deferred_startup_with_options(
+        db_path,
+        data_dir,
+        total_conversations,
+        progress,
+        None,
+    )
+}
+
+fn rebuild_tantivy_from_db_deferred_startup_with_progress_bump(
+    db_path: &Path,
+    data_dir: &Path,
+    total_conversations: usize,
+    progress: Option<Arc<IndexingProgress>>,
+    progress_bump: Arc<AtomicI64>,
+) -> Result<LexicalRebuildOutcome> {
+    rebuild_tantivy_from_db_deferred_startup_with_options(
+        db_path,
+        data_dir,
+        total_conversations,
+        progress,
+        Some(progress_bump),
+    )
+}
+
+fn rebuild_tantivy_from_db_deferred_startup_with_options(
+    db_path: &Path,
+    data_dir: &Path,
+    total_conversations: usize,
+    progress: Option<Arc<IndexingProgress>>,
+    progress_bump: Option<Arc<AtomicI64>>,
 ) -> Result<LexicalRebuildOutcome> {
     rebuild_tantivy_from_db_with_options(
         db_path,
@@ -14012,6 +14208,7 @@ fn rebuild_tantivy_from_db_deferred_startup(
         LexicalRebuildStartupOptions {
             defer_initial_content_fingerprint: true,
         },
+        progress_bump,
     )
 }
 
@@ -15825,9 +16022,11 @@ fn rebuild_tantivy_from_db_via_staged_shards(
     producer_handle: JoinHandle<()>,
     mut perf_profile: Option<LexicalRebuildPerfProfile>,
     rebuild_profile_started: Option<Instant>,
+    progress_bump: Option<Arc<AtomicI64>>,
 ) -> Result<LexicalRebuildOutcome> {
     let persist_initial_checkpoint_started = Instant::now();
     persist_lexical_rebuild_state_for_active_run_start(index_path, &rebuild_state)?;
+    bump_index_run_lock_progress_if_present(progress_bump.as_ref());
     log_lexical_rebuild_prep_profile_step(
         prep_profile_started,
         persist_initial_checkpoint_started,
@@ -16119,6 +16318,7 @@ fn rebuild_tantivy_from_db_via_staged_shards(
                 if let Some(p) = &progress {
                     p.current.store(*processed_conversations, Ordering::Relaxed);
                 }
+                bump_index_run_lock_progress_if_present(progress_bump.as_ref());
                 if let Some(transition) = responsiveness_controller.record_first_durable_commit() {
                     apply_lexical_rebuild_budget_transition(
                         transition,
@@ -16271,6 +16471,7 @@ fn rebuild_tantivy_from_db_via_staged_shards(
                         progress_heartbeat_interval_conversations,
                         &mut last_progress_persist,
                         progress_heartbeat_interval,
+                        progress_bump.as_ref(),
                         perf_profile.as_mut(),
                     )?;
                 }
@@ -16278,6 +16479,7 @@ fn rebuild_tantivy_from_db_via_staged_shards(
                     match message {
                         Ok(LexicalRebuildShardMergeMessage::Built(result)) => {
                             merge_coordinator.complete_merge(result, &merge_work_tx)?;
+                            bump_index_run_lock_progress_if_present(progress_bump.as_ref());
                         }
                         Ok(LexicalRebuildShardMergeMessage::Error {
                             output_level,
@@ -16328,6 +16530,7 @@ fn rebuild_tantivy_from_db_via_staged_shards(
                         progress_heartbeat_interval_conversations,
                         &mut last_progress_persist,
                         progress_heartbeat_interval,
+                        progress_bump.as_ref(),
                         perf_profile.as_mut(),
                     )?;
                 }
@@ -16389,6 +16592,7 @@ fn rebuild_tantivy_from_db_via_staged_shards(
                                 packet.flow_reservation_bytes = 0;
                                 current_shard_packets.push(packet);
                             }
+                            bump_index_run_lock_progress_if_present(progress_bump.as_ref());
                             // The byte limiter covers producer-prepared pages
                             // waiting for this consumer. After packets enter
                             // the staged shard buffers, the pending-shard
@@ -16463,6 +16667,7 @@ fn rebuild_tantivy_from_db_via_staged_shards(
                                 progress_heartbeat_interval_conversations,
                                 &mut last_progress_persist,
                                 progress_heartbeat_interval,
+                                progress_bump.as_ref(),
                                 perf_profile.as_mut(),
                             )?;
                         }
@@ -16500,6 +16705,7 @@ fn rebuild_tantivy_from_db_via_staged_shards(
                                 progress_heartbeat_interval_conversations,
                                 &mut last_progress_persist,
                                 progress_heartbeat_interval,
+                                progress_bump.as_ref(),
                                 perf_profile.as_mut(),
                             )?;
                         }
@@ -16623,6 +16829,7 @@ fn rebuild_tantivy_from_db_via_staged_shards(
                         progress_heartbeat_interval_conversations,
                         &mut last_progress_persist,
                         progress_heartbeat_interval,
+                        progress_bump.as_ref(),
                         perf_profile.as_mut(),
                     )?;
                 }
@@ -16630,6 +16837,7 @@ fn rebuild_tantivy_from_db_via_staged_shards(
                     match message {
                         Ok(LexicalRebuildShardMergeMessage::Built(result)) => {
                             merge_coordinator.complete_merge(result, &merge_work_tx)?;
+                            bump_index_run_lock_progress_if_present(progress_bump.as_ref());
                         }
                         Ok(LexicalRebuildShardMergeMessage::Error {
                             output_level,
@@ -16680,6 +16888,7 @@ fn rebuild_tantivy_from_db_via_staged_shards(
                         progress_heartbeat_interval_conversations,
                         &mut last_progress_persist,
                         progress_heartbeat_interval,
+                        progress_bump.as_ref(),
                         perf_profile.as_mut(),
                     )?;
                 }
@@ -16804,6 +17013,7 @@ fn rebuild_tantivy_from_db_via_staged_shards(
         progress_heartbeat_interval_conversations,
         &mut last_progress_persist,
         progress_heartbeat_interval,
+        progress_bump.as_ref(),
         perf_profile.as_mut(),
     )?;
 
@@ -16920,6 +17130,7 @@ fn rebuild_tantivy_from_db_with_options(
     total_conversations: usize,
     progress: Option<Arc<IndexingProgress>>,
     options: LexicalRebuildStartupOptions,
+    progress_bump: Option<Arc<AtomicI64>>,
 ) -> Result<LexicalRebuildOutcome> {
     let prep_profile = std::env::var_os("CASS_PREP_PROFILE").is_some();
     let prep_started = Instant::now();
@@ -17274,6 +17485,7 @@ fn rebuild_tantivy_from_db_with_options(
             producer_handle,
             perf_profile,
             rebuild_profile_started,
+            progress_bump,
         );
     }
 
@@ -17424,6 +17636,7 @@ fn rebuild_tantivy_from_db_with_options(
                 if let Some(p) = &progress {
                     p.current.fetch_add(1, Ordering::Relaxed);
                 }
+                bump_index_run_lock_progress_if_present(progress_bump.as_ref());
                 refresh_and_maybe_apply_lexical_rebuild_pipeline_runtime(
                     &mut latest_pipeline_runtime,
                     progress.as_ref(),
@@ -26491,6 +26704,41 @@ mod tests {
             updated_at_value.is_some_and(|value| value > 222),
             "updated_at_ms must advance past initial 222, got {refreshed:?}",
         );
+    }
+
+    #[test]
+    fn heartbeat_folds_indexer_progress_atomic_into_last_progress_at_ms() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("agent_search.db");
+        std::fs::write(&db_path, b"placeholder").unwrap();
+        let guard = acquire_index_run_lock(tmp.path(), &db_path, SearchMaintenanceMode::Index)
+            .expect("acquire index run lock");
+        let lock_path = tmp.path().join("index-run.lock");
+        let before = std::fs::read_to_string(&lock_path).unwrap();
+        let old_progress = before
+            .lines()
+            .find_map(|line| line.strip_prefix("last_progress_at_ms="))
+            .and_then(|raw| raw.parse::<i64>().ok())
+            .expect("initial progress line");
+        let bumped_progress = old_progress.saturating_add(1_000);
+        guard
+            .last_progress_at_ms_atomic
+            .store(bumped_progress, Ordering::Relaxed);
+
+        heartbeat_index_run_lock_with_lock_and_progress(
+            tmp.path(),
+            Some(&guard.metadata_write_lock),
+            guard.last_progress_at_ms_atomic.load(Ordering::Relaxed),
+        )
+        .expect("heartbeat should persist indexer-owned progress");
+
+        let refreshed = std::fs::read_to_string(&lock_path).unwrap();
+        let expected_line = format!("last_progress_at_ms={bumped_progress}");
+        assert!(
+            refreshed.lines().any(|line| line == expected_line),
+            "heartbeat must persist the indexer-owned progress bump, got {refreshed:?}"
+        );
+        drop(guard);
     }
 
     #[test]
@@ -36108,6 +36356,7 @@ mod tests {
                 LexicalRebuildStartupOptions {
                     defer_initial_content_fingerprint: true,
                 },
+                None,
             )
         });
 
@@ -36170,6 +36419,7 @@ mod tests {
             LexicalRebuildStartupOptions {
                 defer_initial_content_fingerprint: true,
             },
+            None,
         )
         .unwrap();
         assert_eq!(rebuild.indexed_docs, 4);
@@ -36283,6 +36533,7 @@ mod tests {
                 LexicalRebuildStartupOptions {
                     defer_initial_content_fingerprint: true,
                 },
+                None,
             )
             .unwrap();
             assert_eq!(rebuild.indexed_docs, 4);
@@ -36397,6 +36648,7 @@ mod tests {
                 LexicalRebuildStartupOptions {
                     defer_initial_content_fingerprint: true,
                 },
+                None,
             )
             .unwrap();
             assert_eq!(rebuild.indexed_docs, 8);
@@ -36508,6 +36760,7 @@ mod tests {
                 LexicalRebuildStartupOptions {
                     defer_initial_content_fingerprint: true,
                 },
+                None,
             )
             .unwrap();
             assert_eq!(rebuild.indexed_docs, 6);
@@ -38078,6 +38331,7 @@ mod tests {
                 LexicalRebuildStartupOptions {
                     defer_initial_content_fingerprint: true,
                 },
+                None,
             )
             .unwrap();
             assert_eq!(rebuild.indexed_docs, 30);
@@ -38228,6 +38482,7 @@ mod tests {
                 2,
                 None,
                 LexicalRebuildStartupOptions::default(),
+                None,
             )
             .unwrap();
             assert_eq!(rebuild.indexed_docs, 4);
@@ -42058,6 +42313,7 @@ mod tests {
             &mut last_progress_persist,
             Duration::from_secs(60),
             None,
+            None,
         )
         .unwrap();
 
@@ -42168,6 +42424,7 @@ mod tests {
             64,
             &mut last_progress_persist,
             Duration::from_secs(60),
+            None,
             None,
         )
         .unwrap();

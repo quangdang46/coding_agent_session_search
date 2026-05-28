@@ -443,7 +443,14 @@ pub(crate) struct InspectSearchAssetsInput<'a> {
     pub db_path: &'a Path,
     pub stale_threshold: u64,
     pub last_indexed_at_ms: Option<i64>,
-    pub now_secs: u64,
+    /// Full-precision (millisecond) wall clock used for stall-detection
+    /// math against `last_progress_at_ms`. Callers should pass
+    /// `FrankenStorage::now_millis()` here. F4 (cass tech debt): the
+    /// previous shape only carried `now_secs`, which quantised the
+    /// comparison to second resolution while `last_progress_at_ms` is
+    /// stored at full ms. Down-stream `now_secs` is now derived from
+    /// this value so the two clocks remain consistent.
+    pub now_ms: i64,
     pub maintenance: SearchMaintenanceSnapshot,
     pub semantic_preference: SemanticPreference,
     pub db_available: bool,
@@ -502,7 +509,7 @@ pub(crate) fn inspect_search_assets(
         db_path,
         stale_threshold,
         last_indexed_at_ms,
-        now_secs,
+        now_ms,
         maintenance,
         semantic_preference,
         db_available,
@@ -515,7 +522,7 @@ pub(crate) fn inspect_search_assets(
         db_path,
         stale_threshold,
         last_indexed_at_ms,
-        now_secs,
+        now_ms,
         maintenance,
         db_available,
         compute_lexical_fingerprint,
@@ -1107,7 +1114,11 @@ struct InspectLexicalAssetsInput<'a> {
     db_path: &'a Path,
     stale_threshold: u64,
     last_indexed_at_ms: Option<i64>,
-    now_secs: u64,
+    /// F4 (cass tech debt): full-precision wall clock; the legacy
+    /// `now_secs` field was widening the second-precision comparison
+    /// against ms-precision `last_progress_at_ms`. Derive `now_secs`
+    /// locally from this when needed for age math.
+    now_ms: i64,
     maintenance: SearchMaintenanceSnapshot,
     db_available: bool,
     compute_lexical_fingerprint: bool,
@@ -1119,7 +1130,7 @@ fn inspect_lexical_assets(input: InspectLexicalAssetsInput<'_>) -> Result<Lexica
         db_path,
         stale_threshold,
         last_indexed_at_ms,
-        now_secs,
+        now_ms,
         maintenance,
         db_available,
         compute_lexical_fingerprint,
@@ -1145,7 +1156,7 @@ fn inspect_lexical_assets(input: InspectLexicalAssetsInput<'_>) -> Result<Lexica
         db_path,
         stale_threshold,
         last_indexed_at_ms,
-        now_secs,
+        now_ms,
         maintenance,
         checkpoint: checkpoint.as_ref(),
         current_db_fingerprint: current_db_fingerprint.as_deref(),
@@ -1157,7 +1168,8 @@ struct LexicalObservationInput<'a> {
     db_path: &'a Path,
     stale_threshold: u64,
     last_indexed_at_ms: Option<i64>,
-    now_secs: u64,
+    /// Full-precision wall clock (F4); see [`InspectSearchAssetsInput::now_ms`].
+    now_ms: i64,
     maintenance: SearchMaintenanceSnapshot,
     checkpoint: Option<&'a LexicalRebuildCheckpoint>,
     current_db_fingerprint: Option<&'a str>,
@@ -1169,7 +1181,7 @@ fn lexical_state_from_observations(input: LexicalObservationInput<'_>) -> Lexica
         db_path,
         stale_threshold,
         last_indexed_at_ms,
-        now_secs,
+        now_ms,
         maintenance,
         checkpoint,
         current_db_fingerprint,
@@ -1191,6 +1203,12 @@ fn lexical_state_from_observations(input: LexicalObservationInput<'_>) -> Lexica
     let checkpoint_db_mismatch = checkpoint_db_matches == Some(false);
     let contract_mismatch = schema_matches == Some(false) || page_size_compatible == Some(false);
     let fingerprint_mismatch = fingerprint_matches == Some(false);
+    // F4 (cass tech debt): derive the (legacy) second-resolution clock
+    // from `now_ms` rather than the other way around so the comparison
+    // against ms-precision `last_progress_at_ms` below is no longer
+    // forced into second-bin alignment. `as u64` is correct because
+    // wall-clock millis fits well inside i63 (until year ~292477).
+    let now_secs: u64 = now_ms.div_euclid(1000).max(0) as u64;
     let age_seconds = last_indexed_at_ms
         .and_then(|ts| (ts > 0).then(|| now_secs.saturating_sub((ts / 1000) as u64)));
     let age_stale = match age_seconds {
@@ -1220,10 +1238,8 @@ fn lexical_state_from_observations(input: LexicalObservationInput<'_>) -> Lexica
     // thread, so it cannot be used as a "work is happening" signal —
     // only the indexer-thread-owned `last_progress_at_ms` can.
     //
-    // `now_ms` is derived from `now_secs` (which we already accept) to
-    // avoid taking an extra clock read; the resolution is good enough
-    // for a 120 s threshold and the relative ordering is preserved.
-    let now_ms = (now_secs as i64).saturating_mul(1000);
+    // `now_ms` is now passed in at full ms precision (F4); the old
+    // shape derived it from `now_secs` and quantised the comparison.
     let stall_age_ms = if rebuilding && maintenance_targets_current_db {
         maintenance_stall_age_ms(&maintenance, now_ms)
     } else {
@@ -2132,7 +2148,7 @@ mod tests {
             db_path: &db_path,
             stale_threshold: 60,
             last_indexed_at_ms: Some(1_733_000_000_000),
-            now_secs: 1_733_000_001,
+            now_ms: 1_733_000_001_000,
             maintenance: SearchMaintenanceSnapshot::default(),
             checkpoint: Some(&checkpoint),
             current_db_fingerprint: Some("after"),
@@ -2185,7 +2201,7 @@ mod tests {
             db_path: &db_path,
             stale_threshold: 60,
             last_indexed_at_ms: Some(1_733_000_000_000),
-            now_secs: 1_733_000_001,
+            now_ms: 1_733_000_001_000,
             maintenance: SearchMaintenanceSnapshot::default(),
             checkpoint: Some(&checkpoint),
             current_db_fingerprint: None,
@@ -2221,7 +2237,7 @@ mod tests {
             db_path: &db_path,
             stale_threshold: 60,
             last_indexed_at_ms: None,
-            now_secs: 1_733_000_001,
+            now_ms: 1_733_000_001_000,
             maintenance: SearchMaintenanceSnapshot::default(),
             checkpoint: None,
             current_db_fingerprint: None,
@@ -2265,7 +2281,7 @@ mod tests {
             db_path: &db_path,
             stale_threshold: 60,
             last_indexed_at_ms: Some(1_733_000_000_000),
-            now_secs: 1_733_000_001,
+            now_ms: 1_733_000_001_000,
             maintenance: SearchMaintenanceSnapshot {
                 active: true,
                 pid: Some(std::process::id()),
@@ -2326,7 +2342,7 @@ mod tests {
             db_path: &db_path,
             stale_threshold: 60,
             last_indexed_at_ms: Some(1_733_000_000_000),
-            now_secs: 1_733_000_001,
+            now_ms: 1_733_000_001_000,
             maintenance: SearchMaintenanceSnapshot::default(),
             checkpoint: Some(&checkpoint),
             current_db_fingerprint: Some("before"),
@@ -2375,7 +2391,7 @@ mod tests {
             db_path: &db_path,
             stale_threshold: 60,
             last_indexed_at_ms: Some(1_733_000_000_000),
-            now_secs: 1_733_000_001,
+            now_ms: 1_733_000_001_000,
             maintenance: SearchMaintenanceSnapshot {
                 active: true,
                 pid: Some(std::process::id()),
@@ -2427,7 +2443,7 @@ mod tests {
             db_path: &db_path,
             stale_threshold: 60,
             last_indexed_at_ms: Some(1_733_000_000_000),
-            now_secs: 1_733_000_001,
+            now_ms: 1_733_000_001_000,
             maintenance: SearchMaintenanceSnapshot {
                 active: true,
                 pid: Some(std::process::id()),
@@ -2479,7 +2495,7 @@ mod tests {
             db_path: &db_path,
             stale_threshold: 60,
             last_indexed_at_ms: Some(1_733_000_000_000),
-            now_secs: 1_733_000_020,
+            now_ms: 1_733_000_020_000,
             maintenance: SearchMaintenanceSnapshot {
                 active: true,
                 pid: Some(std::process::id()),
@@ -2524,15 +2540,17 @@ mod tests {
         // now = 1_733_000_300 s (= 1_733_000_300_000 ms).
         // heartbeat updated 500 ms ago: fresh.
         // forward progress posted 300 s ago: well past the 120 s default stall threshold.
-        let now_secs: u64 = 1_733_000_300;
-        let now_ms: i64 = (now_secs as i64) * 1000;
+        // F4 (cass tech debt): the input now carries full-precision
+        // `now_ms` end-to-end. Tests that previously needed
+        // `now_secs as i64 * 1000` no longer have to round-trip.
+        let now_ms: i64 = 1_733_000_300_000;
 
         let state = lexical_state_from_observations(LexicalObservationInput {
             index_path: &index_path,
             db_path: &db_path,
             stale_threshold: 60,
             last_indexed_at_ms: Some(1_733_000_000_000),
-            now_secs,
+            now_ms,
             maintenance: SearchMaintenanceSnapshot {
                 active: true,
                 pid: Some(std::process::id()),
@@ -2591,15 +2609,17 @@ mod tests {
         let db_path = temp.path().join("agent_search.db");
         std::fs::write(&db_path, b"db").expect("write db file");
 
-        let now_secs: u64 = 1_733_000_300;
-        let now_ms: i64 = (now_secs as i64) * 1000;
+        // F4 (cass tech debt): the input now carries full-precision
+        // `now_ms` end-to-end. Tests that previously needed
+        // `now_secs as i64 * 1000` no longer have to round-trip.
+        let now_ms: i64 = 1_733_000_300_000;
 
         let state = lexical_state_from_observations(LexicalObservationInput {
             index_path: &index_path,
             db_path: &db_path,
             stale_threshold: 60,
             last_indexed_at_ms: Some(1_733_000_000_000),
-            now_secs,
+            now_ms,
             maintenance: SearchMaintenanceSnapshot {
                 active: true,
                 pid: Some(std::process::id()),
@@ -2635,15 +2655,17 @@ mod tests {
         let db_path = temp.path().join("agent_search.db");
         std::fs::write(&db_path, b"db").expect("write db file");
 
-        let now_secs: u64 = 1_733_000_300;
-        let now_ms: i64 = (now_secs as i64) * 1000;
+        // F4 (cass tech debt): the input now carries full-precision
+        // `now_ms` end-to-end. Tests that previously needed
+        // `now_secs as i64 * 1000` no longer have to round-trip.
+        let now_ms: i64 = 1_733_000_300_000;
 
         let state = lexical_state_from_observations(LexicalObservationInput {
             index_path: &index_path,
             db_path: &db_path,
             stale_threshold: 60,
             last_indexed_at_ms: Some(1_733_000_000_000),
-            now_secs,
+            now_ms,
             maintenance: SearchMaintenanceSnapshot {
                 active: true,
                 pid: Some(std::process::id()),
@@ -2668,6 +2690,71 @@ mod tests {
         );
         assert_eq!(state.status, "building");
         assert!(state.last_progress_age_ms.is_none());
+    }
+
+    /// F4 (cass tech debt): the stall-age comparison must operate at
+    /// full millisecond precision. Pre-fix, `now_ms` was derived from
+    /// `now_secs * 1000` inside `lexical_state_from_observations`, which
+    /// quantised the comparison to second resolution and made a
+    /// 119_900 ms-old progress timestamp indistinguishable from a 119
+    /// 000 ms-old one. This test pins a 119_500 ms age so that the only
+    /// way it surfaces correctly as a `last_progress_age_ms` close to
+    /// 119_500 (and NOT 119_000 or 120_000) is full-ms plumbing.
+    #[test]
+    fn lexical_state_progress_age_is_ms_precision_not_seconds_quantised() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let index_path = temp.path().join("index").join("v4");
+        std::fs::create_dir_all(&index_path).expect("create index dir");
+        std::fs::write(index_path.join("meta.json"), b"{}").expect("write meta.json");
+        let db_path = temp.path().join("agent_search.db");
+        std::fs::write(&db_path, b"db").expect("write db file");
+
+        // `now_ms` deliberately lands at .700 of a second so any
+        // second-quantisation upstream would shave 700 ms off the diff.
+        let now_ms: i64 = 1_733_000_300_700;
+        let last_progress_at_ms = now_ms - 119_500;
+
+        let state = lexical_state_from_observations(LexicalObservationInput {
+            index_path: &index_path,
+            db_path: &db_path,
+            stale_threshold: 60,
+            last_indexed_at_ms: Some(1_733_000_000_000),
+            now_ms,
+            maintenance: SearchMaintenanceSnapshot {
+                active: true,
+                pid: Some(std::process::id()),
+                started_at_ms: Some(now_ms - 600_000),
+                db_path: Some(db_path.clone()),
+                mode: Some(SearchMaintenanceMode::WatchStartup),
+                job_id: Some("lexical_refresh-1-1".to_string()),
+                job_kind: Some(SearchMaintenanceJobKind::LexicalRefresh),
+                phase: Some("watch_startup".to_string()),
+                updated_at_ms: Some(now_ms - 500),
+                last_progress_at_ms: Some(last_progress_at_ms),
+                orphaned: false,
+            },
+            checkpoint: None,
+            current_db_fingerprint: None,
+        });
+
+        let age = state
+            .last_progress_age_ms
+            .expect("forward-progress age must be computed");
+        assert_eq!(
+            age, 119_500,
+            "ms-precision plumbing must surface the exact diff (no second-quantisation)"
+        );
+        // 119_500 ms is still under the default 120 s stall threshold,
+        // so we should be `building`, not `stalled`. Pre-F4, a
+        // second-quantised clock could either floor the diff to 119_000
+        // (still building, OK) OR — on different `.fff` ms suffixes —
+        // round it to 120_000 (false-positive stall). Pinning the
+        // expected status here protects both edges.
+        assert!(
+            !state.stalled,
+            "119.5 s lag must remain `building`, not flip to `stalled`",
+        );
+        assert_eq!(state.status, "building");
     }
 
     /// Coordination outcome layer must also degrade to `Stale` when
@@ -2725,7 +2812,7 @@ mod tests {
             db_path: &db_path,
             stale_threshold: 60,
             last_indexed_at_ms: Some(1_733_000_000_000),
-            now_secs: 1_733_000_001,
+            now_ms: 1_733_000_001_000,
             maintenance: SearchMaintenanceSnapshot::default(),
             semantic_preference: SemanticPreference::HashFallback,
             db_available: false,
@@ -2761,7 +2848,7 @@ mod tests {
             db_path: &db_path,
             stale_threshold: 60,
             last_indexed_at_ms: Some(1_733_000_000_000),
-            now_secs: 1_733_000_001,
+            now_ms: 1_733_000_001_000,
             maintenance: SearchMaintenanceSnapshot::default(),
             semantic_preference: SemanticPreference::HashFallback,
             db_available: false,
@@ -2796,7 +2883,7 @@ mod tests {
             db_path: &db_path,
             stale_threshold: 60,
             last_indexed_at_ms: Some(1_733_000_000_000),
-            now_secs: 1_733_000_001,
+            now_ms: 1_733_000_001_000,
             maintenance: SearchMaintenanceSnapshot::default(),
             semantic_preference: SemanticPreference::HashFallback,
             db_available: true,

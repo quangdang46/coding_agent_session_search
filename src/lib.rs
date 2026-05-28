@@ -15662,10 +15662,17 @@ fn state_meta_json_inner(
     let db_exists = db_path.exists();
     let index_run = probe_index_run_lock(data_dir, db_path);
 
-    let now_secs = SystemTime::now()
+    // F4 (cass tech debt): capture the wall clock at full millisecond
+    // precision so the stall-detection comparison against
+    // `last_progress_at_ms` is no longer second-quantised inside
+    // `asset_state::lexical_state_from_observations`. `now_secs` is
+    // retained as a convenience for the existing age-in-seconds math
+    // (the public status JSON surfaces `age_seconds`, not `age_ms`).
+    let now_ms_i64: i64 = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or(0);
+    let now_secs = (now_ms_i64.max(0) as u64) / 1000;
 
     let db_metadata = fs::metadata(db_path).ok();
     let db_size_bytes = db_metadata.as_ref().map(|m| m.len());
@@ -15750,7 +15757,7 @@ fn state_meta_json_inner(
             db_path,
             stale_threshold,
             last_indexed_at_ms: last_indexed_at,
-            now_secs,
+            now_ms: now_ms_i64,
             maintenance: index_run.clone(),
             semantic_preference,
             db_available: db_opened,
