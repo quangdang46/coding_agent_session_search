@@ -28344,6 +28344,7 @@ fn doctor_forensic_write_json_artifact(
             target_path.display()
         )
     })?;
+    drop(target);
     let checksum = file_blake3_hex(&target_path)?;
     artifacts.push(doctor_forensic_generated_artifact(
         artifact_kind,
@@ -57988,7 +57989,7 @@ mod doctor_asset_taxonomy_tests {
             extra_file_artifacts: &[],
         });
 
-        assert_eq!(bundle.status, "captured");
+        assert_eq!(bundle.status, "captured", "{bundle:#?}");
         assert!(
             bundle
                 .path

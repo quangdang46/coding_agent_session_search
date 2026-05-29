@@ -890,7 +890,7 @@ fn tui_pty_enter_selected_hit_opens_detail_modal() {
 }
 
 #[test]
-fn tui_pty_search_query_with_space_opens_detail_modal() {
+fn tui_pty_search_query_with_space_opens_detail_modal() -> Result<(), String> {
     let _guard_lock = tui_flow_guard();
     let trace = trace_id();
     let tracker = tracker_for("tui_pty_search_query_with_space_opens_detail_modal");
@@ -918,29 +918,51 @@ fn tui_pty_search_query_with_space_opens_detail_modal() {
         .spawn_command(tui_cmd)
         .expect("spawn ftui TUI in PTY");
 
-    assert!(
-        wait_for_output_growth(&captured, 0, 32, PTY_STARTUP_TIMEOUT),
-        "Did not observe startup output before spaced-query detail flow interaction"
-    );
+    if !wait_for_output_growth(&captured, 0, 32, PTY_STARTUP_TIMEOUT) {
+        return Err(
+            "Did not observe startup output before spaced-query detail flow interaction"
+                .to_string(),
+        );
+    }
+    if !wait_for_rendered_output(&captured, PTY_STARTUP_TIMEOUT, |rendered| {
+        rendered.contains("Search sessions, messages")
+    }) {
+        return Err(
+            "Did not observe rendered search input before spaced-query detail flow interaction"
+                .to_string(),
+        );
+    }
 
     // Regression contract: literal spaces must remain editable in the query field.
     send_key_sequence(&mut *writer, b"hello world");
     thread::sleep(Duration::from_millis(120));
     let before_submit_len = captured.lock().expect("capture lock").len();
     send_key_sequence(&mut *writer, b"\r"); // submit query to populate result list
-    assert!(
-        wait_for_output_growth(&captured, before_submit_len, 24, Duration::from_secs(6)),
-        "Did not observe output growth after spaced query submission in PTY Enter flow"
-    );
+    if !wait_for_output_growth(&captured, before_submit_len, 24, Duration::from_secs(6)) {
+        return Err(
+            "Did not observe output growth after spaced query submission in PTY Enter flow"
+                .to_string(),
+        );
+    }
+    if !wait_for_rendered_output(&captured, Duration::from_secs(6), |rendered| {
+        rendered_contains_hello_fixture_content(rendered)
+    }) {
+        return Err(
+            "Did not observe fixture search result before spaced-query detail-open attempt"
+                .to_string(),
+        );
+    }
     thread::sleep(Duration::from_millis(180));
 
     let before_open_len = captured.lock().expect("capture lock").len();
     send_key_sequence(&mut *writer, b"\r");
     let saw_detail = wait_for_output_growth(&captured, before_open_len, 8, Duration::from_secs(6));
-    assert!(
-        saw_detail,
-        "Did not observe output growth after Enter detail-open attempt for spaced query"
-    );
+    if !saw_detail {
+        return Err(
+            "Did not observe output growth after Enter detail-open attempt for spaced query"
+                .to_string(),
+        );
+    }
 
     send_key_sequence(&mut *writer, b"\x1b");
     thread::sleep(Duration::from_millis(220));
@@ -948,17 +970,20 @@ fn tui_pty_search_query_with_space_opens_detail_modal() {
         .try_wait()
         .expect("poll child after first ESC in spaced-query flow")
         .is_some();
-    assert!(
-        !first_esc_exited,
-        "First ESC exited app; expected modal-close-only after spaced query detail-open"
-    );
+    if first_esc_exited {
+        return Err(
+            "First ESC exited app; expected modal-close-only after spaced query detail-open"
+                .to_string(),
+        );
+    }
 
     let (status, additional_esc_presses) =
         quit_tui_with_escape(&mut *writer, &mut *child, 8, Duration::from_millis(180));
-    assert!(
-        status.success(),
-        "ftui process exited unsuccessfully after spaced query detail flow: {status}"
-    );
+    if !status.success() {
+        return Err(format!(
+            "ftui process exited unsuccessfully after spaced query detail flow: {status}"
+        ));
+    }
 
     drop(writer);
     drop(pair);
@@ -983,16 +1008,18 @@ fn tui_pty_search_query_with_space_opens_detail_modal() {
             .expect("serialize spaced-query detail summary")
             .as_bytes(),
     );
-    assert!(
-        saw_messages_detail,
-        "Expected PTY capture to include Detail [Messages] marker after spaced query drill-in"
-    );
-    assert!(
-        !raw.is_empty(),
-        "Expected non-empty PTY capture for spaced query detail flow"
-    );
+    if !saw_messages_detail {
+        return Err(
+            "Expected PTY capture to include Detail [Messages] marker after spaced query drill-in"
+                .to_string(),
+        );
+    }
+    if raw.is_empty() {
+        return Err("Expected non-empty PTY capture for spaced query detail flow".to_string());
+    }
 
     tracker.complete();
+    Ok(())
 }
 
 #[test]
@@ -2456,7 +2483,10 @@ fn tui_typing_writes_latency_trace() {
         wait_for_output_growth(&captured, before_submit_len, 24, Duration::from_secs(6)),
         "Did not observe output growth after explicit query submission in latency PTY"
     );
-    thread::sleep(Duration::from_millis(250));
+    // macOS runners can report the search completion before the next frame is
+    // rendered. Give the latency recorder a bounded chance to observe that
+    // frame before the ESC-driven shutdown flushes the trace.
+    thread::sleep(Duration::from_millis(1500));
 
     let (status, esc_presses) =
         quit_tui_with_escape(&mut *writer, &mut *tui_child, 8, Duration::from_millis(180));

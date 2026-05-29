@@ -568,36 +568,69 @@ fn live_value_scrubbing_normalizes_runtime_objects_with_type_fields() {
 }
 
 #[test]
-fn live_value_scrubbing_redacts_repo_paths_and_result_content() {
+fn live_value_scrubbing_redacts_repo_paths_and_result_content() -> Result<(), String> {
     let test_home = tempfile::tempdir().expect("create temp home");
     let repo_root = env!("CARGO_MANIFEST_DIR");
+    let legacy_fixture_root = "/data/projects/coding_agent_session_search";
     let input = serde_json::to_string_pretty(&json!({
-        "results": [{
-            "source_path": format!("{repo_root}/.aider.chat.history.md"),
-            "workspace": repo_root,
-            "line_number": 42,
-            "agent": "aider",
-            "snippet": "private snippet",
-            "content": "private prompt and assistant transcript"
-        }]
+        "results": [
+            {
+                "source_path": format!("{repo_root}/.aider.chat.history.md"),
+                "workspace": repo_root,
+                "line_number": 42,
+                "agent": "aider",
+                "snippet": "private snippet",
+                "content": "private prompt and assistant transcript"
+            },
+            {
+                "source_path": format!("{legacy_fixture_root}/tests/fixtures/aider/session.md"),
+                "workspace": legacy_fixture_root,
+                "line_number": 7,
+                "agent": "aider",
+                "snippet": "legacy private snippet",
+                "content": "legacy private prompt and assistant transcript"
+            }
+        ]
     }))
     .expect("serialize fixture");
 
     let scrubbed = scrub_robot_json(&input, test_home.path());
     let scrubbed: Value = serde_json::from_str(&scrubbed).expect("parse scrubbed fixture");
 
-    assert_eq!(
-        scrubbed["results"][0]["source_path"],
-        "[REPO]/.aider.chat.history.md"
-    );
-    assert_eq!(scrubbed["results"][0]["workspace"], "[REPO]");
-    assert_eq!(scrubbed["results"][0]["snippet"], "[RESULT_SNIPPET]");
-    assert_eq!(scrubbed["results"][0]["content"], "[RESULT_CONTENT]");
-    assert!(
-        !serde_json::to_string(&scrubbed)
-            .expect("serialize scrubbed fixture")
-            .contains("private prompt")
-    );
+    require_json_string_eq(
+        &scrubbed,
+        "/results/0/source_path",
+        "[REPO]/.aider.chat.history.md",
+    )?;
+    require_json_string_eq(&scrubbed, "/results/0/workspace", "[REPO]")?;
+    require_json_string_eq(&scrubbed, "/results/0/snippet", "[RESULT_SNIPPET]")?;
+    require_json_string_eq(&scrubbed, "/results/0/content", "[RESULT_CONTENT]")?;
+    require_json_string_eq(
+        &scrubbed,
+        "/results/1/source_path",
+        "[REPO]/tests/fixtures/aider/session.md",
+    )?;
+    require_json_string_eq(&scrubbed, "/results/1/workspace", "[REPO]")?;
+    require_json_string_eq(&scrubbed, "/results/1/snippet", "[RESULT_SNIPPET]")?;
+    require_json_string_eq(&scrubbed, "/results/1/content", "[RESULT_CONTENT]")?;
+    let serialized = serde_json::to_string(&scrubbed).expect("serialize scrubbed fixture");
+    if serialized.contains("private prompt") {
+        return Err("scrubbed fixture leaked private prompt text".to_string());
+    }
+    Ok(())
+}
+
+fn require_json_string_eq(value: &Value, pointer: &str, expected: &str) -> Result<(), String> {
+    let actual = value
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("missing string at JSON pointer {pointer}"))?;
+    match actual.cmp(expected) {
+        std::cmp::Ordering::Equal => Ok(()),
+        _ => Err(format!(
+            "string at JSON pointer {pointer} was {actual:?}, expected {expected:?}"
+        )),
+    }
 }
 
 /// Strip non-deterministic values from a robot-mode JSON payload so the
@@ -642,6 +675,10 @@ fn scrub_robot_json(input: &str, test_home: &std::path::Path) -> String {
     if !repo_root.is_empty() {
         out = out.replace(repo_root, "[REPO]");
     }
+    // The checked-in search_demo_data fixture intentionally preserves source
+    // metadata captured on the maintainer machine. CI checkouts live under
+    // /home/runner, so scrub that stable fixture root explicitly too.
+    out = out.replace("/data/projects/coding_agent_session_search", "[REPO]");
 
     // 4. UUIDs.
     let uuid_re =
