@@ -7038,8 +7038,6 @@ impl SearchClient {
         if !has_fts {
             return Ok(Vec::new());
         }
-        crate::storage::sqlite::validate_fts_messages_integrity_for_connection(conn)
-            .with_context(|| "validating sqlite fts_messages fallback integrity before search")?;
 
         let query_match_type = dominant_match_type(raw_query);
         let scan_request = SqliteMessageScanRequest {
@@ -7050,6 +7048,15 @@ impl SearchClient {
             field_mask,
             query_match_type,
         };
+        if let Err(err) =
+            crate::storage::sqlite::validate_fts_messages_integrity_for_connection(conn)
+        {
+            tracing::warn!(
+                error = %err,
+                "sqlite FTS fallback integrity check failed; using source-table scan fallback"
+            );
+            return self.search_sqlite_message_scan(conn, scan_request);
+        }
         let uses_message_id =
             if let Ok(uses_message_id) = Self::sqlite_fts_uses_message_id_column(conn) {
                 uses_message_id

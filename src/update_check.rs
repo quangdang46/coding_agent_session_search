@@ -822,29 +822,28 @@ fn build_update_info(
 
 /// Fetch latest release using the native asupersync HTTP client.
 async fn fetch_latest_release() -> Result<GitHubRelease> {
-    if let Some(cx) = asupersync::Cx::current() {
-        return fetch_latest_release_with_cx(&cx).await;
-    }
+    if let Some(handle) = asupersync::runtime::Runtime::current_handle() {
+        let (tx, rx) = std::sync::mpsc::channel();
 
-    let handle = asupersync::runtime::Runtime::current_handle()
-        .context("update check requires an active asupersync runtime")?;
-    let (tx, rx) = std::sync::mpsc::channel();
+        handle
+            .try_spawn_with_cx(move |cx| async move {
+                let _ = tx.send(fetch_latest_release_with_cx(&cx).await);
+            })
+            .context("spawning update check task")?;
 
-    handle
-        .try_spawn_with_cx(move |cx| async move {
-            let _ = tx.send(fetch_latest_release_with_cx(&cx).await);
-        })
-        .context("spawning update check task")?;
-
-    loop {
-        match rx.try_recv() {
-            Ok(result) => return result,
-            Err(TryRecvError::Empty) => asupersync::runtime::yield_now().await,
-            Err(TryRecvError::Disconnected) => {
-                anyhow::bail!("update check task exited before returning a result");
+        loop {
+            match rx.try_recv() {
+                Ok(result) => return result,
+                Err(TryRecvError::Empty) => asupersync::runtime::yield_now().await,
+                Err(TryRecvError::Disconnected) => {
+                    anyhow::bail!("update check task exited before returning a result");
+                }
             }
         }
     }
+
+    let cx = asupersync::Cx::current().context("update check requires an active asupersync Cx")?;
+    fetch_latest_release_with_cx(&cx).await
 }
 
 async fn fetch_latest_release_with_cx(cx: &asupersync::Cx) -> Result<GitHubRelease> {
@@ -1505,21 +1504,46 @@ mod tests {
         response_body: &str,
         status: u16,
     ) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
-        use std::io::{Read, Write};
+        use std::io::{ErrorKind, Read, Write};
+        use std::net::Shutdown;
         use std::net::TcpListener;
+        use std::time::{Duration, Instant};
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind to ephemeral port");
         let addr = listener.local_addr().expect("get local addr");
+        let _ = listener.set_nonblocking(true);
 
         let response = http_response(status, response_body);
 
         let handle = std::thread::spawn(move || {
-            // Accept one connection and respond
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut buf = [0u8; 1024];
-                let _ = stream.read(&mut buf);
-                let _ = stream.write_all(response.as_bytes());
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(err)
+                        if err.kind() == ErrorKind::WouldBlock && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => return,
+                }
+            };
+
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+            let mut buf = [0u8; 4096];
+            match stream.read(&mut buf) {
+                Ok(_) => {}
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::UnexpectedEof
+                    ) => {}
+                Err(_) => return,
+            }
+
+            if stream.write_all(response.as_bytes()).is_ok() {
                 let _ = stream.flush();
+                let _ = stream.shutdown(Shutdown::Both);
             }
         });
 

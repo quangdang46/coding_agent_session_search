@@ -11354,16 +11354,47 @@ pub fn run_index(
     persist::apply_index_writer_checkpoint_policy(&storage, defer_checkpoints);
 
     if let Err(err) = storage.validate_fts_messages_integrity() {
-        tracing::error!(
+        tracing::warn!(
             db_path = %opts.db_path.display(),
             error = %err,
-            "canonical archive has corrupt fts_messages metadata; refusing to enter index pipeline"
+            "derived fallback FTS metadata is inconsistent; repairing before index pipeline"
         );
         storage.close_best_effort_in_place();
-        return Err(canonical_archive_unhealthy_for_index_error(
+        let mut repair_storage = crate::storage::sqlite::open_franken_storage_with_timeout(
             &opts.db_path,
-            &err.to_string(),
-        ));
+            Duration::from_secs(10),
+        )
+        .with_context(|| {
+            format!(
+                "opening fresh storage for fallback FTS repair before indexing {}",
+                opts.db_path.display()
+            )
+        })?;
+        let repair = repair_storage.ensure_search_fallback_fts_consistency();
+        repair_storage.close_best_effort_in_place();
+        let repair = repair.with_context(|| {
+            format!(
+                "repairing derived fallback FTS before indexing {}",
+                opts.db_path.display()
+            )
+        })?;
+        tracing::info!(
+            db_path = %opts.db_path.display(),
+            ?repair,
+            "derived fallback FTS repair completed before index pipeline"
+        );
+        storage = crate::storage::sqlite::open_franken_storage_with_timeout(
+            &opts.db_path,
+            Duration::from_secs(10),
+        )
+        .with_context(|| {
+            format!(
+                "reopening storage after fallback FTS repair before indexing {}",
+                opts.db_path.display()
+            )
+        })?;
+        persist::apply_index_writer_busy_timeout(&storage);
+        persist::apply_index_writer_checkpoint_policy(&storage, defer_checkpoints);
     }
 
     if opts.full

@@ -574,6 +574,7 @@ jobs:
             test-results/e2e/combined.jsonl
             test-results/e2e/summary.md
             test-results/e2e/*.jsonl
+            test-results/e2e/*.log
           if-no-files-found: ignore
           retention-days: 14
 

@@ -14241,22 +14241,6 @@ fn validate_fts_messages_integrity_for_cli(
         .map_err(|err| fts_messages_integrity_cli_error(surface, err))
 }
 
-fn validate_fts_messages_integrity_at_path_for_cli(
-    path: &Path,
-    surface: &str,
-    timeout: Duration,
-) -> CliResult<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-
-    let conn = open_franken_cli_read_db(path.to_path_buf(), surface, timeout)?;
-    let validation = validate_fts_messages_integrity_for_cli(&conn, surface);
-    let close = close_franken_cli_read_db(conn, path, surface);
-    validation?;
-    close
-}
-
 fn franken_query_row_map_retry<T, F>(
     conn: &frankensqlite::Connection,
     sql: &str,
@@ -19602,8 +19586,6 @@ fn run_cli_search(
         );
         return Ok(());
     }
-
-    validate_fts_messages_integrity_at_path_for_cli(&db_path, "search", Duration::from_secs(5))?;
 
     let search_self_heal = ensure_lexical_assets_for_search(
         &data_dir,
