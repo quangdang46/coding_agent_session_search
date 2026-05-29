@@ -27963,9 +27963,7 @@ fn doctor_forensic_bundle_id(operation_id: &str, created_at_ms: i64) -> String {
 }
 
 fn doctor_forensic_relative_path_is_safe(relative_path: &Path) -> bool {
-    let raw = relative_path.as_os_str().to_string_lossy();
-    !raw.contains('\\')
-        && !relative_path.as_os_str().is_empty()
+    !relative_path.as_os_str().is_empty()
         && !relative_path.is_absolute()
         && relative_path.components().all(|component| match component {
             std::path::Component::Normal(name) => doctor_portable_relative_component_is_safe(name),
@@ -36817,7 +36815,7 @@ fn doctor_candidate_live_inventory(
 fn doctor_candidate_relative_path(candidate_dir: &Path, path: &Path) -> Option<String> {
     path.strip_prefix(candidate_dir)
         .ok()
-        .map(|relative| relative.display().to_string())
+        .map(doctor_path_to_slash_string)
 }
 
 fn doctor_candidate_artifact_class(relative_path: &str) -> DoctorAssetClass {
@@ -77764,7 +77762,8 @@ mod response_schema_tests {
         assert!(
             risks.iter().any(|risk| {
                 risk.risk_kind == "backup-filter-excludes-cass-evidence"
-                    && risk.path.ends_with("raw-mirror/v1")
+                    && std::path::Path::new(&risk.path)
+                        .ends_with(std::path::Path::new("raw-mirror").join("v1"))
                     && risk
                         .evidence
                         .iter()
@@ -77794,7 +77793,11 @@ mod response_schema_tests {
         assert!(
             risks.iter().any(|risk| {
                 risk.risk_kind == "repo-ignore-excludes-cass-evidence"
-                    && risk.path.ends_with("cass-data/raw-mirror/v1")
+                    && std::path::Path::new(&risk.path).ends_with(
+                        std::path::Path::new("cass-data")
+                            .join("raw-mirror")
+                            .join("v1"),
+                    )
                     && risk
                         .evidence
                         .iter()
@@ -77846,7 +77849,11 @@ mod response_schema_tests {
         assert!(
             risks.iter().any(|risk| {
                 risk.risk_kind == "repo-ignore-excludes-cass-evidence"
-                    && risk.path.ends_with("cass-data-link/raw-mirror/v1")
+                    && std::path::Path::new(&risk.path).ends_with(
+                        std::path::Path::new("cass-data-link")
+                            .join("raw-mirror")
+                            .join("v1"),
+                    )
             }),
             "logical symlinked data-dir placement should still be checked against repo ignores: {risks:#?}"
         );
@@ -77908,7 +77915,8 @@ mod response_schema_tests {
         assert!(
             risks.iter().any(
                 |risk| risk.risk_kind == "sources-config-excludes-cass-evidence"
-                    && risk.path.ends_with("raw-mirror/v1")
+                    && std::path::Path::new(&risk.path)
+                        .ends_with(std::path::Path::new("raw-mirror").join("v1"))
             ),
             "sources config exclusion-like entries should be surfaced with uncertainty: {risks:#?}"
         );

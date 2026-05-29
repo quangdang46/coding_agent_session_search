@@ -47,14 +47,6 @@ async function globalSetup() {
     console.log('All exports exist, skipping regeneration. Set E2E_SKIP_REGENERATE=0 to force regeneration.');
   }
 
-  // Build the Rust CLI if needed (with timeout to avoid blocking)
-  console.log('Building cass CLI...');
-  try {
-    execSync('cargo build --release', { cwd: projectRoot, stdio: 'inherit', timeout: 600000 });
-  } catch {
-    console.warn('Cargo build failed or timed out, trying with existing binary...');
-  }
-
   // Find the cass binary - check CARGO_TARGET_DIR or common locations
   const possiblePaths = [
     process.env.CARGO_TARGET_DIR ? path.join(process.env.CARGO_TARGET_DIR, 'release/cass') : null,
@@ -67,6 +59,24 @@ async function globalSetup() {
     if (existsSync(p)) {
       cassPath = p;
       break;
+    }
+  }
+
+  // Browser CI downloads the release binary from the setup job. Rebuilding it
+  // inside every Playwright shard wastes most of the job timeout.
+  if (!cassPath) {
+    console.log('Building cass CLI...');
+    try {
+      execSync('cargo build --release', { cwd: projectRoot, stdio: 'inherit', timeout: 600000 });
+    } catch {
+      console.warn('Cargo build failed or timed out, trying with existing binary...');
+    }
+
+    for (const p of possiblePaths) {
+      if (existsSync(p)) {
+        cassPath = p;
+        break;
+      }
     }
   }
 

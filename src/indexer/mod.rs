@@ -25437,6 +25437,28 @@ mod tests {
     use serial_test::serial;
     use tempfile::TempDir;
 
+    fn read_index_run_lock_metadata_for_test(lock_path: &Path) -> Result<String> {
+        match std::fs::read_to_string(lock_path) {
+            Ok(raw) => Ok(raw),
+            Err(err) if crate::search::asset_state::windows_lock_conflict(&err) => {
+                let sidecar_path =
+                    crate::search::asset_state::index_run_lock_metadata_sidecar_path(lock_path);
+                std::fs::read_to_string(&sidecar_path).with_context(|| {
+                    format!(
+                        "reading index-run lock metadata sidecar {}",
+                        sidecar_path.display()
+                    )
+                })
+            }
+            Err(err) => Err(err).with_context(|| {
+                format!(
+                    "reading index-run lock metadata for test {}",
+                    lock_path.display()
+                )
+            }),
+        }
+    }
+
     #[test]
     fn scan_path_exclusions_value_active_handles_commas_and_newlines() {
         assert!(!scan_path_exclusions_value_active(None));
@@ -26629,7 +26651,7 @@ mod tests {
         heartbeat_index_run_lock(tmp.path()).unwrap();
         heartbeat_index_run_lock(tmp.path()).unwrap();
 
-        let refreshed = std::fs::read_to_string(&lock_path).unwrap();
+        let refreshed = read_index_run_lock_metadata_for_test(&lock_path).unwrap();
         assert!(refreshed.contains("pid=123"));
         assert!(refreshed.contains("started_at_ms=111"));
         assert!(refreshed.contains("db_path=/tmp/db.sqlite"));
@@ -26695,7 +26717,7 @@ mod tests {
         // key with a fresh timestamp. Parsing it lets a future change
         // to the field's value type surface as a precise test failure.
         let lock_path = tmp.path().join("index-run.lock");
-        let raw = std::fs::read_to_string(&lock_path)?;
+        let raw = read_index_run_lock_metadata_for_test(&lock_path)?;
         let last_progress_lines: Vec<&str> = raw
             .lines()
             .filter_map(|line| line.strip_prefix("last_progress_at_ms="))
@@ -26754,7 +26776,7 @@ mod tests {
         heartbeat_index_run_lock(tmp.path()).unwrap();
         heartbeat_index_run_lock(tmp.path()).unwrap();
 
-        let refreshed = std::fs::read_to_string(&lock_path).unwrap();
+        let refreshed = read_index_run_lock_metadata_for_test(&lock_path).unwrap();
         let last_progress_lines: Vec<&str> = refreshed
             .lines()
             .filter_map(|line| line.strip_prefix("last_progress_at_ms="))
@@ -26789,7 +26811,7 @@ mod tests {
         let guard = acquire_index_run_lock(tmp.path(), &db_path, SearchMaintenanceMode::Index)
             .expect("acquire index run lock");
         let lock_path = tmp.path().join("index-run.lock");
-        let before = std::fs::read_to_string(&lock_path).unwrap();
+        let before = read_index_run_lock_metadata_for_test(&lock_path).unwrap();
         let old_progress = before
             .lines()
             .find_map(|line| line.strip_prefix("last_progress_at_ms="))
@@ -26807,7 +26829,7 @@ mod tests {
         )
         .expect("heartbeat should persist indexer-owned progress");
 
-        let refreshed = std::fs::read_to_string(&lock_path).unwrap();
+        let refreshed = read_index_run_lock_metadata_for_test(&lock_path).unwrap();
         let expected_line = format!("last_progress_at_ms={bumped_progress}");
         assert!(
             refreshed.lines().any(|line| line == expected_line),
