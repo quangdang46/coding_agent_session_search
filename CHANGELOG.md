@@ -17,6 +17,51 @@ Repository: <https://github.com/Dicklesworthstone/coding_agent_session_search>
 
 ## Unreleased
 
+## [v0.6.9] -- 2026-05-30
+
+**Two correctness fixes uncovered by a fresh-eyes review of the v0.6.7
+watchdog: ARM memory-ordering soundness + lock-file write-race against
+the heartbeat thread.**
+
+### Fixed
+
+- **ARM (AArch64) memory-ordering soundness for watchdog state
+  observation** (commit [`f20e6497`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/f20e6497), INV2). The v0.6.7
+  `WatchStartupPreflightState::enter` wrote `current_step_idx` first
+  (Relaxed) then `step_started_at_ms` (Relaxed). On ARM's
+  weakly-ordered memory model — production targets
+  `aarch64-unknown-linux-gnu` and `aarch64-apple-darwin` — the watchdog
+  thread could observe these two Relaxed stores out of order: new
+  `step_idx` with stale `step_started_at_ms == 0`, computing
+  `elapsed_ms = now_ms - 0 ≈ 1.7×10¹² ms`, exceeding any timeout, and
+  firing a spurious `_TIMEOUT` on the very first poll tick after step
+  entry. Fix: write `step_started_at_ms` first (Relaxed), then
+  `current_step_idx` with `Release` ordering; watchdog loads
+  `current_step_idx` with `Acquire`. The Release-Acquire pair
+  establishes happens-before so the subsequent `step_started_at_ms`
+  load sees the value written before the Release store.
+
+- **Watchdog `_TIMEOUT` breadcrumb no longer silently overwritten by
+  the heartbeat thread** (same commit, INV3). The v0.6.7
+  `rewrite_lock_phase_for_timeout` did NOT hold
+  `metadata_write_lock` during its lock-file rewrite, so a heartbeat
+  tick interleaving between the watchdog's `set_len(0)`/write and the
+  process exit could overwrite the `_TIMEOUT` breadcrumb with the
+  prior-phase content. Operators reading `cass health --json` after
+  the abort would see no `_TIMEOUT` suffix, defeating the diagnostic
+  feature. Fix: watchdog now acquires `metadata_write_lock` for the
+  duration of the rewrite. Regression test:
+  `watchdog_timeout_rewrite_serialised_by_metadata_write_lock`.
+
+### Notes
+
+- Same fresh-eyes-review meta-pattern as v0.6.5 (#256 partial fix) and
+  v0.6.8 (cross-surface accumulator storm). Each pass keeps finding
+  real bugs. Recommend continuing the review-pass discipline.
+- v0.6.7 and v0.6.8 BOTH ship the ARM bug. v0.6.9 is recommended for
+  all users; v0.6.7/v0.6.8 should be yanked from crates.io after
+  v0.6.9 confirms green on the prebuilt-binary smoke tests.
+
 ## [v0.6.8] -- 2026-05-30
 
 **Cross-surface retry-storm fix uncovered by a fresh-eyes review of the
