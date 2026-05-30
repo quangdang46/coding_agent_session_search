@@ -5675,7 +5675,7 @@ fn collect_orphan_message_ids(conn: &FrankenConnection) -> Result<Vec<i64>> {
     let min_conversation_id = conn
         .query_map_collect(
             "SELECT conversation_id
-             FROM messages
+             FROM messages INDEXED BY sqlite_autoindex_messages_1
              ORDER BY conversation_id ASC
              LIMIT 1",
             fparams![],
@@ -5690,7 +5690,7 @@ fn collect_orphan_message_ids(conn: &FrankenConnection) -> Result<Vec<i64>> {
     let max_conversation_id: i64 = conn
         .query_row_map(
             "SELECT conversation_id
-             FROM messages
+             FROM messages INDEXED BY sqlite_autoindex_messages_1
              ORDER BY conversation_id DESC
              LIMIT 1",
             fparams![],
@@ -5751,12 +5751,12 @@ fn collect_message_ids_for_conversation_gap(
 ) -> Result<()> {
     let (sql, params) = if gap_start == gap_end {
         (
-            "SELECT id FROM messages WHERE conversation_id = ?1",
+            "SELECT id FROM messages INDEXED BY sqlite_autoindex_messages_1 WHERE conversation_id = ?1",
             vec![SqliteValue::from(gap_start)],
         )
     } else {
         (
-            "SELECT id FROM messages WHERE conversation_id BETWEEN ?1 AND ?2",
+            "SELECT id FROM messages INDEXED BY sqlite_autoindex_messages_1 WHERE conversation_id BETWEEN ?1 AND ?2",
             vec![SqliteValue::from(gap_start), SqliteValue::from(gap_end)],
         )
     };
