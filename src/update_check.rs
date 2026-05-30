@@ -1505,8 +1505,8 @@ mod tests {
         status: u16,
     ) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
         use std::io::{ErrorKind, Read, Write};
-        use std::net::Shutdown;
         use std::net::TcpListener;
+        use std::sync::mpsc;
         use std::time::{Duration, Instant};
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind to ephemeral port");
@@ -1514,8 +1514,10 @@ mod tests {
         let _ = listener.set_nonblocking(true);
 
         let response = http_response(status, response_body);
+        let (ready_tx, ready_rx) = mpsc::channel();
 
         let handle = std::thread::spawn(move || {
+            let _ = ready_tx.send(());
             let deadline = Instant::now() + Duration::from_secs(2);
             let mut stream = loop {
                 match listener.accept() {
@@ -1543,12 +1545,11 @@ mod tests {
 
             if stream.write_all(response.as_bytes()).is_ok() {
                 let _ = stream.flush();
-                let _ = stream.shutdown(Shutdown::Both);
+                std::thread::sleep(Duration::from_millis(25));
             }
         });
 
-        // Small delay to ensure server is ready
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        let _ = ready_rx.recv_timeout(std::time::Duration::from_secs(1));
 
         (addr, handle)
     }

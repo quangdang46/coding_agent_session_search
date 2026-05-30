@@ -346,6 +346,7 @@ schemas: (auto-generated from contract)
       - rebuilding: boolean
       - stale: boolean
       - stale_threshold_seconds: integer
+      - stalled: boolean
       - status: string
     - locks: array
     - needs_rebuild: boolean
@@ -627,6 +628,8 @@ schemas: (auto-generated from contract)
         - present: boolean
         - ready: boolean
         - size_bytes: ?
+      - quality_tier_published: boolean
+      - semantic_only_search_available: boolean
       - status: string
       - summary: string
       - vector_index_path: ?
@@ -2457,6 +2460,8 @@ schemas: (auto-generated from contract)
         - present: boolean
         - ready: boolean
         - size_bytes: ?
+      - quality_tier_published: boolean
+      - semantic_only_search_available: boolean
       - status: string
       - summary: string
       - vector_index_path: ?
@@ -2854,6 +2859,7 @@ schemas: (auto-generated from contract)
         - rebuilding: boolean
         - stale: boolean
         - stale_threshold_seconds: integer
+        - stalled: boolean
         - status: string
       - ingest_quarantine: object
         - circuit_breaker_active: boolean
@@ -2878,12 +2884,15 @@ schemas: (auto-generated from contract)
         - indexed_docs: ?
         - job_id: ?
         - job_kind: ?
+        - last_progress_age_ms: ?
+        - last_progress_at: ?
         - mode: ?
         - orphaned: boolean
         - phase: ?
         - pid: ?
         - pipeline: object
         - processed_conversations: ?
+        - stalled: boolean
         - started_at: ?
         - total_conversations: ?
         - updated_at: ?
@@ -2904,6 +2913,8 @@ schemas: (auto-generated from contract)
         - preferred_backend: string
         - progressive_ready: boolean
         - quality_tier: object
+        - quality_tier_published: boolean
+        - semantic_only_search_available: boolean
         - status: string
         - summary: string
         - vector_index_path: ?
@@ -3261,6 +3272,7 @@ schemas: (auto-generated from contract)
       - rebuilding: boolean
       - stale: boolean
       - stale_threshold_seconds: integer
+      - stalled: boolean
       - status: string
     - ingest_quarantine: object
       - circuit_breaker_active: boolean
@@ -3287,12 +3299,15 @@ schemas: (auto-generated from contract)
       - indexed_docs: ?
       - job_id: ?
       - job_kind: ?
+      - last_progress_age_ms: ?
+      - last_progress_at: ?
       - mode: ?
       - orphaned: boolean
       - phase: ?
       - pid: ?
       - pipeline: object
       - processed_conversations: ?
+      - stalled: boolean
       - started_at: ?
       - total_conversations: ?
       - updated_at: ?
@@ -3392,6 +3407,8 @@ schemas: (auto-generated from contract)
         - present: boolean
         - ready: boolean
         - size_bytes: ?
+      - quality_tier_published: boolean
+      - semantic_only_search_available: boolean
       - status: string
       - summary: string
       - vector_index_path: ?
@@ -3597,6 +3614,7 @@ schemas: (auto-generated from contract)
       - rebuilding: boolean
       - stale: boolean
       - stale_threshold_seconds: integer
+      - stalled: boolean
       - status: string
     - ingest_quarantine: object
       - circuit_breaker_active: boolean
@@ -3623,12 +3641,15 @@ schemas: (auto-generated from contract)
       - indexed_docs: ?
       - job_id: ?
       - job_kind: ?
+      - last_progress_age_ms: ?
+      - last_progress_at: ?
       - mode: ?
       - orphaned: boolean
       - phase: ?
       - pid: ?
       - pipeline: object
       - processed_conversations: ?
+      - stalled: boolean
       - started_at: ?
       - total_conversations: ?
       - updated_at: ?
@@ -3728,6 +3749,8 @@ schemas: (auto-generated from contract)
         - present: boolean
         - ready: boolean
         - size_bytes: ?
+      - quality_tier_published: boolean
+      - semantic_only_search_available: boolean
       - status: string
       - summary: string
       - vector_index_path: ?
@@ -3809,6 +3832,7 @@ schemas: (auto-generated from contract)
         - rebuilding: boolean
         - stale: boolean
         - stale_threshold_seconds: integer
+        - stalled: boolean
         - status: string
       - pending: object
         - orphaned: boolean
@@ -3819,12 +3843,15 @@ schemas: (auto-generated from contract)
         - indexed_docs: ?
         - job_id: ?
         - job_kind: ?
+        - last_progress_age_ms: ?
+        - last_progress_at: ?
         - mode: ?
         - orphaned: boolean
         - phase: ?
         - pid: ?
         - pipeline: object
         - processed_conversations: ?
+        - stalled: boolean
         - started_at: ?
         - total_conversations: ?
         - updated_at: ?
@@ -3869,6 +3896,8 @@ schemas: (auto-generated from contract)
         - preferred_backend: string
         - progressive_ready: boolean
         - quality_tier: object
+        - quality_tier_published: boolean
+        - semantic_only_search_available: boolean
         - status: string
         - summary: string
         - vector_index_path: ?
