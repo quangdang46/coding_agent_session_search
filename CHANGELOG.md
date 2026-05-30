@@ -17,6 +17,106 @@ Repository: <https://github.com/Dicklesworthstone/coding_agent_session_search>
 
 ## Unreleased
 
+## [v0.6.7] -- 2026-05-30
+
+**watch_startup wedge hardening + legacy quarantine retry. Closes [cass#258
+ask #5](https://github.com/Dicklesworthstone/coding_agent_session_search/issues/258) (legacy quarantine entries) and ships the user-facing defensive
+infrastructure that v0.6.6 set up via the sub-phase taxonomy. Reporter of
+[cass#265](https://github.com/Dicklesworthstone/coding_agent_session_search/issues/265) can unblock today via `CASS_SKIP_PREFLIGHT_CLEANUP_ORPHAN_FK_ROWS=1`.**
+
+### Fixed
+
+- **Legacy v0.5.1-era `index-ingest-out-of-memory` quarantine entries are
+  now retry-eligible** (commit [`e5898858`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/e5898858)). Pre-v0.6.x quarantine
+  entries have `attempt_count=1` but LACK the `cass_version_at_quarantine`
+  field, so the v0.6.x retry gate silently skipped them — they remained
+  quarantined forever even after the underlying v0.5.x ingest-OOM bug was
+  fixed. Read-side fix: `QuarantineRecord::is_version_stale_for_retry`
+  returns `true` for `None` (legacy entries pre-date the bug-fix the gate
+  is gated on, so retry is the right default). Regression test:
+  `legacy_entry_missing_cass_version_deserialises_and_is_retry_eligible`.
+
+### Added
+
+- **Per-op `watch_startup` preflight watchdog with skip env vars** (commit
+  [`5348ff2a`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/5348ff2a), 733 insertions). Each of the 14 documented preflight sub-phases
+  now arms a watchdog at entry (`state.enter(step_idx, now_ms)`) and
+  disarms at exit (`state.exit()`). Default timeout
+  `CASS_PREFLIGHT_OP_TIMEOUT_SECS=180` (clamp `[1, 3600]`). When the
+  watchdog fires:
+  - The lock file's `phase=` breadcrumb is rewritten to
+    `watch_startup:<step>_TIMEOUT` (so operators see exactly which step
+    wedged).
+  - All other lock fields (pid, started_at_ms, db_path, mode, job_id,
+    job_kind) are preserved verbatim.
+  - The process exits with a clear error message.
+- **Per-op skip env vars** for the four wedge-candidate operations
+  (`CASS_SKIP_PREFLIGHT_CLEANUP_ORPHAN_FK_ROWS=1`,
+  `CASS_SKIP_PREFLIGHT_VALIDATE_FTS_MESSAGES=1`,
+  `CASS_SKIP_PREFLIGHT_COUNT_TOTAL_MESSAGES=1`,
+  `CASS_SKIP_PREFLIGHT_PUBLISHED_INDEX_VALIDATE=1`). Operators on cass#265
+  can set the relevant variable as a workaround while the underlying
+  fsqlite issue is rooted out. The reporter's empirical evidence points
+  most strongly at `cleanup_orphan_fk_rows`.
+- Regression test
+  `watch_startup_preflight_watchdog_fires_on_wedged_step` simulates a
+  wedge by calling `state.enter` and never exiting; asserts within 750 ms
+  that `state.tripped == true`, the lock-file `phase=` is rewritten to
+  the `*_TIMEOUT` form, and all other fields are preserved.
+
+### Recommended diagnostic workflow for cass#265
+
+If you're hitting the `watch_startup` wedge:
+
+1. Upgrade to v0.6.7.
+2. Re-run `cass index --watch`.
+3. If it still wedges, the watchdog will exit at +180s with the wedged
+   step in the error message and in the lock file's `phase=` breadcrumb.
+4. Set the corresponding `CASS_SKIP_PREFLIGHT_<NAME>=1` env var as a
+   workaround.
+5. Report the wedged step on [cass#265](https://github.com/Dicklesworthstone/coding_agent_session_search/issues/265) so the underlying fsqlite issue
+   can be narrowed.
+
+### Notes
+
+- v0.6.7 ships diagnostic infrastructure + workarounds, NOT a root-cause
+  fix to the underlying fsqlite wedge. The root cause is most likely a
+  multi-level B-tree forward-scan path in fsqlite that the
+  `cleanup_orphan_fk_rows` SQL query triggers; the actual fix lives in
+  frankensqlite and will land in a future fsqlite release + cass repin.
+
+## [v0.6.6] -- 2026-05-29
+
+**Investigation-cluster release for [cass#265](https://github.com/Dicklesworthstone/coding_agent_session_search/issues/265) (`watch_startup` wedge persists). Adds the sub-phase
+breadcrumb taxonomy needed to narrow the wedge down from "preflight"
+(14 operations) to a specific step. Diagnostic-only; v0.6.7 ships the
+operator-facing workarounds.**
+
+### Added
+
+- **`WATCH_STARTUP_SUB_PHASE_TAXONOMY`** — 14 documented preflight
+  sub-phase strings (commit [`fad3f03d`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/fad3f03d)). Each preflight operation now
+  calls `set_phase(WatchStartup::SubPhase::*)` so the on-disk lock
+  file's `phase=` breadcrumb reflects which step is currently
+  executing. Operator visibility into the 14-step preflight block
+  (previously all reported as `phase=watch_startup`).
+- Regression test
+  `watch_startup_sub_phase_taxonomy_is_documented_and_stable` pins the
+  14 strings as a public operator contract.
+- Regression test `set_phase_writes_sub_phase_breadcrumb_and_bumps_progress`
+  exercises the new `set_phase` writer through `acquire_index_run_lock`
+  and asserts on-disk `phase=` updates, `mode=` invariance,
+  strict-monotonic `last_progress_at_ms`, and atomic-mirror consistency.
+
+### Notes
+
+- v0.6.6 ships the diagnostic infrastructure only. The reporter of
+  [cass#265](https://github.com/Dicklesworthstone/coding_agent_session_search/issues/265)
+  needed to re-run cass against their corpus and share the
+  `phase=watch_startup:<step>` string at +150s. v0.6.7 (this is the
+  v0.6.7 entry below — read up) supersedes the manual workflow with
+  an automated watchdog that fails fast at the wedged step.
+
 ## [v0.6.5] -- 2026-05-28
 
 **Definitive close-out of cass#256 via a feature-gated `semantic` build, plus the cass#258 follow-on liveness work that v0.6.4's `last_progress_at_ms` plumbing left half-done.**
