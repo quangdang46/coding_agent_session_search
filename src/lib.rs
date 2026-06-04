@@ -78933,7 +78933,8 @@ const INDEX_STALL_HINT: &str = concat!(
     "Capture a stack trace with `sudo cat /proc/$(pgrep -f 'cass index')/stack` ",
     "and/or `sudo gdb -batch -ex 'thread apply all bt' -p $(pgrep -f 'cass index') 2>/dev/null | head -200` ",
     "and attach to issue #244 (indexing-phase wedges) or #258 (watch_startup wedges where the lock-file ",
-    "heartbeat keeps refreshing while one thread spins). Set CASS_INDEX_STALL_DETECT_SECS=0 to disable."
+    "heartbeat keeps refreshing while one thread spins). Set CASS_INDEX_STALL_DETECT_SECS=0 to disable detection; ",
+    "set CASS_INDEX_STALL_ABORT_SECS=0 to keep phase-2 stalls report-only."
 );
 
 fn index_stall_threshold(progress_interval: Duration) -> Option<Duration> {
@@ -78949,24 +78950,78 @@ fn index_stall_threshold(progress_interval: Duration) -> Option<Duration> {
     }
 }
 
+fn index_stall_abort_threshold(
+    progress_interval: Duration,
+    report_threshold: Option<Duration>,
+) -> Option<Duration> {
+    let report_threshold = report_threshold?;
+    let abort_threshold_secs = dotenvy::var("CASS_INDEX_STALL_ABORT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(300);
+    if abort_threshold_secs == 0 {
+        return None;
+    }
+    let min_after_report = report_threshold
+        .checked_add(progress_interval.max(Duration::from_secs(1)))
+        .unwrap_or(report_threshold);
+    Some(Duration::from_secs(abort_threshold_secs).max(min_after_report))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IndexStallAbortPolicy {
+    #[cfg(test)]
+    ReportOnly,
+    AbortPhaseTwo,
+}
+
 struct IndexStallWatchdog {
     data_dir: PathBuf,
     threshold: Option<Duration>,
+    abort_threshold: Option<Duration>,
+    abort_policy: IndexStallAbortPolicy,
     last_phase: usize,
     last_current: usize,
     last_progress_advance: std::time::Instant,
     stall_reported_for_phase: Option<usize>,
+    stall_abort_reported_for_phase: Option<usize>,
 }
 
 impl IndexStallWatchdog {
+    #[cfg(test)]
     fn new(data_dir: PathBuf, progress_interval: Duration) -> Self {
+        Self::with_abort_policy(
+            data_dir,
+            progress_interval,
+            IndexStallAbortPolicy::ReportOnly,
+        )
+    }
+
+    fn aborting_phase_two(data_dir: PathBuf, progress_interval: Duration) -> Self {
+        Self::with_abort_policy(
+            data_dir,
+            progress_interval,
+            IndexStallAbortPolicy::AbortPhaseTwo,
+        )
+    }
+
+    fn with_abort_policy(
+        data_dir: PathBuf,
+        progress_interval: Duration,
+        abort_policy: IndexStallAbortPolicy,
+    ) -> Self {
+        let threshold = index_stall_threshold(progress_interval);
+        let abort_threshold = index_stall_abort_threshold(progress_interval, threshold);
         Self {
             data_dir,
-            threshold: index_stall_threshold(progress_interval),
+            threshold,
+            abort_threshold,
+            abort_policy,
             last_phase: usize::MAX,
             last_current: 0,
             last_progress_advance: std::time::Instant::now(),
             stall_reported_for_phase: None,
+            stall_abort_reported_for_phase: None,
         }
     }
 
@@ -78987,16 +79042,20 @@ impl IndexStallWatchdog {
             self.last_current = current;
             self.last_progress_advance = std::time::Instant::now();
             self.stall_reported_for_phase = None;
+            self.stall_abort_reported_for_phase = None;
             return None;
         }
 
         if current != self.last_current {
             self.last_progress_advance = std::time::Instant::now();
             self.last_current = current;
+            self.stall_reported_for_phase = None;
+            self.stall_abort_reported_for_phase = None;
             return None;
         }
 
         let threshold = self.threshold?;
+        let stall_elapsed = self.last_progress_advance.elapsed();
         // Historically this gated on `phase_code != 0` so the watchdog
         // never fired during the "preparing" phase (phase=0). Issue #258
         // is exactly that: the v0.6.2 watcher wedged at startup before
@@ -79007,17 +79066,55 @@ impl IndexStallWatchdog {
         // sensible definition, a stall worth reporting. The repeat
         // guard `stall_reported_for_phase == Some(phase_code)` still
         // prevents log spam from a single stalled phase.
-        if self.stall_reported_for_phase == Some(phase_code) {
-            return None;
+        if self.stall_reported_for_phase != Some(phase_code) {
+            if stall_elapsed < threshold {
+                return None;
+            }
+
+            self.stall_reported_for_phase = Some(phase_code);
+            return Some(self.stall_payload(
+                index_progress,
+                elapsed_ms,
+                stall_elapsed,
+                threshold,
+                "stall_detected",
+                None,
+            ));
         }
-        if self.last_progress_advance.elapsed() < threshold {
+
+        let abort_threshold = self.abort_threshold?;
+        if self.abort_policy != IndexStallAbortPolicy::AbortPhaseTwo
+            || phase_code != 2
+            || self.stall_abort_reported_for_phase == Some(phase_code)
+            || stall_elapsed < abort_threshold
+        {
             return None;
         }
 
-        let stall_elapsed_ms = self.last_progress_advance.elapsed().as_millis();
+        self.stall_abort_reported_for_phase = Some(phase_code);
+        Some(self.stall_payload(
+            index_progress,
+            elapsed_ms,
+            stall_elapsed,
+            threshold,
+            "stall_aborting",
+            Some(abort_threshold),
+        ))
+    }
+
+    fn stall_payload(
+        &self,
+        index_progress: &indexer::IndexingProgress,
+        elapsed_ms: u128,
+        stall_elapsed: Duration,
+        threshold: Duration,
+        event: &'static str,
+        abort_threshold: Option<Duration>,
+    ) -> serde_json::Value {
+        let stall_elapsed_ms = stall_elapsed.as_millis();
         let mut payload = index_progress.snapshot_json(elapsed_ms);
         if let serde_json::Value::Object(ref mut m) = payload {
-            m.insert("event".into(), serde_json::json!("stall_detected"));
+            m.insert("event".into(), serde_json::json!(event));
             m.insert(
                 "ts_ms".into(),
                 serde_json::json!(chrono::Utc::now().timestamp_millis()),
@@ -79030,14 +79127,21 @@ impl IndexStallWatchdog {
                 "stall_threshold_secs".into(),
                 serde_json::json!(threshold.as_secs()),
             );
+            if let Some(abort_threshold) = abort_threshold {
+                m.insert(
+                    "abort_threshold_secs".into(),
+                    serde_json::json!(abort_threshold.as_secs()),
+                );
+                m.insert("abort_process".into(), serde_json::json!(true));
+                m.insert("exit_code".into(), serde_json::json!(70));
+            }
             m.insert(
                 "diagnostics".into(),
                 collect_stall_diagnostics(&self.data_dir),
             );
             m.insert("hint".into(), serde_json::json!(INDEX_STALL_HINT));
         }
-        self.stall_reported_for_phase = Some(phase_code);
-        Some(payload)
+        payload
     }
 }
 
@@ -79057,6 +79161,19 @@ fn index_stall_warning_lines(payload: &serde_json::Value) -> (String, String) {
     let diagnostics = serde_json::to_string(payload)
         .unwrap_or_else(|err| format!(r#"{{"event":"stall_detected","serialize_error":"{err}"}}"#));
     (summary, diagnostics)
+}
+
+fn abort_after_index_stall_if_requested(payload: &serde_json::Value) {
+    if payload
+        .get("abort_process")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        eprintln!(
+            "cass index made no indexing progress past the abort threshold; exiting with code 70."
+        );
+        std::process::exit(70);
+    }
 }
 
 #[cfg(test)]
@@ -79194,6 +79311,50 @@ mod stall_diagnostics_tests {
             repeat.is_none(),
             "watchdog must not spam repeated events for the same phase",
         );
+    }
+
+    #[test]
+    fn watchdog_reports_before_phase_two_abort_event() -> anyhow::Result<()> {
+        use super::{IndexStallAbortPolicy, IndexStallWatchdog};
+        use crate::indexer::IndexingProgress;
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let tmp = TempDir::new()?;
+        let mut watchdog = IndexStallWatchdog::with_abort_policy(
+            tmp.path().to_path_buf(),
+            Duration::from_millis(50),
+            IndexStallAbortPolicy::AbortPhaseTwo,
+        );
+        watchdog.threshold = Some(Duration::from_millis(1));
+        watchdog.abort_threshold = Some(Duration::from_millis(2));
+        watchdog.last_phase = 2;
+        watchdog.last_current = 0;
+        watchdog.last_progress_advance = std::time::Instant::now() - Duration::from_millis(100);
+
+        let progress = Arc::new(IndexingProgress::default());
+        progress.phase.store(2, Ordering::Relaxed);
+
+        let report = watchdog
+            .observe(&progress, 100)
+            .ok_or_else(|| anyhow::anyhow!("phase-2 stall observation did not report"))?;
+        assert_eq!(report["event"], serde_json::json!("stall_detected"));
+        assert_ne!(report["abort_process"], serde_json::json!(true));
+
+        let abort = watchdog
+            .observe(&progress, 200)
+            .ok_or_else(|| anyhow::anyhow!("phase-2 stall observation did not request abort"))?;
+        assert_eq!(abort["event"], serde_json::json!("stall_aborting"));
+        assert_eq!(abort["abort_process"], serde_json::json!(true));
+        assert_eq!(abort["exit_code"], serde_json::json!(70));
+
+        let repeat = watchdog.observe(&progress, 300);
+        assert!(
+            repeat.is_none(),
+            "watchdog must not spam repeated abort events for the same stalled phase",
+        );
+        Ok(())
     }
 }
 
@@ -79469,7 +79630,8 @@ fn run_index_with_data(
         let mut last_current = usize::MAX;
         let mut last_agents = usize::MAX;
         let mut last_update = std::time::Instant::now();
-        let mut stall_watchdog = IndexStallWatchdog::new(data_dir.clone(), progress_interval);
+        let mut stall_watchdog =
+            IndexStallWatchdog::aborting_phase_two(data_dir.clone(), progress_interval);
 
         loop {
             // Check if indexer finished
@@ -79560,6 +79722,7 @@ fn run_index_with_data(
                 let (summary, diagnostics) = index_stall_warning_lines(&payload);
                 pb.println(summary);
                 pb.println(diagnostics);
+                abort_after_index_stall_if_requested(&payload);
             }
 
             std::thread::sleep(Duration::from_millis(50));
@@ -79579,7 +79742,8 @@ fn run_index_with_data(
         let mut last_agents = 0;
         let mut last_current = 0;
         let mut last_scan_current = 0;
-        let mut stall_watchdog = IndexStallWatchdog::new(data_dir.clone(), progress_interval);
+        let mut stall_watchdog =
+            IndexStallWatchdog::aborting_phase_two(data_dir.clone(), progress_interval);
 
         loop {
             if index_handle.is_finished() {
@@ -79633,6 +79797,7 @@ fn run_index_with_data(
                 let (summary, diagnostics) = index_stall_warning_lines(&payload);
                 eprintln!("{summary}");
                 eprintln!("{diagnostics}");
+                abort_after_index_stall_if_requested(&payload);
             }
 
             std::thread::sleep(Duration::from_millis(200));
@@ -79647,7 +79812,8 @@ fn run_index_with_data(
         let mut last_emit = std::time::Instant::now()
             .checked_sub(progress_interval)
             .unwrap_or_else(std::time::Instant::now);
-        let mut stall_watchdog = IndexStallWatchdog::new(data_dir.clone(), progress_interval);
+        let mut stall_watchdog =
+            IndexStallWatchdog::aborting_phase_two(data_dir.clone(), progress_interval);
 
         // Finish-aware poll cadence: 100ms for snappy shutdown, but only emit a
         // `progress` event at `progress_interval`.
@@ -79687,7 +79853,8 @@ fn run_index_with_data(
             }
 
             if let Some(payload) = stall_watchdog.observe(&index_progress, elapsed_ms) {
-                emit_event(payload);
+                emit_event(payload.clone());
+                abort_after_index_stall_if_requested(&payload);
             }
 
             std::thread::sleep(Duration::from_millis(100));
@@ -79695,7 +79862,8 @@ fn run_index_with_data(
     } else {
         // No progress display (json mode with events disabled, or plain=none):
         // just wait for completion.
-        let mut stall_watchdog = IndexStallWatchdog::new(data_dir.clone(), progress_interval);
+        let mut stall_watchdog =
+            IndexStallWatchdog::aborting_phase_two(data_dir.clone(), progress_interval);
         while !index_handle.is_finished() {
             if let Some(payload) =
                 stall_watchdog.observe(&index_progress, start.elapsed().as_millis())
@@ -79703,6 +79871,7 @@ fn run_index_with_data(
                 let (summary, diagnostics) = index_stall_warning_lines(&payload);
                 eprintln!("{summary}");
                 eprintln!("{diagnostics}");
+                abort_after_index_stall_if_requested(&payload);
             }
             std::thread::sleep(Duration::from_millis(100));
         }
