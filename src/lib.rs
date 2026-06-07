@@ -16327,7 +16327,10 @@ fn refresh_state_database_counts_if_needed(
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
 
-    let needs_refresh = !current_counts_skipped
+    let count_refresh_allowed = std::fs::metadata(db_path).ok().is_some_and(|metadata| {
+        metadata.is_file() && metadata.len() <= STATUS_COUNT_SCAN_MAX_DB_BYTES
+    });
+    let needs_refresh = (!current_counts_skipped || count_refresh_allowed)
         && (!current_opened || current_conversations <= 0 || current_messages <= 0);
     if !needs_refresh || !db_path.exists() {
         return;
@@ -66297,7 +66300,7 @@ mod cli_read_db_tests {
     }
 
     #[test]
-    fn refresh_state_database_counts_keeps_large_db_counts_skipped() {
+    fn refresh_state_database_counts_materializes_small_db_count_envelope() -> anyhow::Result<()> {
         let (_temp, db_path) = seed_cli_db();
         let mut state = serde_json::json!({
             "database": {
@@ -66313,23 +66316,70 @@ mod cli_read_db_tests {
         let database = state
             .get("database")
             .and_then(|value| value.as_object())
-            .expect("database object");
-        assert_eq!(
+            .ok_or_else(|| anyhow::anyhow!("database object missing"))?;
+        anyhow::ensure!(
             database
                 .get("counts_skipped")
-                .and_then(|value| value.as_bool()),
-            Some(true)
+                .and_then(|value| value.as_bool())
+                == Some(false),
+            "small DB count refresh should clear counts_skipped"
         );
-        assert!(
+        anyhow::ensure!(
             database
                 .get("conversations")
-                .is_some_and(serde_json::Value::is_null)
+                .and_then(|value| value.as_i64())
+                == Some(0),
+            "small DB count refresh should materialize conversation count"
         );
-        assert!(
+        anyhow::ensure!(
+            database.get("messages").and_then(|value| value.as_i64()) == Some(0),
+            "small DB count refresh should materialize message count"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn refresh_state_database_counts_keeps_large_db_counts_skipped() -> anyhow::Result<()> {
+        let (_temp, db_path) = seed_cli_db();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&db_path)?
+            .set_len(STATUS_COUNT_SCAN_MAX_DB_BYTES + 4096)?;
+        let mut state = serde_json::json!({
+            "database": {
+                "opened": true,
+                "conversations": serde_json::Value::Null,
+                "messages": serde_json::Value::Null,
+                "counts_skipped": true
+            }
+        });
+
+        refresh_state_database_counts_if_needed(&mut state, &db_path, "status");
+
+        let database = state
+            .get("database")
+            .and_then(|value| value.as_object())
+            .ok_or_else(|| anyhow::anyhow!("database object missing"))?;
+        anyhow::ensure!(
+            database
+                .get("counts_skipped")
+                .and_then(|value| value.as_bool())
+                == Some(true),
+            "large DB count refresh should keep counts_skipped"
+        );
+        anyhow::ensure!(
+            database
+                .get("conversations")
+                .is_some_and(serde_json::Value::is_null),
+            "large DB count refresh should leave conversation count null"
+        );
+        anyhow::ensure!(
             database
                 .get("messages")
-                .is_some_and(serde_json::Value::is_null)
+                .is_some_and(serde_json::Value::is_null),
+            "large DB count refresh should leave message count null"
         );
+        Ok(())
     }
 
     #[test]

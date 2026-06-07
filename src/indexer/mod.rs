@@ -98,6 +98,8 @@ const CODEX_INDEXER_EXTRA_COMPACT_THRESHOLD_BYTES: u64 = 16 * 1024 * 1024;
 const PREPARSE_PRIMARY_SOURCE_CAPTURE_LIMIT: usize = 256;
 const WATCH_INGEST_DEFAULT_CHUNK_SIZE: usize = 32;
 const WATCH_INGEST_CHUNK_SIZE_MAX: usize = 512;
+const NON_WATCH_INGEST_DEFAULT_CHUNK_SIZE: usize = 4;
+const NON_WATCH_INGEST_CHUNK_SIZE_MAX: usize = 128;
 static ROBOT_TRACE_INGEST_ENABLED: AtomicBool = AtomicBool::new(false);
 static ROBOT_TRACE_INGEST_BATCH_N: AtomicU64 = AtomicU64::new(0);
 static ACTIVE_SESSION_SOURCE_SKIP_OBSERVED: AtomicBool = AtomicBool::new(false);
@@ -1458,6 +1460,26 @@ fn lexical_population_strategy_requires_inline_tantivy(
         strategy,
         LexicalPopulationStrategy::DeferredAuthoritativeDbRebuild
     )
+}
+
+fn non_watch_ingest_chunk_size() -> usize {
+    match dotenvy::var("CASS_NON_WATCH_INGEST_CHUNK_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        Some(0) => NON_WATCH_INGEST_DEFAULT_CHUNK_SIZE,
+        Some(value) if value > NON_WATCH_INGEST_CHUNK_SIZE_MAX => {
+            tracing::warn!(
+                env_var = "CASS_NON_WATCH_INGEST_CHUNK_SIZE",
+                requested = value,
+                cap = NON_WATCH_INGEST_CHUNK_SIZE_MAX,
+                "non-watch ingest chunk size exceeds safe cap; clamping"
+            );
+            NON_WATCH_INGEST_CHUNK_SIZE_MAX
+        }
+        Some(value) => value,
+        None => NON_WATCH_INGEST_DEFAULT_CHUNK_SIZE,
+    }
 }
 
 fn incremental_authoritative_lexical_repair_max_db_bytes() -> u64 {
@@ -11253,6 +11275,7 @@ fn run_streaming_consumer(
     progress: &Option<Arc<IndexingProgress>>,
     lexical_strategy: LexicalPopulationStrategy,
     scan_start_ts: Option<i64>,
+    progress_bump: Option<&Arc<AtomicI64>>,
 ) -> Result<(Vec<String>, NonWatchIngestOutcome)> {
     use std::collections::HashMap;
 
@@ -11419,6 +11442,7 @@ fn run_streaming_consumer(
                     progress,
                     lexical_strategy,
                     defer_streaming_checkpoints,
+                    progress_bump,
                 );
                 flow_limiter.release(combined_byte_reservation);
                 ingest_outcome = ingest_outcome.accumulate(batch_outcome?);
@@ -11609,6 +11633,7 @@ fn run_streaming_consumer(
 /// This spawns producer threads for each connector that send batches through
 /// a bounded channel. The consumer receives and ingests batches as they arrive,
 /// providing backpressure when indexing falls behind scanning.
+#[allow(clippy::too_many_arguments)]
 fn run_streaming_index(
     storage: &FrankenStorage,
     t_index: Option<&mut TantivyIndex>,
@@ -11617,6 +11642,7 @@ fn run_streaming_index(
     lexical_strategy: LexicalPopulationStrategy,
     additional_scan_roots: Vec<ScanRoot>,
     scan_start_ts: i64,
+    progress_bump: Option<&Arc<AtomicI64>>,
 ) -> Result<NonWatchIngestOutcome> {
     run_streaming_index_with_connector_factories(
         storage,
@@ -11627,6 +11653,7 @@ fn run_streaming_index(
         additional_scan_roots,
         configured_connector_factories(),
         scan_start_ts,
+        progress_bump,
     )
 }
 
@@ -11683,6 +11710,7 @@ fn run_streaming_index_with_connector_factories(
     additional_scan_roots: Vec<ScanRoot>,
     connector_factories: Vec<(&'static str, ConnectorFactory)>,
     scan_start_ts: i64,
+    progress_bump: Option<&Arc<AtomicI64>>,
 ) -> Result<NonWatchIngestOutcome> {
     if connector_factories.is_empty() {
         tracing::warn!("no enabled connectors are configured for indexing; skipping scan");
@@ -11768,6 +11796,7 @@ fn run_streaming_index_with_connector_factories(
         &opts.progress,
         lexical_strategy,
         Some(scan_start_ts),
+        progress_bump,
     );
 
     if consumer_result.is_err() {
@@ -11825,6 +11854,7 @@ fn run_streaming_index_with_connector_factories(
 /// This uses rayon's par_iter to scan all connectors in parallel, collecting
 /// all conversations into memory before ingesting. This is the fallback when
 /// streaming is disabled via CASS_STREAMING_INDEX=0.
+#[allow(clippy::too_many_arguments)]
 fn run_batch_index(
     storage: &FrankenStorage,
     t_index: Option<&mut TantivyIndex>,
@@ -11833,6 +11863,7 @@ fn run_batch_index(
     lexical_strategy: LexicalPopulationStrategy,
     additional_scan_roots: Vec<ScanRoot>,
     scan_start_ts: i64,
+    progress_bump: Option<&Arc<AtomicI64>>,
 ) -> Result<NonWatchIngestOutcome> {
     run_batch_index_with_connector_factories(
         storage,
@@ -11843,6 +11874,7 @@ fn run_batch_index(
         additional_scan_roots,
         configured_connector_factories(),
         scan_start_ts,
+        progress_bump,
     )
 }
 
@@ -11856,6 +11888,7 @@ fn run_batch_index_with_connector_factories(
     additional_scan_roots: Vec<ScanRoot>,
     connector_factories: Vec<(&'static str, ConnectorFactory)>,
     scan_start_ts: i64,
+    progress_bump: Option<&Arc<AtomicI64>>,
 ) -> Result<NonWatchIngestOutcome> {
     let scan_start = std::time::Instant::now();
 
@@ -12145,6 +12178,7 @@ fn run_batch_index_with_connector_factories(
             &opts.progress,
             lexical_strategy,
             !opts.watch,
+            progress_bump,
         )?;
         ingest_outcome = ingest_outcome.accumulate(batch_outcome);
         // Periodically persist scan_start_ts so that if the process is killed,
@@ -13512,6 +13546,7 @@ pub fn run_index(
                         lexical_strategy,
                         additional_scan_roots.clone(),
                         scan_start_ts,
+                        Some(&progress_bump),
                     )?;
                     // F4 (cass tech debt): a completed scan is a real
                     // forward-progress boundary; bump the atomic so the
@@ -13537,6 +13572,7 @@ pub fn run_index(
                         lexical_strategy,
                         additional_scan_roots.clone(),
                         scan_start_ts,
+                        Some(&progress_bump),
                     )?;
                     bump_index_run_lock_progress_atomic(&progress_bump);
                     scan_canonical_mutations =
@@ -19685,6 +19721,7 @@ fn ingest_batch(
         progress,
         lexical_strategy,
         defer_checkpoints,
+        None,
     )?;
     if outcome.lexical_update_deferred {
         anyhow::bail!(
@@ -19694,6 +19731,7 @@ fn ingest_batch(
     Ok(outcome.canonical_mutations)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ingest_batch_detailed(
     storage: &FrankenStorage,
     t_index: Option<&mut TantivyIndex>,
@@ -19702,6 +19740,7 @@ fn ingest_batch_detailed(
     progress: &Option<Arc<IndexingProgress>>,
     lexical_strategy: LexicalPopulationStrategy,
     defer_checkpoints: bool,
+    progress_bump: Option<&Arc<AtomicI64>>,
 ) -> Result<NonWatchIngestOutcome> {
     let trace_span =
         robot_trace_ingest_start("ingest_batch", convs, lexical_strategy, defer_checkpoints);
@@ -19734,6 +19773,7 @@ fn ingest_batch_detailed(
     if let Some(p) = progress {
         p.current.fetch_add(convs.len(), Ordering::Relaxed);
     }
+    bump_index_run_lock_progress_if_present(progress_bump);
     robot_trace_ingest_finish(
         trace_span,
         "ok",
@@ -19756,15 +19796,35 @@ fn ingest_batch_detailed(
 #[allow(clippy::too_many_arguments)]
 fn ingest_non_watch_batch_with_oom_split(
     storage: &FrankenStorage,
-    t_index: Option<&mut TantivyIndex>,
+    mut t_index: Option<&mut TantivyIndex>,
     data_dir: &Path,
     convs: &[NormalizedConversation],
     progress: &Option<Arc<IndexingProgress>>,
     lexical_strategy: LexicalPopulationStrategy,
     defer_checkpoints: bool,
+    progress_bump: Option<&Arc<AtomicI64>>,
 ) -> Result<NonWatchIngestOutcome> {
     if convs.is_empty() {
         return Ok(NonWatchIngestOutcome::default());
+    }
+
+    let chunk_size = non_watch_ingest_chunk_size();
+    if convs.len() > chunk_size {
+        let mut merged = NonWatchIngestOutcome::default();
+        for chunk in convs.chunks(chunk_size) {
+            let outcome = ingest_non_watch_batch_with_oom_split(
+                storage,
+                t_index.as_deref_mut(),
+                data_dir,
+                chunk,
+                progress,
+                lexical_strategy,
+                defer_checkpoints,
+                progress_bump,
+            )?;
+            merged = merged.accumulate(outcome);
+        }
+        return Ok(merged);
     }
 
     let first_attempt = ingest_non_watch_batch_once(
@@ -19775,6 +19835,7 @@ fn ingest_non_watch_batch_with_oom_split(
         progress,
         lexical_strategy,
         defer_checkpoints,
+        progress_bump,
     );
 
     match first_attempt {
@@ -19786,6 +19847,7 @@ fn ingest_non_watch_batch_with_oom_split(
             progress,
             lexical_strategy,
             defer_checkpoints,
+            progress_bump,
             error,
         ),
         Err(error) => Err(error),
@@ -19801,6 +19863,7 @@ fn ingest_non_watch_batch_once(
     progress: &Option<Arc<IndexingProgress>>,
     lexical_strategy: LexicalPopulationStrategy,
     defer_checkpoints: bool,
+    progress_bump: Option<&Arc<AtomicI64>>,
 ) -> Result<NonWatchIngestOutcome> {
     if should_inject_non_watch_ingest_test_oom(convs) {
         // Use the typed `FrankenError::OutOfMemory` variant so the OOM detector
@@ -19817,6 +19880,7 @@ fn ingest_non_watch_batch_once(
         progress,
         lexical_strategy,
         defer_checkpoints,
+        progress_bump,
     )?;
     clear_poison_conversations_after_successful_ingest(
         data_dir,
@@ -19835,6 +19899,7 @@ fn ingest_non_watch_oom_retry_or_quarantine(
     progress: &Option<Arc<IndexingProgress>>,
     lexical_strategy: LexicalPopulationStrategy,
     defer_checkpoints: bool,
+    progress_bump: Option<&Arc<AtomicI64>>,
     error: anyhow::Error,
 ) -> Result<NonWatchIngestOutcome> {
     if lexical_population_strategy_requires_inline_tantivy(lexical_strategy) {
@@ -19851,6 +19916,7 @@ fn ingest_non_watch_oom_retry_or_quarantine(
             progress,
             LexicalPopulationStrategy::DeferredAuthoritativeDbRebuild,
             defer_checkpoints,
+            progress_bump,
         ) {
             Ok(mut outcome) => {
                 outcome.lexical_update_deferred = true;
@@ -19864,6 +19930,7 @@ fn ingest_non_watch_oom_retry_or_quarantine(
                     progress,
                     LexicalPopulationStrategy::DeferredAuthoritativeDbRebuild,
                     defer_checkpoints,
+                    progress_bump,
                     retry_error,
                 )
             }
@@ -19888,6 +19955,7 @@ fn ingest_non_watch_oom_retry_or_quarantine(
             progress,
             LexicalPopulationStrategy::DeferredAuthoritativeDbRebuild,
             defer_checkpoints,
+            progress_bump,
         )?;
         let right = ingest_non_watch_batch_with_oom_split(
             storage,
@@ -19897,6 +19965,7 @@ fn ingest_non_watch_oom_retry_or_quarantine(
             progress,
             LexicalPopulationStrategy::DeferredAuthoritativeDbRebuild,
             defer_checkpoints,
+            progress_bump,
         )?;
         left = left.accumulate(right);
         left.lexical_update_deferred = true;
@@ -19908,6 +19977,7 @@ fn ingest_non_watch_oom_retry_or_quarantine(
     if let Some(progress) = progress {
         progress.current.fetch_add(1, Ordering::Relaxed);
     }
+    bump_index_run_lock_progress_if_present(progress_bump);
     tracing::warn!(
         agent = %conv.agent_slug,
         external_id = conv.external_id.as_deref().unwrap_or(""),
@@ -28216,6 +28286,7 @@ mod tests {
             Vec::new(),
             vec![("codex", failing_explicit_file_root_connector_factory)],
             FrankenStorage::now_millis(),
+            None,
         )
         .expect("failed scan should not abort batch indexing");
         *FAILING_EXPLICIT_FILE_ROOT
@@ -35353,6 +35424,7 @@ mod tests {
             &Some(progress.clone()),
             LexicalPopulationStrategy::IncrementalInline,
             None,
+            None,
         )
         .unwrap();
 
@@ -35406,6 +35478,7 @@ mod tests {
             Arc::new(StreamingByteLimiter::new(STREAMING_MAX_BYTES_IN_FLIGHT)),
             &Some(progress.clone()),
             LexicalPopulationStrategy::IncrementalInline,
+            None,
             None,
         )?;
 
@@ -35466,6 +35539,7 @@ mod tests {
             &Some(progress),
             LexicalPopulationStrategy::IncrementalInline,
             None,
+            None,
         )?;
 
         assert_eq!(discovered, vec!["claude".to_string()]);
@@ -35514,6 +35588,7 @@ mod tests {
             &Some(progress.clone()),
             LexicalPopulationStrategy::DeferredAuthoritativeDbRebuild,
             Some(FrankenStorage::now_millis()),
+            None,
         )
         .expect("deferred streaming ingest should not require a Tantivy writer");
 
@@ -35581,6 +35656,7 @@ mod tests {
             &Some(progress.clone()),
             LexicalPopulationStrategy::IncrementalInline,
             Some(FrankenStorage::now_millis()),
+            None,
         )
         .expect("lexical OOM after SQLite ingest should defer repair, not fail the scan");
 
@@ -35637,6 +35713,7 @@ mod tests {
                 &Some(progress.clone()),
                 LexicalPopulationStrategy::IncrementalInline,
                 Some(FrankenStorage::now_millis()),
+                None,
             )
             .expect("single deferred ingest OOM should quarantine and continue");
 
@@ -35676,6 +35753,113 @@ mod tests {
             assert_eq!(summary.quarantined_conversations, 1);
             assert_eq!(summary.status, "degraded");
         }
+    }
+
+    #[test]
+    #[serial]
+    fn non_watch_ingest_chunk_size_defaults_and_clamps() -> Result<()> {
+        {
+            let _env = unset_env_var("CASS_NON_WATCH_INGEST_CHUNK_SIZE");
+            anyhow::ensure!(
+                non_watch_ingest_chunk_size() == NON_WATCH_INGEST_DEFAULT_CHUNK_SIZE,
+                "unset chunk size should use the default"
+            );
+        }
+
+        {
+            let _env = set_env("CASS_NON_WATCH_INGEST_CHUNK_SIZE", "0");
+            anyhow::ensure!(
+                non_watch_ingest_chunk_size() == NON_WATCH_INGEST_DEFAULT_CHUNK_SIZE,
+                "zero chunk size should use the default"
+            );
+        }
+
+        {
+            let _env = set_env("CASS_NON_WATCH_INGEST_CHUNK_SIZE", "2");
+            anyhow::ensure!(
+                non_watch_ingest_chunk_size() == 2,
+                "valid explicit chunk size should be honored"
+            );
+        }
+
+        {
+            let _env = set_env("CASS_NON_WATCH_INGEST_CHUNK_SIZE", "99999");
+            anyhow::ensure!(
+                non_watch_ingest_chunk_size() == NON_WATCH_INGEST_CHUNK_SIZE_MAX,
+                "oversized chunk size should clamp to the safety cap"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn chunked_non_watch_ingest_bumps_run_lock_progress() -> Result<()> {
+        let _chunk_guard = set_env("CASS_NON_WATCH_INGEST_CHUNK_SIZE", "2");
+        let tmp = TempDir::new()?;
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir)?;
+
+        let db_path = data_dir.join("db.sqlite");
+        let storage = FrankenStorage::open(&db_path)?;
+        ensure_fts_schema(&storage);
+        let progress_tracker = Arc::new(IndexingProgress::default());
+        let progress = Some(progress_tracker.clone());
+        let progress_bump = Arc::new(AtomicI64::new(1));
+        let conversations: Vec<_> = [
+            ("chunked-non-watch-0", 0_i64),
+            ("chunked-non-watch-1", 1_i64),
+            ("chunked-non-watch-2", 2_i64),
+            ("chunked-non-watch-3", 3_i64),
+            ("chunked-non-watch-4", 4_i64),
+        ]
+        .iter()
+        .map(|(external_id, offset)| {
+            norm_conv(
+                Some(external_id),
+                vec![norm_msg(0, 1_700_000_000_000 + offset)],
+            )
+        })
+        .collect();
+
+        let outcome = ingest_non_watch_batch_with_oom_split(
+            &storage,
+            None,
+            &data_dir,
+            &conversations,
+            &progress,
+            LexicalPopulationStrategy::DeferredAuthoritativeDbRebuild,
+            true,
+            Some(&progress_bump),
+        )?;
+
+        anyhow::ensure!(
+            outcome.inserted_conversations == conversations.len(),
+            "chunked ingest should insert every conversation"
+        );
+        anyhow::ensure!(
+            outcome.inserted_messages == conversations.len(),
+            "chunked ingest should insert every message"
+        );
+        anyhow::ensure!(
+            progress_tracker.current.load(Ordering::Relaxed) == conversations.len(),
+            "progress counter should reflect all chunked conversations"
+        );
+        anyhow::ensure!(
+            progress_bump.load(Ordering::Relaxed) > 1,
+            "chunked ingest must refresh the run-lock heartbeat before the enclosing scan completes"
+        );
+        let conversation_count: i64 =
+            storage
+                .raw()
+                .query_row_map("SELECT COUNT(*) FROM conversations", &[], |row| {
+                    row.get_typed(0)
+                })?;
+        anyhow::ensure!(
+            conversation_count == i64::try_from(conversations.len())?,
+            "storage should contain every chunked conversation"
+        );
+        Ok(())
     }
 
     #[test]
@@ -36142,6 +36326,7 @@ mod tests {
             &Some(progress.clone()),
             LexicalPopulationStrategy::DeferredAuthoritativeDbRebuild,
             Some(FrankenStorage::now_millis()),
+            None,
         )
         .expect("mixed startup ingest should not violate foreign keys");
 
@@ -36380,6 +36565,7 @@ mod tests {
             &Some(progress.clone()),
             LexicalPopulationStrategy::IncrementalInline,
             None,
+            None,
         )
         .unwrap();
 
@@ -36484,6 +36670,7 @@ mod tests {
                 &Some(progress),
                 LexicalPopulationStrategy::IncrementalInline,
                 None,
+                None,
             )
             .unwrap();
 
@@ -36562,6 +36749,7 @@ mod tests {
             &Some(progress.clone()),
             LexicalPopulationStrategy::IncrementalInline,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(discovered, vec!["codex".to_string()]);
@@ -36607,6 +36795,7 @@ mod tests {
             flow_limiter,
             &Some(progress.clone()),
             LexicalPopulationStrategy::IncrementalInline,
+            None,
             None,
         )
         .unwrap();
@@ -36746,6 +36935,7 @@ mod tests {
             &Some(progress.clone()),
             LexicalPopulationStrategy::IncrementalInline,
             None,
+            None,
         )
         .unwrap();
         handle.join().unwrap();
@@ -36815,6 +37005,7 @@ mod tests {
             )],
             vec![("claude", watermark_sensitive_remote_connector_factory)],
             FrankenStorage::now_millis(),
+            None,
         )
         .context(
             "configured remote roots should scan from the root despite the global watermark",
@@ -36895,6 +37086,7 @@ mod tests {
             vec![configured_local_scan_root(local_root_path)],
             vec![("claude", watermark_sensitive_remote_connector_factory)],
             FrankenStorage::now_millis(),
+            None,
         )
         .context("configured local roots should keep the connector incremental watermark")?;
 
@@ -36940,6 +37132,7 @@ mod tests {
             Vec::new(),
             vec![("claude", panic_connector_factory)],
             FrankenStorage::now_millis(),
+            None,
         )
         .expect_err("producer panic should abort streaming indexing");
         let message = error.to_string();
@@ -37005,6 +37198,7 @@ mod tests {
             )],
             vec![("claude", watermark_sensitive_remote_connector_factory)],
             FrankenStorage::now_millis(),
+            None,
         )
         .context(
             "configured remote roots should scan from the root despite the global watermark",
@@ -37083,6 +37277,7 @@ mod tests {
             vec![configured_local_scan_root(local_root_path)],
             vec![("claude", watermark_sensitive_remote_connector_factory)],
             FrankenStorage::now_millis(),
+            None,
         )
         .context("configured local roots should keep the connector incremental watermark")?;
 
@@ -37134,6 +37329,7 @@ mod tests {
                 Vec::new(),
                 vec![("codex", failing_explicit_file_root_connector_factory)],
                 FrankenStorage::now_millis(),
+                None,
             )?;
 
             assert_eq!(
@@ -37197,6 +37393,7 @@ mod tests {
             Vec::new(),
             vec![("codex", deferred_batch_connector_factory)],
             FrankenStorage::now_millis(),
+            None,
         )
         .expect("deferred batch ingest should not require a Tantivy writer");
 
