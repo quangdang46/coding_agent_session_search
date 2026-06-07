@@ -91106,6 +91106,22 @@ fn parse_datetime_flexible(s: &str) -> Option<i64> {
         Some(local_from_naive(dt))
     }
 
+    fn relative_past_days(now: &chrono::DateTime<Local>, days: i64) -> Option<i64> {
+        let magnitude = days.checked_abs()?;
+        let offset = chrono::Duration::try_days(magnitude)?;
+        (*now)
+            .checked_sub_signed(offset)
+            .map(|dt| dt.timestamp_millis())
+    }
+
+    fn relative_past_hours(now: &chrono::DateTime<Local>, hours: i64) -> Option<i64> {
+        let magnitude = hours.checked_abs()?;
+        let offset = chrono::Duration::try_hours(magnitude)?;
+        (*now)
+            .checked_sub_signed(offset)
+            .map(|dt| dt.timestamp_millis())
+    }
+
     // Returns timestamp in milliseconds to match SQLite storage format
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
         return Some(dt.timestamp_millis());
@@ -91129,21 +91145,43 @@ fn parse_datetime_flexible(s: &str) -> Option<i64> {
         }
         _ => {
             // Both `7d` and `-7d` mean "7 days ago": a leading '-' is an
-            // offset-direction hint, not a sign to add to `now`. Using the
-            // magnitude (`.abs()`) keeps `--since -7d` in the past instead of
-            // computing `now + 7d` and inverting the timeline range (#280).
+            // offset-direction hint, not a sign to add to `now`. Use checked
+            // arithmetic so pathological magnitudes are rejected instead of
+            // panicking or overflowing while parsing CLI input (#280).
             if let Some(days_str) = s.strip_suffix('d')
                 && let Ok(days) = days_str.parse::<i64>()
             {
-                return Some((now - chrono::Duration::days(days.abs())).timestamp_millis());
+                return relative_past_days(&now, days);
             }
             if let Some(hours_str) = s.strip_suffix('h')
                 && let Ok(hours) = hours_str.parse::<i64>()
             {
-                return Some((now - chrono::Duration::hours(hours.abs())).timestamp_millis());
+                return relative_past_hours(&now, hours);
             }
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod timeline_datetime_parse_tests {
+    use super::parse_datetime_flexible;
+
+    #[test]
+    fn signed_relative_offsets_use_magnitude() {
+        let positive = parse_datetime_flexible("7d").expect("positive relative days parse");
+        let negative = parse_datetime_flexible("-7d").expect("negative relative days parse");
+
+        assert!(
+            positive.abs_diff(negative) < 2_000,
+            "7d and -7d should resolve to the same past window, got {positive} vs {negative}"
+        );
+    }
+
+    #[test]
+    fn overflowing_relative_offsets_are_rejected_without_panicking() {
+        assert!(parse_datetime_flexible("-9223372036854775808d").is_none());
+        assert!(parse_datetime_flexible("9223372036854775807h").is_none());
     }
 }
 

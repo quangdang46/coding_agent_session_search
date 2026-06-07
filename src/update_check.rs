@@ -281,13 +281,15 @@ fn is_browser_url(url: &str) -> bool {
     matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some()
 }
 
-fn is_trusted_release_notes_url(url: &str) -> bool {
+fn is_trusted_release_notes_url(url: &str, tag_name: &str) -> bool {
     let Ok(parsed) = url::Url::parse(url) else {
         return false;
     };
     if parsed.scheme() != "https"
         || parsed.host_str() != Some("github.com")
         || url_has_userinfo(&parsed)
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
     {
         return false;
     }
@@ -307,14 +309,34 @@ fn is_trusted_release_notes_url(url: &str) -> bool {
     let Some(section) = path_segments.next() else {
         return false;
     };
+    let Some(kind) = path_segments.next() else {
+        return false;
+    };
+    let tag_path = path_segments.collect::<Vec<_>>().join("/");
+    if tag_path.is_empty() {
+        return false;
+    }
+
+    let tag_matches = release_tag_path_matches(&tag_path, tag_name);
 
     owner.eq_ignore_ascii_case(expected_owner)
         && repo.eq_ignore_ascii_case(expected_repo)
         && section == "releases"
+        && kind == "tag"
+        && tag_matches
 }
 
 fn url_has_userinfo(url: &url::Url) -> bool {
     !url.username().is_empty() || url.password().is_some()
+}
+
+fn release_tag_path_matches(tag_path: &str, tag_name: &str) -> bool {
+    if tag_path == tag_name {
+        return true;
+    }
+    urlencoding::decode(tag_path)
+        .map(|decoded| decoded.as_ref() == tag_name)
+        .unwrap_or(false)
 }
 
 fn release_asset_url(version: &str, asset: &str) -> String {
@@ -752,12 +774,7 @@ fn unique_update_state_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
         .and_then(|name| name.to_str())
         .unwrap_or("update_state.json");
 
-    path.with_file_name(format!(
-        ".{file_name}.{suffix}.{}.{}.{}",
-        std::process::id(),
-        timestamp,
-        nonce
-    ))
+    path.with_file_name(format!(".{file_name}.{suffix}.{timestamp}.{nonce}"))
 }
 
 /// Current unix timestamp
@@ -817,11 +834,6 @@ fn build_update_info(
     state: &UpdateState,
 ) -> Option<UpdateInfo> {
     let GitHubRelease { tag_name, html_url } = release;
-    if !is_trusted_release_notes_url(&html_url) {
-        debug!("update check: untrusted release notes URL '{}'", html_url);
-        return None;
-    }
-
     let (latest_version, latest) = match parse_update_tag(&tag_name) {
         Some((version, parsed)) => (version.to_string(), parsed),
         None => {
@@ -829,6 +841,10 @@ fn build_update_info(
             return None;
         }
     };
+    if !is_trusted_release_notes_url(&html_url, &tag_name) {
+        debug!("update check: untrusted release notes URL '{}'", html_url);
+        return None;
+    }
 
     let current = match Version::parse(current_version) {
         Ok(v) => v,
@@ -1152,6 +1168,131 @@ mod tests {
         assert!(
             build_update_info("1.0.0", release, &state).is_none(),
             "release metadata should not surface unrelated GitHub release notes URLs"
+        );
+
+        let release = GitHubRelease {
+            tag_name: "v9.9.9".to_string(),
+            html_url: format!(
+                "https://github.com/{GITHUB_REPO}/releases/download/v9.9.9/install.sh"
+            ),
+        };
+        assert!(
+            build_update_info("1.0.0", release, &state).is_none(),
+            "release metadata should not accept release asset download URLs as release notes"
+        );
+
+        let release = GitHubRelease {
+            tag_name: "v9.9.9".to_string(),
+            html_url: format!("https://github.com/{GITHUB_REPO}/releases/tag/v9.9.8"),
+        };
+        assert!(
+            build_update_info("1.0.0", release, &state).is_none(),
+            "release metadata should not surface a release notes URL for a different tag"
+        );
+
+        let release = GitHubRelease {
+            tag_name: "v9.9.9".to_string(),
+            html_url: format!("https://github.com/{GITHUB_REPO}/releases/tag/v9.9.9?download=1"),
+        };
+        assert!(
+            build_update_info("1.0.0", release, &state).is_none(),
+            "release metadata should not accept release notes URLs with query strings"
+        );
+
+        let release = GitHubRelease {
+            tag_name: "v9.9.9".to_string(),
+            html_url: format!("https://github.com/{GITHUB_REPO}/releases/tag/v9.9.9#assets"),
+        };
+        assert!(
+            build_update_info("1.0.0", release, &state).is_none(),
+            "release metadata should not accept release notes URLs with fragments"
+        );
+    }
+
+    #[test]
+    fn test_release_info_accepts_exact_release_notes_url_for_tag() {
+        let state = UpdateState::default();
+        let release = GitHubRelease {
+            tag_name: "v9.9.9+build.5".to_string(),
+            html_url: format!("https://github.com/{GITHUB_REPO}/releases/tag/v9.9.9%2Bbuild.5"),
+        };
+        let info = build_update_info("1.0.0", release, &state)
+            .expect("valid GitHub release notes URL should be accepted");
+
+        assert_eq!(info.latest_version, "9.9.9+build.5");
+        assert_eq!(info.tag_name, "v9.9.9+build.5");
+        assert!(info.is_newer);
+    }
+
+    #[test]
+    fn test_release_info_accepts_case_insensitive_encoded_plus_in_tag_url() {
+        let state = UpdateState::default();
+        let release = GitHubRelease {
+            tag_name: "v9.9.9+build.5".to_string(),
+            html_url: format!("https://github.com/{GITHUB_REPO}/releases/tag/v9.9.9%2bbuild.5"),
+        };
+        let info = build_update_info("1.0.0", release, &state)
+            .expect("percent-encoded plus in a path segment is case-insensitive");
+
+        assert_eq!(info.latest_version, "9.9.9+build.5");
+        assert_eq!(info.tag_name, "v9.9.9+build.5");
+        assert!(info.is_newer);
+    }
+
+    #[test]
+    fn test_release_info_rejects_case_changed_tag_url() {
+        let state = UpdateState::default();
+        let release = GitHubRelease {
+            tag_name: "v9.9.9+build.5".to_string(),
+            html_url: format!("https://github.com/{GITHUB_REPO}/releases/tag/v9.9.9%2BBUILD.5"),
+        };
+
+        assert!(
+            build_update_info("1.0.0", release, &state).is_none(),
+            "tag names are case-sensitive; only percent escape hex case should be normalized"
+        );
+    }
+
+    #[test]
+    fn test_trusted_release_notes_url_accepts_full_tag_path_tail() {
+        assert!(is_trusted_release_notes_url(
+            &format!("https://github.com/{GITHUB_REPO}/releases/tag/channel/v9.9.9"),
+            "channel/v9.9.9",
+        ));
+        assert!(is_trusted_release_notes_url(
+            &format!("https://github.com/{GITHUB_REPO}/releases/tag/channel%2Fv9.9.9"),
+            "channel/v9.9.9",
+        ));
+        assert!(!is_trusted_release_notes_url(
+            &format!("https://github.com/{GITHUB_REPO}/releases/tag/v9.9.9/assets"),
+            "v9.9.9",
+        ));
+    }
+
+    #[test]
+    fn update_state_sidecar_paths_use_timestamp_and_nonce_namespace() {
+        let sidecar = unique_update_state_temp_path(Path::new("/tmp/update_state.json"));
+        let next_sidecar = unique_update_state_temp_path(Path::new("/tmp/update_state.json"));
+        let file_name = sidecar
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("sidecar path has UTF-8 file name");
+        let suffix = file_name
+            .strip_prefix(".update_state.json.tmp.")
+            .expect("sidecar path uses the expected hidden temp prefix");
+        let mut parts = suffix.split('.');
+        let timestamp = parts.next().expect("sidecar includes a timestamp");
+        let nonce = parts.next().expect("sidecar includes a nonce");
+
+        assert!(
+            parts.next().is_none(),
+            "unexpected sidecar suffix shape: {file_name:?}"
+        );
+        timestamp.parse::<u128>().expect("timestamp is numeric");
+        nonce.parse::<u64>().expect("nonce is numeric");
+        assert_ne!(
+            sidecar, next_sidecar,
+            "successive sidecar names should differ"
         );
     }
 

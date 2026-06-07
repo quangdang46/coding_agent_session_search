@@ -10980,9 +10980,13 @@ fn spawn_connector_producer(
                 ) {
                     return Ok(());
                 }
-                inject_provenance(&mut conversation, &local_origin);
-                compact_large_connector_extras(name, &mut conversation);
-                attach_raw_mirror_capture(&config.data_dir, &mut conversation);
+                prepare_conversation_for_ingest(
+                    &config.data_dir,
+                    name,
+                    &local_origin,
+                    None,
+                    &mut conversation,
+                );
                 batch_sender.push(conversation)
             }) {
                 Ok(()) => {
@@ -11066,10 +11070,13 @@ fn spawn_connector_producer(
                 ) {
                     return Ok(());
                 }
-                inject_provenance(&mut conversation, &root.origin);
-                apply_workspace_rewrite(&mut conversation, root);
-                compact_large_connector_extras(name, &mut conversation);
-                attach_raw_mirror_capture(&config.data_dir, &mut conversation);
+                prepare_conversation_for_ingest(
+                    &config.data_dir,
+                    name,
+                    &root.origin,
+                    Some(root),
+                    &mut conversation,
+                );
 
                 if !was_detected && !is_discovered {
                     if let Some(p) = &config.progress {
@@ -11946,8 +11953,13 @@ fn run_batch_index_with_connector_factories(
                                 )
                             });
                             for conv in &mut local_convs {
-                                inject_provenance(conv, &local_origin);
-                                attach_raw_mirror_capture(&data_dir, conv);
+                                prepare_conversation_for_ingest(
+                                    &data_dir,
+                                    name,
+                                    &local_origin,
+                                    None,
+                                    conv,
+                                );
                             }
                             convs.extend(local_convs);
                         }
@@ -12001,9 +12013,13 @@ fn run_batch_index_with_connector_factories(
                                     )
                                 });
                                 for conv in &mut remote_convs {
-                                    inject_provenance(conv, &root.origin);
-                                    apply_workspace_rewrite(conv, root);
-                                    attach_raw_mirror_capture(&data_dir, conv);
+                                    prepare_conversation_for_ingest(
+                                        &data_dir,
+                                        name,
+                                        &root.origin,
+                                        Some(root),
+                                        conv,
+                                    );
                                 }
                                 convs.extend(remote_convs);
                             }
@@ -21484,10 +21500,13 @@ fn reindex_paths_with_semantic_delta(
 
         // Provenance injection and path rewriting
         for conv in &mut convs {
-            inject_provenance(conv, &root.origin);
-            apply_workspace_rewrite(conv, &root);
-            compact_large_connector_extras("", conv);
-            attach_raw_mirror_capture(&opts.data_dir, conv);
+            prepare_conversation_for_ingest(
+                &opts.data_dir,
+                kind.slug(),
+                &root.origin,
+                Some(&root),
+                conv,
+            );
         }
         if !explicit_watch_once {
             sort_watch_conversations_for_watermark(&mut convs);
@@ -22467,6 +22486,9 @@ fn inject_provenance(conv: &mut NormalizedConversation, origin: &Origin) {
         let cass = obj
             .entry("cass".to_string())
             .or_insert_with(|| serde_json::json!({}));
+        if !cass.is_object() {
+            *cass = serde_json::json!({});
+        }
         if let Some(cass_obj) = cass.as_object_mut() {
             cass_obj.insert(
                 "origin".to_string(),
@@ -22478,6 +22500,21 @@ fn inject_provenance(conv: &mut NormalizedConversation, origin: &Origin) {
             );
         }
     }
+}
+
+fn prepare_conversation_for_ingest(
+    data_dir: &Path,
+    connector_name: &str,
+    origin: &Origin,
+    workspace_rewrite_root: Option<&ScanRoot>,
+    conv: &mut NormalizedConversation,
+) {
+    inject_provenance(conv, origin);
+    if let Some(root) = workspace_rewrite_root {
+        apply_workspace_rewrite(conv, root);
+    }
+    compact_large_connector_extras(connector_name, conv);
+    attach_raw_mirror_capture(data_dir, conv);
 }
 
 fn capture_connector_sources_before_parse(
@@ -23007,6 +23044,9 @@ pub fn apply_workspace_rewrite(conv: &mut NormalizedConversation, root: &ScanRoo
             let cass = obj
                 .entry("cass".to_string())
                 .or_insert_with(|| serde_json::json!({}));
+            if !cass.is_object() {
+                *cass = serde_json::json!({});
+            }
             if let Some(cass_obj) = cass.as_object_mut() {
                 cass_obj.insert(
                     "workspace_original".to_string(),
@@ -44012,6 +44052,35 @@ mod tests {
     }
 
     #[test]
+    fn inject_provenance_repairs_non_object_cass_metadata() {
+        let mut conv = norm_conv(Some("test"), vec![norm_msg(0, 100)]);
+        conv.metadata = serde_json::json!({
+            "cass": "connector supplied a malformed cass metadata value",
+            "other": "preserve me"
+        });
+
+        let origin = Origin::remote_with_host("laptop", "user@laptop.local");
+        inject_provenance(&mut conv, &origin);
+
+        assert_eq!(
+            conv.metadata.pointer("/other"),
+            Some(&serde_json::json!("preserve me"))
+        );
+        assert_eq!(
+            conv.metadata.pointer("/cass/origin/source_id"),
+            Some(&serde_json::json!("laptop"))
+        );
+        assert_eq!(
+            conv.metadata.pointer("/cass/origin/kind"),
+            Some(&serde_json::json!("ssh"))
+        );
+        assert_eq!(
+            conv.metadata.pointer("/cass/origin/host"),
+            Some(&serde_json::json!("user@laptop.local"))
+        );
+    }
+
+    #[test]
     fn large_codex_extra_compaction_preserves_cass_metadata() {
         let mut conv = norm_conv(Some("codex-large"), vec![norm_msg(0, 100)]);
         conv.agent_slug = "codex".to_string();
@@ -44103,6 +44172,59 @@ mod tests {
             Some(CODEX_INDEXER_EXTRA_COMPACT_THRESHOLD_BYTES),
         );
         assert_eq!(large_claude.messages[0].extra, raw_extra);
+    }
+
+    #[test]
+    fn prepare_conversation_for_ingest_compacts_large_codex_batch_extras() {
+        let temp = TempDir::new().expect("tempdir");
+        let data_dir = temp.path().join("cass-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let source_path = temp.path().join("rollout-large.jsonl");
+        std::fs::File::create(&source_path)
+            .expect("create sparse source")
+            .set_len(CODEX_INDEXER_EXTRA_COMPACT_THRESHOLD_BYTES)
+            .expect("size sparse source");
+
+        let mut conv = norm_conv(Some("codex-large-batch"), vec![norm_msg(0, 100)]);
+        conv.agent_slug = "codex".to_string();
+        conv.source_path = source_path;
+        conv.messages[0].extra = serde_json::json!({
+            "payload": {
+                "delta": "duplicated raw codex event payload"
+            },
+            "response": {
+                "model": "gpt-5.4"
+            },
+            "cass": {
+                "event_line": 42
+            }
+        });
+
+        prepare_conversation_for_ingest(&data_dir, "codex", &Origin::local(), None, &mut conv);
+
+        let extra = &conv.messages[0].extra;
+        assert_eq!(
+            extra
+                .pointer("/cass/model")
+                .and_then(serde_json::Value::as_str),
+            Some("gpt-5.4")
+        );
+        assert_eq!(
+            extra.pointer("/cass/event_line"),
+            Some(&serde_json::json!(42))
+        );
+        assert!(extra.get("payload").is_none());
+        assert!(extra.get("response").is_none());
+        assert_eq!(
+            conv.metadata.pointer("/cass/origin/source_id"),
+            Some(&serde_json::json!("local"))
+        );
+        assert_eq!(
+            conv.metadata.pointer("/cass/raw_mirror/blob_size_bytes"),
+            Some(&serde_json::json!(
+                CODEX_INDEXER_EXTRA_COMPACT_THRESHOLD_BYTES
+            ))
+        );
     }
 
     #[test]
@@ -44491,6 +44613,35 @@ mod tests {
         assert_eq!(
             conv.metadata["cass"]["workspace_original"].as_str(),
             Some("/home/user/app")
+        );
+    }
+
+    #[test]
+    fn apply_workspace_rewrite_repairs_non_object_cass_metadata() {
+        let mut conv = norm_conv(None, vec![norm_msg(0, 1000)]);
+        conv.workspace = Some(PathBuf::from("/home/user/app"));
+        conv.metadata = serde_json::json!({
+            "cass": ["malformed"],
+            "other": "preserve me"
+        });
+
+        let mappings = vec![crate::sources::config::PathMapping::new(
+            "/home/user",
+            "/Users/me",
+        )];
+
+        let mut root = crate::connectors::ScanRoot::local(PathBuf::from("/"));
+        root.workspace_rewrites = mappings;
+        apply_workspace_rewrite(&mut conv, &root);
+
+        assert_eq!(conv.workspace, Some(PathBuf::from("/Users/me/app")));
+        assert_eq!(
+            conv.metadata.pointer("/other"),
+            Some(&serde_json::json!("preserve me"))
+        );
+        assert_eq!(
+            conv.metadata.pointer("/cass/workspace_original"),
+            Some(&serde_json::json!("/home/user/app"))
         );
     }
 

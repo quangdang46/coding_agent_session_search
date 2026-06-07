@@ -545,8 +545,8 @@ fn no_limit_result_cap() -> usize {
     static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CAP.get_or_init(|| {
         compute_no_limit_result_cap_from(
-            std::env::var("CASS_SEARCH_NO_LIMIT_CAP").ok(),
-            std::env::var("CASS_SEARCH_NO_LIMIT_BYTES").ok(),
+            dotenvy::var("CASS_SEARCH_NO_LIMIT_CAP").ok(),
+            dotenvy::var("CASS_SEARCH_NO_LIMIT_BYTES").ok(),
             available_memory_bytes(),
         )
     })
