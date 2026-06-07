@@ -19,6 +19,7 @@ use std::env;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 const DEFAULT_REAL_DATA_DIR: &str = "/home/ubuntu/.local/share/coding-agent-search";
@@ -31,6 +32,21 @@ const DEFAULT_TIMEOUT_SECS: u64 = 15;
 const DEFAULT_INDEX_TIMEOUT_SECS: u64 = 45;
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DIAG_STREAM_TAIL_BYTES: usize = 16 * 1024;
+const MAX_CAPTURE_BYTES: usize = 64 * 1024 * 1024;
+
+struct PipeCapture {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+impl PipeCapture {
+    fn empty() -> Self {
+        Self {
+            bytes: Vec::new(),
+            truncated: false,
+        }
+    }
+}
 
 struct RealIndexHarness {
     bin: String,
@@ -151,19 +167,17 @@ fn spawn_with_timeout_or_diag(
     let mut child = cmd
         .spawn()
         .with_context(|| format!("spawn_with_timeout_or_diag({label}): spawn failed"))?;
+    let stdout_reader = spawn_pipe_reader(child.stdout.take());
+    let stderr_reader = spawn_pipe_reader(child.stderr.take());
     let deadline = start + timeout;
 
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut stdout = Vec::new();
-                let mut stderr = Vec::new();
-                if let Some(mut handle) = child.stdout.take() {
-                    let _ = handle.read_to_end(&mut stdout);
-                }
-                if let Some(mut handle) = child.stderr.take() {
-                    let _ = handle.read_to_end(&mut stderr);
-                }
+                let stdout = join_pipe_reader(stdout_reader, label, "stdout");
+                let stderr = join_pipe_reader(stderr_reader, label, "stderr");
+                let stdout = full_output_or_error(stdout, label, "stdout")?;
+                let stderr = full_output_or_error(stderr, label, "stderr")?;
                 return Ok(Output {
                     status,
                     stdout,
@@ -175,8 +189,10 @@ fn spawn_with_timeout_or_diag(
                     let pid = child.id();
                     let _ = child.kill();
                     let _ = child.wait();
-                    let stdout_tail = drain_pipe_tail(child.stdout.take());
-                    let stderr_tail = drain_pipe_tail(child.stderr.take());
+                    let stdout = join_pipe_reader(stdout_reader, label, "stdout");
+                    let stderr = join_pipe_reader(stderr_reader, label, "stderr");
+                    let stdout_tail = stream_tail(&stdout.bytes);
+                    let stderr_tail = stream_tail(&stderr.bytes);
 
                     eprintln!();
                     eprintln!("================================================================");
@@ -190,12 +206,24 @@ fn spawn_with_timeout_or_diag(
                     for entry in list_dir_bounded(data_dir, 200) {
                         eprintln!("  {entry}");
                     }
+                    if stdout.truncated {
+                        eprintln!(
+                            "--- child stdout exceeded capture cap ({} bytes); retained latest bytes only",
+                            MAX_CAPTURE_BYTES
+                        );
+                    }
                     eprintln!(
                         "--- child stdout tail ({} bytes of up to {}):",
                         stdout_tail.len(),
                         DIAG_STREAM_TAIL_BYTES
                     );
                     eprintln!("{}", String::from_utf8_lossy(&stdout_tail));
+                    if stderr.truncated {
+                        eprintln!(
+                            "--- child stderr exceeded capture cap ({} bytes); retained latest bytes only",
+                            MAX_CAPTURE_BYTES
+                        );
+                    }
                     eprintln!(
                         "--- child stderr tail ({} bytes of up to {}):",
                         stderr_tail.len(),
@@ -214,23 +242,101 @@ fn spawn_with_timeout_or_diag(
             Err(err) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = join_pipe_reader(stdout_reader, label, "stdout");
+                let _ = join_pipe_reader(stderr_reader, label, "stderr");
                 bail!("spawn_with_timeout_or_diag({label}): try_wait errored: {err}");
             }
         }
     }
 }
 
-fn drain_pipe_tail<R: Read>(handle: Option<R>) -> Vec<u8> {
-    let Some(mut handle) = handle else {
-        return Vec::new();
-    };
-    let mut buf = Vec::new();
-    let _ = handle.read_to_end(&mut buf);
+fn spawn_pipe_reader<R>(handle: Option<R>) -> JoinHandle<PipeCapture>
+where
+    R: Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let Some(mut handle) = handle else {
+            return PipeCapture::empty();
+        };
+        read_pipe_to_capture(&mut handle)
+    })
+}
+
+fn join_pipe_reader(
+    reader: JoinHandle<PipeCapture>,
+    label: &str,
+    stream_name: &str,
+) -> PipeCapture {
+    match reader.join() {
+        Ok(capture) => capture,
+        Err(_) => {
+            eprintln!("{label}: {stream_name} reader thread panicked");
+            PipeCapture::empty()
+        }
+    }
+}
+
+fn full_output_or_error(capture: PipeCapture, label: &str, stream_name: &str) -> Result<Vec<u8>> {
+    if capture.truncated {
+        bail!(
+            "spawn_with_timeout_or_diag({label}): {stream_name} exceeded capture cap of {} bytes",
+            MAX_CAPTURE_BYTES
+        );
+    }
+    Ok(capture.bytes)
+}
+
+fn read_pipe_to_capture<R: Read>(handle: &mut R) -> PipeCapture {
+    let mut bytes = Vec::new();
+    let mut scratch = [0_u8; 8192];
+    let mut write_pos = 0_usize;
+    let mut truncated = false;
+
+    loop {
+        let read = match handle.read(&mut scratch) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(_) => break,
+        };
+
+        if bytes.len() < MAX_CAPTURE_BYTES {
+            let remaining = MAX_CAPTURE_BYTES - bytes.len();
+            let keep = read.min(remaining);
+            bytes.extend_from_slice(&scratch[..keep]);
+            if keep == read {
+                continue;
+            }
+            truncated = true;
+            for &byte in &scratch[keep..read] {
+                bytes[write_pos] = byte;
+                write_pos = (write_pos + 1) % MAX_CAPTURE_BYTES;
+            }
+        } else {
+            truncated = true;
+            for &byte in &scratch[..read] {
+                bytes[write_pos] = byte;
+                write_pos = (write_pos + 1) % MAX_CAPTURE_BYTES;
+            }
+        }
+    }
+
+    if truncated && write_pos != 0 {
+        let mut ordered = Vec::with_capacity(bytes.len());
+        ordered.extend_from_slice(&bytes[write_pos..]);
+        ordered.extend_from_slice(&bytes[..write_pos]);
+        bytes = ordered;
+    }
+
+    PipeCapture { bytes, truncated }
+}
+
+fn stream_tail(buf: &[u8]) -> Vec<u8> {
     if buf.len() > DIAG_STREAM_TAIL_BYTES {
         let tail_start = buf.len() - DIAG_STREAM_TAIL_BYTES;
-        buf.drain(0..tail_start);
+        buf[tail_start..].to_vec()
+    } else {
+        buf.to_vec()
     }
-    buf
 }
 
 fn list_dir_bounded(root: &Path, limit: usize) -> Vec<String> {
@@ -251,7 +357,10 @@ fn list_dir_bounded(root: &Path, limit: usize) -> Vec<String> {
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .into_owned();
-            match entry.metadata() {
+            match std::fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    out.push(format!("{rel} (symlink)"));
+                }
                 Ok(metadata) if metadata.is_dir() => {
                     out.push(format!("{rel}/"));
                     stack.push(path);
@@ -262,6 +371,36 @@ fn list_dir_bounded(root: &Path, limit: usize) -> Vec<String> {
         }
     }
     out
+}
+
+#[cfg(unix)]
+#[test]
+fn list_dir_bounded_reports_symlinked_directories_without_following() -> Result<()> {
+    let tmp = tempfile::TempDir::new().context("create temp dir")?;
+    let root = tmp.path().join("root");
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&root).context("create root")?;
+    std::fs::create_dir_all(&outside).context("create outside")?;
+    std::fs::write(outside.join("outside-only.txt"), b"should not be listed")
+        .context("write outside marker")?;
+    std::os::unix::fs::symlink(&outside, root.join("linked-outside"))
+        .context("create symlinked directory")?;
+
+    let entries = list_dir_bounded(&root, 20);
+
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry == "linked-outside (symlink)"),
+        "diagnostic listing must identify the symlink itself: {entries:?}"
+    );
+    assert!(
+        entries
+            .iter()
+            .all(|entry| !entry.contains("outside-only.txt")),
+        "diagnostic listing must not follow symlinked directories outside the data dir: {entries:?}"
+    );
+    Ok(())
 }
 
 fn parse_json_stdout(label: &str, output: &Output) -> Result<Value> {
