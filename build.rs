@@ -47,14 +47,15 @@ const CONTRACTS: &[DependencyContract] = &[
         dep_key: "frankensqlite",
         crate_package_name: "fsqlite",
         manifest_package_field: Some("fsqlite"),
-        // crates.io-only pin: fsqlite 0.1.7 carries the upstream #95
-        // BtCursor forward-progress fix plus the #106 MVCC grow fix and
-        // FTS5 reload/lazy-shadow fixes needed by cass large-index refreshes.
+        // crates.io-only exact pin: fsqlite 0.1.9 carries the upstream #95
+        // BtCursor forward-progress fix plus the #106 MVCC grow fix,
+        // FTS5 reload/lazy-shadow fixes, and the latest large-index repair
+        // surface needed by cass refreshes.
         // Empty `expected_git` signals
         // `validate_manifest_dependency_spec` to skip git/rev checks.
         expected_git: "",
         expected_rev: "",
-        expected_version: "0.1.7",
+        expected_version: "0.1.9",
         expected_features: &["fts5"],
         expected_default_features: None,
         repo_rel: "../frankensqlite",
@@ -69,10 +70,10 @@ const CONTRACTS: &[DependencyContract] = &[
         dep_key: "fsqlite-types",
         crate_package_name: "fsqlite-types",
         manifest_package_field: Some("fsqlite-types"),
-        // crates.io-only pin aligned with the frankensqlite facade at 0.1.7.
+        // crates.io-only exact pin aligned with the frankensqlite facade at 0.1.9.
         expected_git: "",
         expected_rev: "",
-        expected_version: "0.1.7",
+        expected_version: "0.1.9",
         expected_features: &[],
         expected_default_features: None,
         repo_rel: "../frankensqlite",
@@ -111,7 +112,7 @@ const CONTRACTS: &[DependencyContract] = &[
         dep_key: "asupersync",
         crate_package_name: "asupersync",
         manifest_package_field: None,
-        // crates.io-only pin after the 0.3.x migration unified every source
+        // crates.io-only exact pin after the 0.3.x migration unified every source
         // (direct dep, frankensqlite transitive, frankensearch transitive)
         // onto a single published release. Empty `expected_git` signals
         // `validate_manifest_dependency_spec` to skip git/rev checks.
@@ -325,7 +326,7 @@ fn validate_manifest_dependency_spec(
     if contract.expected_git.is_empty() {
         // Pure crates.io dependency: lock in the registry version, which is the
         // only source identity crates.io gives us.
-        validate_manifest_dependency_version(spec, contract);
+        validate_manifest_dependency_version(spec, contract, packaged_manifest);
         if spec.contains_key("git") || spec.contains_key("rev") {
             contract_error(
                 contract,
@@ -340,7 +341,7 @@ fn validate_manifest_dependency_spec(
         // generated package manifest used by `cargo publish` verification.
         // Validate that rewritten shape against the version we expect instead
         // of requiring `git`/`rev` keys that no longer exist there.
-        validate_manifest_dependency_version(spec, contract);
+        validate_manifest_dependency_version(spec, contract, packaged_manifest);
     } else {
         let actual_git = string_value(spec, "git", contract.dep_key);
         if actual_git != contract.expected_git {
@@ -417,16 +418,31 @@ fn validate_manifest_dependency_spec(
 fn validate_manifest_dependency_version(
     spec: &toml::map::Map<String, Value>,
     contract: &DependencyContract,
+    packaged_manifest: bool,
 ) {
     let actual_version = string_value(spec, "version", contract.dep_key);
-    if actual_version != contract.expected_version {
+    let expected_manifest_version = expected_manifest_version_requirement(contract);
+    let package_manifest_may_strip_exact_operator =
+        packaged_manifest || !contract.expected_git.is_empty();
+    let version_matches = actual_version == expected_manifest_version
+        || (package_manifest_may_strip_exact_operator
+            && actual_version == contract.expected_version);
+    if !version_matches {
         contract_error(
             contract,
             format!(
                 "dependency `{}` in [{}] must pin version = `{}`, found `{}`",
-                contract.dep_key, contract.dep_table, contract.expected_version, actual_version
+                contract.dep_key, contract.dep_table, expected_manifest_version, actual_version
             ),
         );
+    }
+}
+
+fn expected_manifest_version_requirement(contract: &DependencyContract) -> String {
+    if contract.expected_git.is_empty() {
+        format!("={}", contract.expected_version)
+    } else {
+        contract.expected_version.to_string()
     }
 }
 

@@ -2936,13 +2936,13 @@ Update check state is stored in the data directory:
 
 ## Dependency Source Contract
 
-`cass` pins dependency identities in [`Cargo.toml`](Cargo.toml): registry versions for crates.io-only dependencies and git revisions for source dependencies. The repo keeps local `[patch]` overrides commented out by default; enable them only for local development and never commit an active sibling path override.
+`cass` pins dependency identities in [`Cargo.toml`](Cargo.toml): exact registry version requirements for crates.io-only dependencies and git revisions for source dependencies. The repo keeps local `[patch]` overrides commented out by default; enable them only for local development and never commit an active sibling path override.
 
 | Dependency | Pinned source |
 |------------|-----------------|
-| `frankensqlite` / `fsqlite-types` | `0.1.7` (crates.io; #95 + #106 + FTS5 reload fixes) |
+| `frankensqlite` / `fsqlite-types` | `=0.1.9` (crates.io; #95 BtCursor + #106 MVCC grow + FTS5 reload + MAX/MIN(rowid) leaf-seek fixes) |
 | `franken-agent-detection` | `a4923d4` |
-| `asupersync` | `0.3.2` |
+| `asupersync` | `=0.3.2` |
 | `frankensearch` | `2cad158f` |
 | `frankentui` | `5f78cfa0` |
 | `toon` (`tru`) | `5669b72a` |
