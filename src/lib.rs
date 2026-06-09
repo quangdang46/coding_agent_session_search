@@ -5751,71 +5751,13 @@ async fn execute_cli(
     // consumers that merge stderr into stdout (e.g., `cass index --json 2>&1`).
     // Only errors are important enough to surface in machine-readable mode.
     let robot_mode = is_robot_mode(&command, cli);
-    let filter = if cli.quiet || robot_mode {
-        // Robot mode implies quiet unless verbose is explicitly requested
-        if cli.verbose {
-            EnvFilter::new("debug")
-        } else {
-            EnvFilter::new("error")
-        }
-    } else if cli.verbose {
-        EnvFilter::new("debug")
-    } else {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            // Suppress frankensqlite internal telemetry that spams at INFO level.
-            // EnvFilter uses "::" as the hierarchy separator, so "fsqlite=warn" covers
-            // fsqlite::runtime, fsqlite::cx, etc.  Crate-level targets like fsqlite_vdbe
-            // and fsqlite_core need their own directives.  Custom dot-separated targets
-            // (fsqlite.statement_reuse, fsqlite.compat, etc.) are NOT matched by the
-            // hierarchical prefix, so each must be listed explicitly.
-            EnvFilter::new(concat!(
-                "info",
-                // Hierarchical (::) targets
-                ",fsqlite=warn",
-                ",fsqlite_core=warn",
-                ",fsqlite_vdbe=warn",
-                ",fsqlite_mvcc=warn",
-                ",fsqlite_pager=warn",
-                ",fsqlite_func=warn",
-                ",fsqlite_vfs=warn",
-                ",fsqlite_wal=warn",
-                ",fsqlite_c_api=warn",
-                ",fsqlite_planner=warn",
-                ",fsqlite_types=warn",
-                ",fsqlite_observability=warn",
-                // Dot-separated custom targets
-                ",fsqlite.compat=warn",
-                ",fsqlite.compat_trace=warn",
-                ",fsqlite.statement_reuse=warn",
-                ",fsqlite.statement=warn",
-                ",fsqlite.execution=warn",
-                ",fsqlite.execute_path=warn",
-                ",fsqlite.plan=warn",
-                ",fsqlite.planner=warn",
-                ",fsqlite.planner_runtime=warn",
-                ",fsqlite.parse=warn",
-                ",fsqlite.provenance=warn",
-                ",fsqlite.dp=warn",
-                ",fsqlite.udf=warn",
-                ",fsqlite.vdbe=warn",
-                ",fsqlite.rcu=warn",
-                ",fsqlite.seqlock=warn",
-                ",fsqlite.left_right=warn",
-                ",fsqlite.flat_combine=warn",
-                ",fsqlite.commit_combine=warn",
-                ",fsqlite.snapshot_publication=warn",
-                ",fsqlite.wal_publication=warn",
-                ",fsqlite.storage_wiring=warn",
-                ",fsqlite.cx_propagation=warn",
-                ",fsqlite.sketch_telemetry=warn",
-                ",fsqlite.time_travel=warn",
-                ",fsqlite.trace_export=warn",
-                ",fsqlite.txn_slot=warn",
-                ",fsqlite.evidence=warn",
-                ",fsqlite.lab_schedule=warn",
-            ))
-        })
-    };
+    // Single enforcement chokepoint for stdout/stderr hygiene: robot/quiet
+    // output is machine-consumed, so the tracing filter is pinned to `error`
+    // (overriding RUST_LOG) to guarantee no dependency INFO/WARN logging can
+    // interleave with JSON. See `robot_aware_log_directive` and the regression
+    // suite in tests/cli_robot_log_hygiene.rs
+    // (coding_agent_session_search-cass-fleet-resilience-20260608-uojcg.2.1).
+    let filter = build_robot_aware_log_filter(robot_mode, cli.verbose, cli.quiet);
 
     match &command {
         Commands::Tui { data_dir, .. } => {
@@ -17197,6 +17139,146 @@ fn analytics_requests_structured_output(cmd: &AnalyticsCommand, cli: &Cli) -> bo
     };
 
     resolve_subcommand_structured_format(cli, json).is_some()
+}
+
+/// Default tracing directive for interactive human mode: emit INFO and above
+/// but suppress frankensqlite internal telemetry that spams at INFO level.
+///
+/// `EnvFilter` uses `::` as the hierarchy separator, so `fsqlite=warn` covers
+/// `fsqlite::runtime`, `fsqlite::cx`, etc. Crate-level targets like
+/// `fsqlite_vdbe` and `fsqlite_core` need their own directives. Custom
+/// dot-separated targets (`fsqlite.statement_reuse`, `fsqlite.compat`, etc.) are
+/// NOT matched by the hierarchical prefix, so each must be listed explicitly.
+///
+/// This list is only consulted in interactive human mode (and only when
+/// `RUST_LOG` is unset). Robot/quiet mode never reaches it — those modes pin the
+/// filter to `error` via [`robot_aware_log_directive`], which is the actual
+/// stdout/stderr hygiene guarantee. A missing entry here can therefore only make
+/// human-mode stderr noisier, never corrupt a robot JSON stream.
+const DEFAULT_DEP_LOG_SUPPRESSION: &str = concat!(
+    "info",
+    // Hierarchical (::) targets
+    ",fsqlite=warn",
+    ",fsqlite_core=warn",
+    ",fsqlite_vdbe=warn",
+    ",fsqlite_mvcc=warn",
+    ",fsqlite_pager=warn",
+    ",fsqlite_func=warn",
+    ",fsqlite_vfs=warn",
+    ",fsqlite_wal=warn",
+    ",fsqlite_c_api=warn",
+    ",fsqlite_planner=warn",
+    ",fsqlite_types=warn",
+    ",fsqlite_observability=warn",
+    // Dot-separated custom targets
+    ",fsqlite.compat=warn",
+    ",fsqlite.compat_trace=warn",
+    ",fsqlite.statement_reuse=warn",
+    ",fsqlite.statement=warn",
+    ",fsqlite.execution=warn",
+    ",fsqlite.execute_path=warn",
+    ",fsqlite.plan=warn",
+    ",fsqlite.planner=warn",
+    ",fsqlite.planner_runtime=warn",
+    ",fsqlite.parse=warn",
+    ",fsqlite.provenance=warn",
+    ",fsqlite.dp=warn",
+    ",fsqlite.udf=warn",
+    ",fsqlite.vdbe=warn",
+    ",fsqlite.rcu=warn",
+    ",fsqlite.seqlock=warn",
+    ",fsqlite.left_right=warn",
+    ",fsqlite.flat_combine=warn",
+    ",fsqlite.commit_combine=warn",
+    ",fsqlite.snapshot_publication=warn",
+    ",fsqlite.wal_publication=warn",
+    ",fsqlite.storage_wiring=warn",
+    ",fsqlite.cx_propagation=warn",
+    ",fsqlite.sketch_telemetry=warn",
+    ",fsqlite.time_travel=warn",
+    ",fsqlite.trace_export=warn",
+    ",fsqlite.txn_slot=warn",
+    ",fsqlite.evidence=warn",
+    ",fsqlite.lab_schedule=warn",
+);
+
+/// Decide the tracing filter directive for the active output mode.
+///
+/// Returns `Some(directive)` when the directive is fixed regardless of the
+/// `RUST_LOG` environment variable, and `None` when the caller should consult
+/// `RUST_LOG` (falling back to [`DEFAULT_DEP_LOG_SUPPRESSION`]).
+///
+/// Robot and quiet modes are machine-consumed: they pin the filter to `error`
+/// (unless the operator explicitly opts into `--verbose`) so that dependency
+/// INFO/WARN logging — frankensqlite telemetry in particular — can never
+/// interleave with a JSON stream, even when `RUST_LOG` is set in the
+/// environment. This is the single source of truth for robot stdout/stderr
+/// hygiene; the regression suite in `tests/cli_robot_log_hygiene.rs` exercises it
+/// end-to-end under deliberately noisy `RUST_LOG` settings.
+fn robot_aware_log_directive(robot_mode: bool, verbose: bool, quiet: bool) -> Option<&'static str> {
+    if quiet || robot_mode {
+        // Robot/quiet mode implies error-only output unless --verbose is set.
+        Some(if verbose { "debug" } else { "error" })
+    } else if verbose {
+        Some("debug")
+    } else {
+        None
+    }
+}
+
+/// Build the concrete [`EnvFilter`] for the active output mode, applying the
+/// robot/quiet hygiene policy from [`robot_aware_log_directive`].
+fn build_robot_aware_log_filter(robot_mode: bool, verbose: bool, quiet: bool) -> EnvFilter {
+    match robot_aware_log_directive(robot_mode, verbose, quiet) {
+        Some(directive) => EnvFilter::new(directive),
+        None => EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new(DEFAULT_DEP_LOG_SUPPRESSION)),
+    }
+}
+
+#[cfg(test)]
+mod log_hygiene_tests {
+    use super::{DEFAULT_DEP_LOG_SUPPRESSION, robot_aware_log_directive};
+
+    #[test]
+    fn robot_mode_pins_filter_to_error() {
+        // Robot mode (without --verbose) must emit only errors regardless of
+        // --quiet, so dependency INFO/WARN can never corrupt a JSON stream.
+        assert_eq!(robot_aware_log_directive(true, false, false), Some("error"));
+        assert_eq!(robot_aware_log_directive(true, false, true), Some("error"));
+    }
+
+    #[test]
+    fn quiet_mode_pins_filter_to_error() {
+        assert_eq!(robot_aware_log_directive(false, false, true), Some("error"));
+    }
+
+    #[test]
+    fn verbose_overrides_robot_quiet_to_debug() {
+        assert_eq!(robot_aware_log_directive(true, true, false), Some("debug"));
+        assert_eq!(robot_aware_log_directive(false, true, true), Some("debug"));
+    }
+
+    #[test]
+    fn interactive_verbose_is_debug() {
+        assert_eq!(robot_aware_log_directive(false, true, false), Some("debug"));
+    }
+
+    #[test]
+    fn interactive_default_defers_to_env() {
+        // No fixed directive in plain human mode: caller consults RUST_LOG and
+        // falls back to the dependency-suppression list.
+        assert_eq!(robot_aware_log_directive(false, false, false), None);
+    }
+
+    #[test]
+    fn dep_suppression_quiets_fsqlite_targets() {
+        // The fallback list must keep frankensqlite telemetry below INFO so even
+        // human-mode stderr is not flooded.
+        assert!(DEFAULT_DEP_LOG_SUPPRESSION.starts_with("info"));
+        assert!(DEFAULT_DEP_LOG_SUPPRESSION.contains("fsqlite=warn"));
+        assert!(DEFAULT_DEP_LOG_SUPPRESSION.contains("fsqlite_core=warn"));
+    }
 }
 
 /// Returns true if the command is using robot/JSON output mode.
