@@ -79947,6 +79947,16 @@ fn run_view(
     context: usize,
     output_format: Option<RobotFormat>,
 ) -> CliResult<()> {
+    // Bounded-budget signal (uojcg.2.6 / 2.2): the report saw `cass view` fail
+    // under a 10s cap. View is a single bounded read (file fast-path or DB/archive
+    // fallback), so it sheds nothing; this reports whether the read exceeded its
+    // budget so an agent can fall back. Override via CASS_VIEW_BUDGET_MS.
+    let view_start = std::time::Instant::now();
+    let view_budget_ms = dotenvy::var("CASS_VIEW_BUDGET_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&ms| ms > 0)
+        .unwrap_or(10_000);
     if let Some(source_id) = source_id {
         validate_followup_source_id(source_id, "cass view")?;
     }
@@ -80083,6 +80093,7 @@ fn run_view(
             })
             .collect();
 
+        let view_elapsed_ms = u64::try_from(view_start.elapsed().as_millis()).unwrap_or(u64::MAX);
         let payload = serde_json::json!({
             "path": path.display().to_string(),
             "target_line": if highlight_line { Some(target_line) } else { None::<usize> },
