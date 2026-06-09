@@ -26,6 +26,7 @@ pub mod fleet_platform_compat;
 pub mod fleet_version_skew;
 pub mod ftui_harness;
 pub mod html_export;
+pub mod incident_discovery;
 pub mod indexer;
 pub mod lessons;
 pub mod model;
