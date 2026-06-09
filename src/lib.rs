@@ -34,6 +34,7 @@ pub mod pages;
 pub mod perf_evidence;
 pub mod policy_registry;
 pub mod privacy_exposure;
+pub mod proof_artifact;
 pub mod query_cost_planner;
 pub mod raw_mirror;
 pub mod release_verify;
