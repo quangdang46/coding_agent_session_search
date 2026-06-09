@@ -61093,6 +61093,206 @@ paths = ["~/.claude/projects"]
     }
 
     #[test]
+    fn doctor_remote_source_sync_report_advice_is_additive_and_preservation_safe() {
+        use crate::sources::config::{SourceDefinition, SourcesConfig, SyncSchedule};
+        use crate::sources::sync::{SourceSyncInfo, SyncResult, SyncStatus, current_unix_ms};
+
+        // A pruned-remote source with a present local mirror and existing archive
+        // evidence is the highest-risk shape for a doctor recommending destructive
+        // "repair": this is exactly where additive/preservation guarantees matter.
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = temp.path().join("cass-data");
+        let remotes_dir = data_dir.join("remotes");
+        std::fs::create_dir_all(&remotes_dir).expect("create remotes dir");
+        let config_path = temp.path().join("config/cass/sources.toml");
+        let mut source = SourceDefinition::ssh("retired-laptop", "user@retired-laptop");
+        source.paths = vec!["~/.codex/sessions".to_string()];
+        source.sync_schedule = SyncSchedule::Manual;
+        SourcesConfig {
+            sources: vec![source],
+            disabled_agents: Vec::new(),
+        }
+        .save_to(&config_path)
+        .expect("write fixture sources config");
+
+        // Local mirror has more readable files than the archive currently tracks,
+        // and the archive is ahead of the last (zero-file) durable sync — both the
+        // coverage-comparison gaps fire alongside the pruned-source failed-sync gap.
+        let mirror_dir = remotes_dir.join("retired-laptop").join("mirror");
+        std::fs::create_dir_all(&mirror_dir).expect("create mirror dir");
+        std::fs::write(mirror_dir.join("a.jsonl"), b"mirror bytes a\n").expect("mirror a");
+        std::fs::write(mirror_dir.join("b.jsonl"), b"mirror bytes b\n").expect("mirror b");
+
+        let mut sync_status = SyncStatus::default();
+        sync_status.set_info(
+            "retired-laptop",
+            SourceSyncInfo {
+                last_sync: Some(current_unix_ms()),
+                last_result: SyncResult::Failed(
+                    "remote source path does not exist; source pruned".to_string(),
+                ),
+                files_synced: 0,
+                bytes_transferred: 0,
+                duration_ms: 500,
+                consecutive_failures: 3,
+            },
+        );
+        sync_status.save(&data_dir).expect("write sync status");
+
+        let rows = vec![DoctorSourceInventoryDbRow {
+            provider: "codex".to_string(),
+            source_path: Some("/remote/codex/session.jsonl".to_string()),
+            source_id: "retired-laptop".to_string(),
+            origin_host: Some("user@retired-laptop".to_string()),
+            origin_kind: Some("ssh".to_string()),
+            conversation_count: 1,
+        }];
+        let source_inventory =
+            build_doctor_source_inventory_report(&data_dir, true, None, rows, Vec::new());
+
+        let report =
+            collect_doctor_remote_source_sync_report(&data_dir, &config_path, &source_inventory);
+
+        // Sanity: the high-risk shape actually produced the gaps we want to police.
+        assert_eq!(report.status, "warn");
+        let gap_kinds: Vec<&str> = report
+            .sync_gaps
+            .iter()
+            .map(|gap| gap.gap_kind.as_str())
+            .collect();
+        assert!(
+            gap_kinds.contains(&"remote_source_pruned"),
+            "pruned remote should surface a pruned gap: {gap_kinds:?}"
+        );
+        assert!(
+            gap_kinds.contains(&"local_archive_ahead_of_remote"),
+            "archive-ahead coverage gap should fire: {gap_kinds:?}"
+        );
+        assert!(
+            gap_kinds.contains(&"remote_copy_ahead_verified"),
+            "verified mirror coverage gap should fire: {gap_kinds:?}"
+        );
+
+        // Every user-facing string the doctor emits: gap evidence, gap advice,
+        // per-source reasons, and the recommended command set, plus the runtime
+        // summary advice. None of these may instruct destructive transfer.
+        let summary =
+            doctor_remote_source_sync_runtime_summary(&report, "status-inline-local-config", true);
+        let mut advice_strings: Vec<String> = Vec::new();
+        let mut all_strings: Vec<String> = Vec::new();
+        for gap in &report.sync_gaps {
+            advice_strings.push(gap.recommended_action.clone());
+            all_strings.push(gap.recommended_action.clone());
+            all_strings.extend(gap.evidence.iter().cloned());
+        }
+        for entry in &report.sources {
+            all_strings.extend(entry.reasons.iter().cloned());
+        }
+        advice_strings.extend(report.recommended_sync_commands.iter().cloned());
+        all_strings.extend(report.recommended_sync_commands.iter().cloned());
+        advice_strings.push(summary.recommended_action.clone());
+        all_strings.push(summary.recommended_action.clone());
+
+        // Destructive transfer flags / source-log mutation must never appear in any
+        // emitted string. rsync runs additive (no --delete); provider logs are never
+        // rewritten by a recommended action.
+        const DESTRUCTIVE_FLAGS: &[&str] = &[
+            "--delete",
+            "--delete-after",
+            "--delete-during",
+            "--delete-excluded",
+            "--remove-source-files",
+            "--remove-sent-files",
+        ];
+        // Tokenized command words (exact match against whitespace/punct-split tokens
+        // so benign words like "perform"/"transform"/"truncated" never false-match).
+        const DESTRUCTIVE_TOKENS: &[&str] = &["rm", "rmdir", "shred", "unlink", "wipe"];
+        const DESTRUCTIVE_PHRASES: &[&str] = &[
+            "delete the source",
+            "delete source log",
+            "remove the source",
+            "remove source log",
+            "prune the source log",
+            "rsync --delete",
+            "rm -rf",
+        ];
+        for s in &all_strings {
+            let lower = s.to_ascii_lowercase();
+            for flag in DESTRUCTIVE_FLAGS {
+                assert!(
+                    !lower.contains(flag),
+                    "doctor advice/evidence must not contain destructive flag {flag:?}: {s:?}"
+                );
+            }
+            for phrase in DESTRUCTIVE_PHRASES {
+                assert!(
+                    !lower.contains(phrase),
+                    "doctor advice/evidence must not contain destructive phrase {phrase:?}: {s:?}"
+                );
+            }
+            for token in lower.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')) {
+                assert!(
+                    !DESTRUCTIVE_TOKENS.contains(&token),
+                    "doctor advice/evidence must not invoke destructive command {token:?}: {s:?}"
+                );
+            }
+        }
+
+        // Recommended actions are either gated additive cass subcommands, inert
+        // status tokens, or human-readable preservation prose. They must never be a
+        // raw transport/shell invocation (which could carry destructive flags) and
+        // must never redirect output over a source log.
+        const RAW_INVOCATION_BINARIES: &[&str] =
+            &["rsync", "scp", "ssh", "sftp", "sh", "bash", "zsh", "rm", "rmdir", "shred"];
+        for advice in &advice_strings {
+            let trimmed = advice.trim();
+            if let Some(first_token) = trimmed.split_whitespace().next() {
+                assert!(
+                    !RAW_INVOCATION_BINARIES.contains(&first_token),
+                    "doctor advice must not be a raw transport/shell invocation: {advice:?}"
+                );
+            }
+            assert!(
+                !advice.contains(" > ") && !advice.contains(" >> "),
+                "doctor advice must not redirect output over a source log: {advice:?}"
+            );
+            // If advice ever mentions cleanup/prune, it must point at the explicit
+            // dry-run / fingerprinted flow rather than an automatic destructive repair.
+            let lower = advice.to_ascii_lowercase();
+            if lower.contains("prune") || lower.contains("cleanup") {
+                assert!(
+                    lower.contains("--dry-run") || lower.contains("fingerprint"),
+                    "cleanup/prune advice must point only at dry-run/fingerprinted flows: {advice:?}"
+                );
+            }
+        }
+
+        // Positive preservation signal: the pruned-source path explicitly tells the
+        // operator to preserve the archive and local mirror before any rebuild.
+        assert!(
+            report.sync_gaps.iter().any(|gap| gap
+                .evidence
+                .iter()
+                .any(|line| line.to_ascii_lowercase().contains("preserve"))),
+            "pruned/coverage gaps must carry an explicit preservation warning: {report:#?}"
+        );
+        // Recommended commands are present (the source needs attention) and are all
+        // additive cass sync/list/add invocations.
+        assert!(
+            !report.recommended_sync_commands.is_empty(),
+            "an actionable source should still receive additive recommendations"
+        );
+        assert!(
+            report
+                .recommended_sync_commands
+                .iter()
+                .all(|command| command.starts_with("cass sources ")),
+            "all recommended commands must be additive cass sources subcommands: {:?}",
+            report.recommended_sync_commands
+        );
+    }
+
+    #[test]
     fn doctor_remote_source_sync_report_warns_on_mirror_probe_errors() {
         use crate::sources::config::{SourceDefinition, SourcesConfig, SyncSchedule};
         use crate::sources::sync::{SourceSyncInfo, SyncResult, SyncStatus, current_unix_ms};
