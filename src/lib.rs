@@ -15,6 +15,7 @@ pub(crate) mod doctor_chokepoint;
 pub(crate) mod doctor_robot_docs;
 pub(crate) mod doctor_runs;
 pub(crate) mod doctor_undo;
+pub mod e2e_runner;
 pub mod encryption;
 pub mod evidence_bundle;
 pub mod explainability;
