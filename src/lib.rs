@@ -70986,6 +70986,17 @@ pub(crate) fn run_doctor_impl(
         .map(|incident| incident.incident_id.clone());
 
     let elapsed_ms = start.elapsed().as_millis() as u64;
+    // Bounded-budget signal for the robot surface (uojcg.2.2): the report saw
+    // `doctor check` exceed an 8s cap. Per-check internal timeouts already bound
+    // each probe, so doctor does not hang; this advertises whether the whole run
+    // exceeded its budget so an agent can fall back to a cheaper probe. Override
+    // via CASS_DOCTOR_BUDGET_MS.
+    let doctor_budget_ms = dotenvy::var("CASS_DOCTOR_BUDGET_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&ms| ms > 0)
+        .unwrap_or(8000);
+    let doctor_budget_timed_out = elapsed_ms > doctor_budget_ms;
     let locks = build_doctor_lock_diagnostics(&operation_state, doctor_now_ms());
     let slow_operations = build_doctor_slow_operations(&timing_spans);
     let timing_summary = build_doctor_timing_summary(&timing_spans, elapsed_ms);
@@ -71178,6 +71189,16 @@ pub(crate) fn run_doctor_impl(
             "locks": locks,
             "slow_operations": slow_operations,
             "timing_summary": timing_summary,
+            "budget": serde_json::json!({
+                "elapsed_ms": elapsed_ms,
+                "budget_ms": doctor_budget_ms,
+                "timed_out": doctor_budget_timed_out,
+                "recommended_next_probe": if doctor_budget_timed_out {
+                    serde_json::Value::String("cass status --json".to_string())
+                } else {
+                    serde_json::Value::Null
+                },
+            }),
             "retry_recommendation": retry_recommendation,
             "safe_auto_eligibility": safe_auto_eligibility,
             "primary_incident_id": primary_incident_id,
