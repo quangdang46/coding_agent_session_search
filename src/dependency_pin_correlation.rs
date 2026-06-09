@@ -345,7 +345,7 @@ mod tests {
         assert_eq!(value["pin_state"], "stale");
         assert_eq!(value["observed_local_rev"], "0000abc");
         assert_eq!(value["upstream_fix_possibly_missing"], true);
-        assert!(value["known_issue_ids"].as_array().unwrap().len() >= 1);
+        assert!(!value["known_issue_ids"].as_array().unwrap().is_empty());
         let back: PinAssessment = serde_json::from_value(value).unwrap();
         assert_eq!(back, a);
     }
