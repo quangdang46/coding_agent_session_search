@@ -1,0 +1,141 @@
+# Resilience Proof Recipe & Log-Completeness Gate
+
+Bead: `coding_agent_session_search-cass-fleet-resilience-20260608-uojcg.12.6`.
+
+The single named proof suite that implementers run **identically locally and
+in CI** for the resilience rollout, plus the log-completeness gate that makes
+the integrated resilience gate (`.11.5`) unable to pass by doing nothing.
+
+Pairs with:
+- **`.12.1`** — [`RESILIENCE_TEST_MATRIX.md`](RESILIENCE_TEST_MATRIX.md): which proof each family owes.
+- **`.12.3`** — `src/search/proof_log.rs`: the proof-log record + retention.
+- **`.12.4`** — `UNIT_TEST_HARNESS_REQUIREMENTS.md`: unit cases per family.
+- **`.12.5`** — `src/search/e2e_scenarios.rs`: the CI/live scenarios.
+- **`.12.2`** — `src/e2e_runner.rs`: the bounded runner.
+
+All commands follow `AGENTS.md`: remote compilation via `rch`, an isolated
+`CARGO_TARGET_DIR`, and `-D warnings` on clippy.
+
+## 0. Conventions
+
+- **Remote build/test:** prefix cargo with
+  `rch exec -- env CARGO_TARGET_DIR=<isolated-dir> ...`. Use a per-agent dir
+  (e.g. `/tmp/cass-check-target`) so concurrent agents don't collide.
+- **Success signal:** grep the output for `Finished` and the
+  `test result: ok.` line — do **not** trust a piped exit code (a `| tail`
+  pipeline masks cargo's status).
+- **Format:** edition 2024 (`rustfmt --edition 2024 <file>` /
+  `cargo fmt --check`).
+
+## 1. Compile / lint / format gate (after substantive code changes)
+
+```sh
+# Full compile of every target (lib, tests, benches):
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target cargo check --all-targets
+# Lint, warnings-as-errors, crate-wide:
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target cargo clippy --all-targets -- -D warnings
+# Format check:
+cargo fmt --check
+# Bug scan on changed files (exit 0 required; #[cfg(test)] helper panics and
+# intentional fake-secret fixtures are acceptable, triaged, criticals):
+ubs <changed-files> --ci
+```
+
+## 2. Targeted unit/integration tests by feature family
+
+Run the family you touched (fast; isolated target dir optional). The
+resilience contract cores live under `src/search/` and `src/indexer/`:
+
+```sh
+# Readiness & archive-risk (.1.x):           cargo test --lib search::readiness
+# Readiness fixtures (.1.5):                  cargo test --lib search::readiness_fixtures
+# Liveness: progress/stall (.4.1):           cargo test --lib search::progress_contract
+# Liveness: salvage ledger (.4.2):           cargo test --lib search::salvage_ledger
+# Liveness: watch recovery (.4.3):           cargo test --lib search::watch_recovery
+# Liveness: watch-exit envelope (.4.4):      cargo test --lib search::watch_exit_envelope
+# Liveness fixtures (.4.5):                   cargo test --lib search::liveness_fixtures
+# Semantic readiness (.5.1):                  cargo test --lib search::semantic_readiness
+# Semantic progress sink (.5.2):              cargo test --lib indexer::semantic_progress
+# Semantic publish safety (.5.3):             cargo test --lib search::semantic_publish_safety
+# Workspace zero-result (.7.1):               cargo test --lib search::zero_result_diagnosis
+# Source provenance (.7.2):                   cargo test --lib search::source_provenance
+# Drill-down (.7.3):                          cargo test --lib search::drill_down
+# Workspace/source fixtures (.7.4):           cargo test --lib search::workspace_source_fixtures
+# Quarantine compat (.3.4):                   cargo test --lib indexer::quarantine
+# Incident categories (.10.1):                cargo test --lib search::incident_categories
+# Incident redaction (.10.5):                 cargo test --lib search::incident_redaction
+# Storage integrity (.14.1):                  cargo test --lib search::storage_integrity
+# Proof-log schema (.12.3):                   cargo test --lib search::proof_log
+# Regression corpus (.11.2):                  cargo test --lib search::regression_corpus
+# Recovery journeys (.13.1):                  cargo test --lib search::recovery_journeys
+# E2E scenarios (.12.5):                      cargo test --lib search::e2e_scenarios
+```
+
+Each prefixed with `rch exec -- env CARGO_TARGET_DIR=<dir>`. A green run is
+`test result: ok. N passed; 0 failed`.
+
+## 3. Golden update flow
+
+Golden artifacts (pinned JSON/JSONL wire forms) change **only** through a
+reviewed run:
+
+```sh
+UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target cargo test <golden-target>
+```
+
+A `UPDATE_GOLDENS=1` diff must be reviewed as an intentional contract change
+(it is a wire-format break otherwise). The default (unset) run asserts
+goldens unchanged.
+
+## 4. Shared E2E runner (quick / full)
+
+The `.12.2` runner executes the `.12.5` scenarios against the real `cass`
+binary into an artifact directory under a bounded timeout, emitting one
+`.12.3` `ProofLogRecord` per command:
+
+```sh
+# quick: the CI scenario set (no live host) — the default gate.
+cass-e2e-runner --mode quick --artifacts <dir> --timeout-ms <budget>
+# full: quick + opt-in live-host scenarios (operator only; never CI-required).
+cass-e2e-runner --mode full --live-hosts <hosts> --artifacts <dir>
+```
+
+`--mode quick` runs exactly `e2e_scenarios::ci_scenarios()` (every named
+fleet/archive state, deterministically, no live host). Live scenarios
+(`requires_live_host=true`) run only under `--mode full`.
+
+## 5. Log-completeness gate (the integrated gate cannot pass by doing nothing)
+
+After a runner pass, the gate asserts the artifact directory's
+`ProofLogRecord`s are **complete**, not merely "no failures observed":
+
+1. **Coverage:** the set of `scenario_id`s with a record equals
+   `e2e_scenarios::ci_scenarios()` (quick) — a missing scenario is a gate
+   failure, not a silent skip.
+2. **No empty pass:** the record count is ≥ the expected scenario×command
+   count; zero records fails the gate (cannot pass by doing nothing).
+3. **Outcome integrity:** every record's `outcome` is `passed`. Any
+   `timed_out_partial`, `stale_artifact_reused`, `invalid_json`,
+   `did_not_run`, or `failed` fails the gate — these are distinguished by the
+   `.12.3` schema precisely so a timeout/stale/skip can never read as a pass.
+4. **Freshness:** records are from this run (`finished_at_ms` within the run
+   window), not a reused stale artifact.
+5. **Redaction:** `RetentionPolicy::is_redaction_safe` holds for every
+   retained record (no secret-bearing `sanitized_env` keys).
+
+A closure report cites the artifact directory + the per-scenario
+`ProofLogRecord` outcomes; "tests pass" prose without cited artifacts does
+not satisfy the closure checklist in `RESILIENCE_TEST_MATRIX.md`.
+
+## 6. The named suite (one command surface)
+
+Implementers and CI invoke the same logical suite:
+
+1. §1 compile/lint/format gate.
+2. §2 targeted family tests for changed families (or all, in CI).
+3. §4 `--mode quick` E2E runner into an artifact dir.
+4. §5 log-completeness gate over the artifacts.
+
+Local and CI differ only in scope (`--mode quick` vs a nightly `--mode full`)
+and target-dir isolation — never in the assertions. This is the recipe a
+closure must cite by exact command + artifact path.
