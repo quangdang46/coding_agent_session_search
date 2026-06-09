@@ -44,6 +44,7 @@ pub(crate) mod proof_log;
 pub mod query;
 pub(crate) mod readiness;
 pub(crate) mod readiness_fixtures;
+pub(crate) mod readiness_projection;
 pub(crate) mod recovery_journeys;
 pub(crate) mod regression_corpus;
 pub mod reranker;
