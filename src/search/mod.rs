@@ -38,6 +38,7 @@ pub mod model_manager;
 pub mod pack_planner;
 pub mod policy;
 pub(crate) mod progress_contract;
+pub(crate) mod proof_log;
 pub mod query;
 pub(crate) mod readiness;
 pub(crate) mod readiness_fixtures;
