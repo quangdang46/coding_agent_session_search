@@ -80,6 +80,7 @@ Updated: 2026-05-09
 - Use `--fields minimal` during wide scans; fetch details with `cass view` if needed.
 - Respect `_warning`, `index_freshness.stale`, and health/status `recommended_action`; run `cass index --full` for first setup or explicit recommended refresh, not as a blind repair loop.
 - Treat lexical fallback in default hybrid search as expected when semantic assets are not ready. Escalate only when lexical itself is unavailable after the recommended rebuild path.
+- A long semantic backfill is not stalled just because it is quiet. Set `CASS_SEMANTIC_PROGRESS_JSONL=<path>` before the run and tail that file for phase/sub-phase telemetry: one JSON line per event (`schema":"cass.semantic.progress.v1"`, `event`, `phase`, `sub_phase`, `ts_ms`, `elapsed_ms`, `tier`, `embedder_id`, plus `rows_processed`/`bytes`/`error`). Events run `selection_*` → `packet_replay_*` → `embed_batch_*` → `staging_write_*` → `checkpoint_save_*` → `publish_*` → `complete`, with `error`/`cancelled` on failure. The sink is best-effort: a write failure never aborts the backfill, so absence of recent lines means tail the process, not that work stopped.
 - Store `_meta.next_cursor` for long result sets; avoid re-running the base query.
 - Include `--request-id` to correlate retries and logs.
 - Clamp limits to published caps (see `cass capabilities --json`).
