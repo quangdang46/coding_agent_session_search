@@ -3105,6 +3105,77 @@ fn swarm_replay_fixture_missing_source_is_partial() -> Result<(), Box<dyn Error>
 }
 
 #[test]
+fn swarm_macros_healthy_case_is_ready_and_valid() -> Result<(), Box<dyn Error>> {
+    let (_tmp, fixture_path) = write_swarm_evidence_fixture(
+        "macros-healthy",
+        json!({
+            "workflow_macros": {
+                "macro": "create-support-capsule",
+                "facts": {"db_present": true}
+            }
+        }),
+    )?;
+    let output = render_swarm_macros_fixture(&fixture_path)?;
+
+    require_value_eq(
+        get_path(&output, &["schema_version"]),
+        json!("cass.swarm.workflow_macros.v1"),
+        "schema version",
+    )?;
+    require_value_eq(get_path(&output, &["status"]), json!("ok"), "status")?;
+    require_value_eq(
+        get_path(&output, &["macros", "0", "readiness"]),
+        json!("ready"),
+        "macro readiness",
+    )?;
+    require_value_eq(
+        get_path(&output, &["summary", "invalid_count"]),
+        json!(0),
+        "no invalid macros",
+    )?;
+    require_value_eq(
+        get_path(&output, &["mutation_contract", "apply_mode"]),
+        json!(false),
+        "advisory only",
+    )?;
+    // Registry has at least six macros and no bare cass/bv or destructive recipe.
+    let registry = get_path(&output, &["summary", "registry_size"]).and_then(Value::as_u64);
+    require(registry.is_some_and(|n| n >= 6), "registry must have >= 6 macros")?;
+    // Scope the bare-command lint to the macro recipes (the envelope's
+    // guided_workflow.surface legitimately names the cass swarm macros command).
+    let text = serde_json::to_string(&output["macros"])?;
+    require(!text.contains("cass "), "macros must not embed bare `cass ` examples")?;
+    require(!text.contains("rm -rf"), "macros must not embed destructive recipes")?;
+    Ok(())
+}
+
+#[test]
+fn swarm_macros_blocked_case_lists_missing_facts() -> Result<(), Box<dyn Error>> {
+    let (_tmp, fixture_path) = write_swarm_evidence_fixture(
+        "macros-blocked",
+        json!({
+            "workflow_macros": {
+                "macro": "prepare-release",
+                "facts": {"git_clean_or_known": true}
+            }
+        }),
+    )?;
+    let output = render_swarm_macros_fixture(&fixture_path)?;
+    require_value_eq(get_path(&output, &["status"]), json!("warning"), "status")?;
+    require_value_eq(
+        get_path(&output, &["macros", "0", "readiness"]),
+        json!("blocked"),
+        "macro readiness",
+    )?;
+    let missing = get_path(&output, &["macros", "0", "missing_facts"]).and_then(Value::as_array);
+    require(
+        missing.is_some_and(|m| m.iter().any(|f| f == &json!("version_bumped"))),
+        "blocked macro must list the missing preflight fact",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn swarm_status_large_fixture_fast_gate_names_budget_sections() -> Result<(), Box<dyn Error>> {
     let scale = SyntheticSwarmScale {
         ready_count: 850,
@@ -4094,6 +4165,18 @@ fn render_swarm_replay_fixture_fixture(fixture_path: &Path) -> Result<Value, Box
             source,
         ),
     )
+}
+
+fn render_swarm_macros_fixture(fixture_path: &Path) -> Result<Value, Box<dyn Error>> {
+    let adapter_set =
+        coding_agent_search::swarm_status::FixtureSwarmAdapterSet::from_fixture_path(fixture_path)?;
+    let source = adapter_set
+        .input()
+        .source_value(coding_agent_search::swarm_status::SwarmProviderName::WorkflowMacros);
+    Ok(coding_agent_search::workflow_macros::render_workflow_macros_fixture(
+        adapter_set.input().fixture_id(),
+        source,
+    ))
 }
 
 fn read_json(path: PathBuf) -> Value {

@@ -41,6 +41,7 @@ pub mod robot_budget_envelope;
 pub mod root_cause_taxonomy;
 pub mod search;
 pub mod source_doctor_health;
+pub mod source_onboarding;
 pub mod sources;
 pub mod storage;
 pub mod swarm_replay_fixture;
@@ -50,6 +51,7 @@ pub mod tui_asciicast;
 pub mod ui;
 pub mod update_check;
 pub mod workflow_analytics;
+pub mod workflow_macros;
 
 use anyhow::Result;
 use base64::prelude::*;
@@ -1633,6 +1635,24 @@ pub enum SwarmCommand {
     },
     /// Generate a scrubbed, deterministic replay fixture from a raw swarm timeline.
     ReplayFixture {
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
+
+        /// Read provider input from a single swarm fixture file.
+        #[arg(long, value_hint = ValueHint::FilePath, conflicts_with = "fixture_dir")]
+        fixture: Option<PathBuf>,
+
+        /// Read provider input from a swarm fixture directory.
+        #[arg(long, value_hint = ValueHint::DirPath)]
+        fixture_dir: Option<PathBuf>,
+
+        /// Fixture id within --fixture-dir. Defaults to healthy for the pinned command shape.
+        #[arg(long, default_value = "healthy")]
+        fixture_id: String,
+    },
+    /// List advisory workflow macros for repeatable operator journeys.
+    Macros {
         /// Output as JSON (`--robot` also works)
         #[arg(long, visible_alias = "robot")]
         json: bool,
@@ -7779,6 +7799,18 @@ fn run_swarm_command(cmd: SwarmCommand, cli: &Cli) -> CliResult<()> {
             fixture_dir.as_deref(),
             &fixture_id,
         ),
+        SwarmCommand::Macros {
+            json,
+            fixture,
+            fixture_dir,
+            fixture_id,
+        } => run_swarm_macros(
+            cli,
+            json,
+            fixture.as_deref(),
+            fixture_dir.as_deref(),
+            &fixture_id,
+        ),
     }
 }
 
@@ -8479,6 +8511,63 @@ fn run_swarm_replay_fixture(
             .and_then(serde_json::Value::as_u64)
         {
             println!("Events: {count}");
+        }
+    }
+
+    Ok(())
+}
+
+fn run_swarm_macros(
+    cli: &Cli,
+    json: bool,
+    fixture: Option<&Path>,
+    fixture_dir: Option<&Path>,
+    fixture_id: &str,
+) -> CliResult<()> {
+    let structured_format = resolve_subcommand_structured_format(cli, json).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+
+    let payload = if let Some(path) = resolve_swarm_fixture_path(fixture, fixture_dir, fixture_id)?
+    {
+        let set = crate::swarm_status::FixtureSwarmAdapterSet::from_fixture_path(&path).map_err(
+            |err| CliError {
+                code: 10,
+                kind: CliErrorKind::Config.kind_str(),
+                message: err.to_string(),
+                hint: Some("Use --fixture <file> or --fixture-dir <dir> --fixture-id <id> with a checked-in swarm fixture.".to_string()),
+                retryable: false,
+            },
+        )?;
+        let source = set
+            .input()
+            .source_value(crate::swarm_status::SwarmProviderName::WorkflowMacros);
+        crate::workflow_macros::render_workflow_macros_fixture(set.input().fixture_id(), source)
+    } else {
+        crate::workflow_macros::render_workflow_macros_live()
+    };
+
+    if let Some(fmt) = structured_format {
+        output_structured_value(payload, fmt)?;
+    } else {
+        println!(
+            "Swarm macros: {}",
+            payload
+                .get("summary")
+                .and_then(|summary| summary.get("recommended_action"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+        );
+        if let Some(count) = payload
+            .get("summary")
+            .and_then(|summary| summary.get("macro_count"))
+            .and_then(serde_json::Value::as_u64)
+        {
+            println!("Macros: {count}");
         }
     }
 
@@ -17981,6 +18070,9 @@ fn is_robot_mode(command: &Commands, cli: &Cli) -> bool {
             resolve_subcommand_structured_format(cli, *json).is_some()
         }
         Commands::Swarm(SwarmCommand::ReplayFixture { json, .. }) => {
+            resolve_subcommand_structured_format(cli, *json).is_some()
+        }
+        Commands::Swarm(SwarmCommand::Macros { json, .. }) => {
             resolve_subcommand_structured_format(cli, *json).is_some()
         }
         Commands::Models(ModelsCommand::Status { json }) => {
@@ -89451,6 +89543,9 @@ struct DiagnosticCheck {
 #[derive(serde::Serialize)]
 struct SourceDiagnostics {
     source_id: String,
+    /// Bounded fleet-doctor host report (bead uojcg.8.2): reachability/transport
+    /// state + likely root cause + safe next command, in the 6.1 schema.
+    host_report: crate::fleet_doctor_schema::HostDoctorReport,
     checks: Vec<DiagnosticCheck>,
     passed: usize,
     warnings: usize,
@@ -89517,6 +89612,7 @@ fn run_sources_doctor(
     let mut all_diagnostics = Vec::new();
 
     for source in sources_to_check {
+        let source_start = std::time::Instant::now();
         let mut checks = Vec::new();
 
         // Check 1: SSH connectivity
@@ -89551,8 +89647,31 @@ fn run_sources_doctor(
         let warnings = checks.iter().filter(|c| c.status == "warn").count();
         let failed = checks.iter().filter(|c| c.status == "fail").count();
 
+        // Bead uojcg.8.2: project the per-source checks into the bounded
+        // fleet-doctor HostDoctorReport (6.1 schema) so reachability/transport
+        // state, a likely root cause, and a safe next command are first-class and
+        // unreachable hosts are never silently omitted. (Remote platform/version/
+        // index/sync probing is tracked for the remaining 8.2 states.)
+        let source_checks: Vec<crate::fleet_doctor_schema::SourceCheck> = checks
+            .iter()
+            .map(|c| {
+                crate::fleet_doctor_schema::SourceCheck::new(
+                    c.name.clone(),
+                    c.status.clone(),
+                    c.remediation.clone(),
+                )
+            })
+            .collect();
+        let host_report = crate::fleet_doctor_schema::host_report_from_checks(
+            &source.name,
+            crate::fleet_doctor_schema::Platform::linux_x86_64(),
+            u64::try_from(source_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+            &source_checks,
+        );
+
         all_diagnostics.push(SourceDiagnostics {
             source_id: source.name.clone(),
+            host_report,
             checks,
             passed,
             warnings,

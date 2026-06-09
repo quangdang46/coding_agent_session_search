@@ -32,6 +32,7 @@ pub enum SwarmProviderName {
     ContextPack,
     WorkflowAnalytics,
     ReplayFixture,
+    WorkflowMacros,
 }
 
 impl SwarmProviderName {
@@ -51,6 +52,7 @@ impl SwarmProviderName {
             Self::ContextPack => "context_pack",
             Self::WorkflowAnalytics => "workflow_analytics",
             Self::ReplayFixture => "replay_fixture",
+            Self::WorkflowMacros => "workflow_macros",
         }
     }
 
@@ -88,6 +90,7 @@ pub const OPTIONAL_SWARM_SOURCE_PROVIDERS: &[SwarmProviderName] = &[
     SwarmProviderName::ContextPack,
     SwarmProviderName::WorkflowAnalytics,
     SwarmProviderName::ReplayFixture,
+    SwarmProviderName::WorkflowMacros,
 ];
 
 /// Every fixtureable provider named by the swarm status contract.
@@ -105,6 +108,7 @@ pub const ALL_SWARM_SOURCE_PROVIDERS: &[SwarmProviderName] = &[
     SwarmProviderName::ContextPack,
     SwarmProviderName::WorkflowAnalytics,
     SwarmProviderName::ReplayFixture,
+    SwarmProviderName::WorkflowMacros,
 ];
 
 /// Provider availability normalized for robot output.
