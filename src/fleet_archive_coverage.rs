@@ -38,6 +38,9 @@ pub enum RootKind {
     Claude,
     Codex,
     Gemini,
+    /// Antigravity (agy) — successor to the Gemini CLI; shares the ~/.gemini
+    /// parent but is its own session-bearing agent.
+    Antigravity,
     /// A CASS data/workspace directory (the controller's own state).
     CassWorkspace,
     /// A source/dependency code workspace that is noise for session coverage.
@@ -53,6 +56,7 @@ impl RootKind {
             RootKind::Claude => "claude",
             RootKind::Codex => "codex",
             RootKind::Gemini => "gemini",
+            RootKind::Antigravity => "antigravity",
             RootKind::CassWorkspace => "cass-workspace",
             RootKind::DependencyWorkspace => "dependency-workspace",
             RootKind::Other => "other",
@@ -62,7 +66,10 @@ impl RootKind {
     /// `true` for roots that carry real agent session history and should count
     /// toward coverage (Claude/Codex/Gemini).
     pub const fn is_session_bearing(self) -> bool {
-        matches!(self, RootKind::Claude | RootKind::Codex | RootKind::Gemini)
+        matches!(
+            self,
+            RootKind::Claude | RootKind::Codex | RootKind::Gemini | RootKind::Antigravity
+        )
     }
 }
 
@@ -73,6 +80,7 @@ pub fn classify_root_kind(path: &str, agent: Option<&str>) -> RootKind {
         match agent.to_ascii_lowercase().as_str() {
             "claude" => return RootKind::Claude,
             "codex" => return RootKind::Codex,
+            "antigravity" => return RootKind::Antigravity,
             "gemini" => return RootKind::Gemini,
             _ => {}
         }
@@ -82,6 +90,9 @@ pub fn classify_root_kind(path: &str, agent: Option<&str>) -> RootKind {
         RootKind::Claude
     } else if lower.contains(".codex") || lower.contains("/codex") {
         RootKind::Codex
+    } else if lower.contains("antigravity-cli") || lower.contains("antigravity") {
+        // Must precede the .gemini check: agy lives under ~/.gemini/antigravity-cli.
+        RootKind::Antigravity
     } else if lower.contains(".gemini") || lower.contains("/gemini") {
         RootKind::Gemini
     } else if lower.contains(".cass") || lower.contains("coding_agent_session_search") {
@@ -427,6 +438,14 @@ mod tests {
         assert_eq!(classify_root_kind("/whatever", Some("Claude")), RootKind::Claude);
         assert_eq!(classify_root_kind("/home/u/.codex/sessions", None), RootKind::Codex);
         assert_eq!(classify_root_kind("/home/u/.gemini", None), RootKind::Gemini);
+        assert_eq!(
+            classify_root_kind("/home/u/.gemini/antigravity-cli", None),
+            RootKind::Antigravity
+        );
+        assert_eq!(
+            classify_root_kind("/x", Some("antigravity")),
+            RootKind::Antigravity
+        );
         assert_eq!(classify_root_kind("/home/u/.cass", None), RootKind::CassWorkspace);
         assert_eq!(
             classify_root_kind("/data/projects/frankensqlite", None),
@@ -553,6 +572,7 @@ mod tests {
             RootKind::Claude,
             RootKind::Codex,
             RootKind::Gemini,
+            RootKind::Antigravity,
             RootKind::CassWorkspace,
             RootKind::DependencyWorkspace,
             RootKind::Other,

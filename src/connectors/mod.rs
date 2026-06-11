@@ -200,6 +200,7 @@ fn is_codex_rollout_file(path: &Path) -> bool {
 // Connector re-export stubs — each module file re-exports from FAD.
 pub mod aider;
 pub mod amp;
+pub mod antigravity;
 pub mod chatgpt;
 pub mod claude_code;
 pub mod clawdbot;

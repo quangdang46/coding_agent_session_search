@@ -48,12 +48,13 @@ use crate::connectors::NormalizedConversation;
 #[cfg(test)]
 use crate::connectors::NormalizedMessage;
 use crate::connectors::{
-    Connector, ScanRoot, aider::AiderConnector, amp::AmpConnector, chatgpt::ChatGptConnector,
-    claude_code::ClaudeCodeConnector, clawdbot::ClawdbotConnector, cline::ClineConnector,
-    codex::CodexConnector, copilot::CopilotConnector, copilot_cli::CopilotCliConnector,
-    cursor::CursorConnector, factory::FactoryConnector, gemini::GeminiConnector,
-    kimi::KimiConnector, openclaw::OpenClawConnector, opencode::OpenCodeConnector,
-    pi_agent::PiAgentConnector, qwen::QwenConnector, vibe::VibeConnector,
+    Connector, ScanRoot, aider::AiderConnector, amp::AmpConnector,
+    antigravity::AntigravityConnector, chatgpt::ChatGptConnector, claude_code::ClaudeCodeConnector,
+    clawdbot::ClawdbotConnector, cline::ClineConnector, codex::CodexConnector,
+    copilot::CopilotConnector, copilot_cli::CopilotCliConnector, cursor::CursorConnector,
+    factory::FactoryConnector, gemini::GeminiConnector, kimi::KimiConnector,
+    openclaw::OpenClawConnector, opencode::OpenCodeConnector, pi_agent::PiAgentConnector,
+    qwen::QwenConnector, vibe::VibeConnector,
 };
 use crate::model::conversation_packet::{
     CONVERSATION_PACKET_VERSION, ConversationPacket, ConversationPacketHashes,
@@ -21233,6 +21234,7 @@ impl ConnectorKind {
             "codex" => Some(Self::Codex),
             "cline" => Some(Self::Cline),
             "gemini" => Some(Self::Gemini),
+            "antigravity" => Some(Self::Antigravity),
             "claude" => Some(Self::Claude),
             "clawdbot" => Some(Self::Clawdbot),
             "vibe" => Some(Self::Vibe),
@@ -21257,6 +21259,7 @@ impl ConnectorKind {
             Self::Codex => "codex",
             Self::Cline => "cline",
             Self::Gemini => "gemini",
+            Self::Antigravity => "antigravity",
             Self::Claude => "claude",
             Self::Clawdbot => "clawdbot",
             Self::Vibe => "vibe",
@@ -21282,6 +21285,7 @@ impl ConnectorKind {
             Self::Codex => Box::new(CodexConnector::new()),
             Self::Cline => Box::new(ClineConnector::new()),
             Self::Gemini => Box::new(GeminiConnector::new()),
+            Self::Antigravity => Box::new(AntigravityConnector::new()),
             Self::Claude => Box::new(ClaudeCodeConnector::new()),
             Self::Clawdbot => Box::new(ClawdbotConnector::new()),
             Self::Vibe => Box::new(VibeConnector::new()),
@@ -22001,6 +22005,8 @@ enum ConnectorKind {
     Cline,
     #[serde(rename = "gm", alias = "Gemini")]
     Gemini,
+    #[serde(rename = "ag", alias = "Antigravity")]
+    Antigravity,
     #[serde(rename = "cd", alias = "Claude")]
     Claude,
     #[serde(rename = "cb", alias = "Clawdbot")]
