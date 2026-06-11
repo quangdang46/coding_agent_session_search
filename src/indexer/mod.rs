@@ -15331,8 +15331,15 @@ fn canonical_archive_unhealthy_for_index_error(db_path: &Path, reason: &str) -> 
     anyhow::anyhow!(
         "canonical cass archive at {} is not safe for indexing: {reason}. \
          cass index will not replace or truncate the SQLite source of truth. \
-         Run 'cass doctor check --json' to inspect the archive, then use the \
-         doctor repair plan or recover from an explicit backup before indexing again.",
+         Run 'cass doctor check --json' to inspect the archive. If the canonical \
+         rows are readable but a derived/FTS5 structure is corrupt, run \
+         'cass doctor --rebuild-canonical-fts --yes' to drop and rebuild the FTS5 \
+         shadow tables in place. If the archive cannot be opened, recover the \
+         source tree from cass's own preserved events with \
+         'cass doctor --recover-from-archive <DIR>' (rebuilds source JSONL from the \
+         extra_json/extra_bin envelopes — no stock-sqlite .recover needed), then \
+         re-ingest with 'cass index --full'. An explicit backup restore via \
+         'cass doctor backups restore <id>' also remains available.",
         db_path.display()
     )
 }

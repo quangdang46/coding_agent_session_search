@@ -12,6 +12,7 @@ pub mod dependency_drift;
 pub mod dependency_pin_correlation;
 pub mod doctor;
 pub(crate) mod doctor_chokepoint;
+pub mod doctor_recover;
 pub(crate) mod doctor_robot_docs;
 pub(crate) mod doctor_runs;
 pub(crate) mod doctor_undo;
@@ -927,6 +928,28 @@ pub enum Commands {
         /// env_vars[] — in one envelope. Read-only.
         #[arg(long, default_value_t = false, hide = true)]
         emit_capabilities: bool,
+
+        // --- #285 corrupt-archive recovery surfaces ---
+        /// Rebuild the source JSONL tree from the canonical archive's preserved
+        /// `extra_json`/`extra_bin` events into `<DIR>`, so a corrupt archive
+        /// can be re-ingested from cass's own data with `cass index --full`
+        /// (no stock-sqlite `.recover` needed). Opens the archive read-only.
+        #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath)]
+        recover_from_archive: Option<PathBuf>,
+
+        /// Drop and rebuild the canonical FTS5 shadow tables in place. Use when
+        /// the canonical messages/conversations rows are intact but a derived
+        /// FTS5 structure (e.g. fts_messages_docsize) is corrupt. Requires
+        /// `--yes`; never modifies canonical rows.
+        #[arg(long, default_value_t = false)]
+        rebuild_canonical_fts: bool,
+
+        /// Quarantine interrupted `raw_mirror_capture` staging artifacts that
+        /// block doctor mutation, instead of forcing a manual `rm` inside the
+        /// data dir. Requires `--yes`; artifacts are renamed into a quarantine
+        /// dir, never deleted.
+        #[arg(long, default_value_t = false)]
+        cleanup_interrupted_artifacts: bool,
     },
     /// Find related sessions for a given source path
     Context {
@@ -4526,6 +4549,9 @@ fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
         "fixture-id",
         "repair",
         "cleanup",
+        "recover-from-archive",
+        "rebuild-canonical-fts",
+        "cleanup-interrupted-artifacts",
         "archive-scan",
         "archive-normalize",
         "check",
@@ -4985,6 +5011,44 @@ fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
         rest.insert(1, "--cleanup".to_string());
         corrections.push(
             "'doctor cleanup' → 'doctor --cleanup' (fingerprinted doctor cleanup surface)".into(),
+        );
+    } else if rest
+        .first()
+        .is_some_and(|arg| arg.eq_ignore_ascii_case("doctor"))
+        && rest.get(1).is_some_and(|arg| {
+            arg.eq_ignore_ascii_case("recover-from-archive")
+                || arg.eq_ignore_ascii_case("recover_from_archive")
+                || arg.eq_ignore_ascii_case("recover-from-canonical-events")
+        })
+    {
+        // #285: 'doctor recover-from-archive <DIR>' → '--recover-from-archive <DIR>'.
+        // The next bare positional (if any) is the recovery target dir.
+        let target = rest.get(2).filter(|arg| !arg.starts_with('-')).cloned();
+        if target.is_some() {
+            rest.remove(2);
+        }
+        rest.remove(1);
+        rest.insert(1, "--recover-from-archive".to_string());
+        if let Some(target) = target {
+            rest.insert(2, target);
+        }
+        corrections.push(
+            "'doctor recover-from-archive <DIR>' → 'doctor --recover-from-archive <DIR>' (rebuild source JSONL from preserved archive events)"
+                .into(),
+        );
+    } else if rest
+        .first()
+        .is_some_and(|arg| arg.eq_ignore_ascii_case("doctor"))
+        && rest.get(1).is_some_and(|arg| {
+            arg.eq_ignore_ascii_case("rebuild-canonical-fts")
+                || arg.eq_ignore_ascii_case("rebuild_canonical_fts")
+        })
+    {
+        rest.remove(1);
+        rest.insert(1, "--rebuild-canonical-fts".to_string());
+        corrections.push(
+            "'doctor rebuild-canonical-fts' → 'doctor --rebuild-canonical-fts' (drop+rebuild canonical FTS5 shadow)"
+                .into(),
         );
     } else if rest
         .first()
@@ -7075,6 +7139,9 @@ async fn execute_cli(
                     watch_iterations,
                     explain,
                     emit_capabilities,
+                    recover_from_archive,
+                    rebuild_canonical_fts,
+                    cleanup_interrupted_artifacts,
                 } => {
                     let structured_format = resolve_subcommand_structured_format(cli, json);
                     // Pass-12 fix (P2): the new pass-1+ flags have no clap-level
@@ -7119,6 +7186,39 @@ async fn execute_cli(
                     // World-class-doctor pass-8: `cass doctor --emit-capabilities`.
                     if emit_capabilities {
                         run_doctor_emit_capabilities(structured_format)?;
+                        return Ok(());
+                    }
+                    // #285: `cass doctor --recover-from-archive <DIR>` — rebuild
+                    // the source JSONL tree from the canonical archive's
+                    // preserved events so a corrupt archive can be re-ingested.
+                    if let Some(target_dir) = recover_from_archive {
+                        doctor_recover::run_doctor_recover_from_archive(
+                            data_dir,
+                            cli.db.clone(),
+                            target_dir,
+                            structured_format,
+                        )?;
+                        return Ok(());
+                    }
+                    // #285: `cass doctor --rebuild-canonical-fts --yes` — drop
+                    // and rebuild the canonical FTS5 shadow tables in place.
+                    if rebuild_canonical_fts {
+                        doctor_recover::run_doctor_rebuild_canonical_fts(
+                            data_dir,
+                            cli.db.clone(),
+                            yes,
+                            structured_format,
+                        )?;
+                        return Ok(());
+                    }
+                    // #285: `cass doctor --cleanup-interrupted-artifacts --yes`
+                    // — quarantine interrupted raw_mirror_capture artifacts.
+                    if cleanup_interrupted_artifacts {
+                        doctor_recover::run_doctor_cleanup_interrupted_artifacts(
+                            data_dir,
+                            yes,
+                            structured_format,
+                        )?;
                         return Ok(());
                     }
                     // World-class-doctor pass-2: read-only `cass doctor --ls`.

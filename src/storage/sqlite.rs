@@ -2871,6 +2871,24 @@ fn historical_raw_json(value: &serde_json::Value) -> Option<&str> {
     }
 }
 
+/// Render a single preserved message envelope back into one source JSONL line.
+///
+/// `extra_json` here is the value already decoded by
+/// [`franken_read_message_extra_compat`] (msgpack `extra_bin` takes precedence
+/// over the `extra_json` text column). When the envelope is the historical
+/// raw-line wrapper, the verbatim original line is returned unchanged; when it
+/// is a decoded event object, it is re-serialized as compact JSON; a `null`
+/// envelope (no preserved event) yields `None`.
+pub(crate) fn message_extra_to_source_jsonl_line(extra_json: &serde_json::Value) -> Option<String> {
+    if let Some(raw) = historical_raw_json(extra_json) {
+        return Some(raw.to_string());
+    }
+    if extra_json.is_null() {
+        return None;
+    }
+    serde_json::to_string(extra_json).ok()
+}
+
 fn parse_historical_json_column(value: Option<String>) -> serde_json::Value {
     match value {
         Some(raw) if raw.trim().is_empty() => serde_json::Value::Null,
@@ -8068,6 +8086,35 @@ impl FrankenStorage {
                 Err(err)
             })
             .with_context(|| format!("fetching messages for conversation {conversation_id}"))
+    }
+
+    /// Reconstruct the source JSONL lines for a single conversation from the
+    /// canonical archive's preserved per-message envelopes.
+    ///
+    /// cass stores the verbatim original source event for every message as
+    /// `extra_json` (a `{__cass_historical_raw_json__: "<line>"}` wrapper) or
+    /// `extra_bin` (the same event MessagePack-encoded). That makes the
+    /// canonical archive self-sufficient for regenerating the on-disk source
+    /// file of any session whose original file is gone or whose derived
+    /// structures are corrupt — no stock-sqlite `.recover` is needed.
+    ///
+    /// Returns one `String` per message in `idx` order. Each string is a single
+    /// JSONL line (no trailing newline): the preserved verbatim line when one
+    /// exists, otherwise the decoded event re-serialized as compact JSON.
+    /// Messages whose envelope decodes to `null` (no preserved event) are
+    /// skipped, since they carry no source line to regenerate.
+    pub fn reconstruct_source_jsonl_for_conversation(
+        &self,
+        conversation_id: i64,
+    ) -> Result<Vec<String>> {
+        let messages = self.fetch_messages(conversation_id)?;
+        let mut lines = Vec::with_capacity(messages.len());
+        for message in messages {
+            if let Some(line) = message_extra_to_source_jsonl_line(&message.extra_json) {
+                lines.push(line);
+            }
+        }
+        Ok(lines)
     }
 
     /// Fetch messages for lexical index rebuilds without deserializing extra metadata.
@@ -24678,6 +24725,92 @@ mod tests {
         let value = parse_historical_json_column(Some(raw.clone()));
 
         assert_eq!(historical_raw_json(&value), Some(raw.as_str()));
+    }
+
+    #[test]
+    fn message_extra_to_source_jsonl_line_round_trips_all_envelope_shapes() {
+        // #285: the salvage path that rebuilds source JSONL from the canonical
+        // archive's preserved per-message envelopes.
+
+        // 1. Historical raw-line wrapper → verbatim line, byte-for-byte.
+        let verbatim = r#"{"type":"user","uuid":"u1","text":"hi","ws":  "kept"}"#;
+        let wrapped = wrap_historical_raw_json(verbatim.to_string());
+        assert_eq!(
+            message_extra_to_source_jsonl_line(&wrapped).as_deref(),
+            Some(verbatim)
+        );
+
+        // 2. A decoded event object (the shape after msgpack/JSON decode) →
+        //    compact JSON re-serialization.
+        let event = serde_json::json!({"type": "assistant", "uuid": "a1"});
+        let line = message_extra_to_source_jsonl_line(&event).expect("line");
+        let reparsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reparsed, event);
+        assert!(!line.contains('\n'));
+
+        // 3. A null envelope (no preserved event) → skipped.
+        assert_eq!(
+            message_extra_to_source_jsonl_line(&serde_json::Value::Null),
+            None
+        );
+    }
+
+    #[test]
+    fn reconstruct_source_jsonl_for_conversation_orders_by_idx() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("agent_search.db");
+        let storage = FrankenStorage::open(&db_path).unwrap();
+
+        // Seed one agent + one conversation with two raw-line messages.
+        storage
+            .conn
+            .execute_compat(
+                "INSERT INTO agents(slug, name, version, kind, created_at, updated_at) \
+                 VALUES('claude', 'Claude Code', NULL, 'cli', 1000, 1000)",
+                fparams![],
+            )
+            .unwrap();
+        let agent_id: i64 = storage
+            .conn
+            .query_row_map("SELECT last_insert_rowid()", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        storage
+            .conn
+            .execute_compat(
+                "INSERT INTO conversations(agent_id, external_id, title, source_path, started_at) \
+                 VALUES(?1, 'sess-1', 't', '/orig/a.jsonl', 1000)",
+                fparams![agent_id],
+            )
+            .unwrap();
+        let cid: i64 = storage
+            .conn
+            .query_row_map("SELECT last_insert_rowid()", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        // Insert out of idx order to prove ORDER BY idx in fetch_messages.
+        for (idx, line) in [(1_i64, r#"{"u":"a1"}"#), (0_i64, r#"{"u":"u1"}"#)] {
+            let wrapped =
+                serde_json::to_string(&wrap_historical_raw_json(line.to_string())).unwrap();
+            storage
+                .conn
+                .execute_compat(
+                    "INSERT INTO messages(conversation_id, idx, role, author, created_at, content, extra_json, extra_bin) \
+                     VALUES(?1, ?2, 'user', NULL, ?3, 'c', ?4, NULL)",
+                    fparams![cid, idx, 1000_i64 + idx, wrapped],
+                )
+                .unwrap();
+        }
+
+        let lines = storage
+            .reconstruct_source_jsonl_for_conversation(cid)
+            .unwrap();
+        assert_eq!(
+            lines,
+            vec![r#"{"u":"u1"}"#.to_string(), r#"{"u":"a1"}"#.to_string()]
+        );
     }
 
     #[test]
