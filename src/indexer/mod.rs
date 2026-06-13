@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Command;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -923,6 +923,14 @@ pub struct IndexingProgress {
     pub rebuild_pipeline_producer_budget_wait_count: AtomicUsize,
     /// Producer-side milliseconds spent waiting on the in-flight byte budget.
     pub rebuild_pipeline_producer_budget_wait_ms: AtomicUsize,
+    /// Current park site of the rebuild page-production stage (#288):
+    /// `listing_db` / `waiting_result` / `waiting_turn` / `waiting_budget` /
+    /// `handoff_send` / `idle`. Empty when no rebuild pipeline is active.
+    pub rebuild_pipeline_producer_state: Mutex<String>,
+    /// Next page sequence the ordered reservation barrier will admit (#288).
+    pub rebuild_pipeline_reservation_next_sequence: AtomicU64,
+    /// Threads currently parked waiting on the in-flight byte budget (#288).
+    pub rebuild_pipeline_producer_budget_active_waiters: AtomicUsize,
     /// Producer-side waits on bounded sink handoff.
     pub rebuild_pipeline_producer_handoff_wait_count: AtomicUsize,
     /// Producer-side milliseconds spent waiting on bounded sink handoff.
@@ -1037,6 +1045,17 @@ impl IndexingProgress {
             .load(Ordering::Relaxed);
         let rebuild_pipeline_producer_budget_wait_ms = self
             .rebuild_pipeline_producer_budget_wait_ms
+            .load(Ordering::Relaxed);
+        let rebuild_pipeline_producer_state = self
+            .rebuild_pipeline_producer_state
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_default();
+        let rebuild_pipeline_reservation_next_sequence = self
+            .rebuild_pipeline_reservation_next_sequence
+            .load(Ordering::Relaxed);
+        let rebuild_pipeline_producer_budget_active_waiters = self
+            .rebuild_pipeline_producer_budget_active_waiters
             .load(Ordering::Relaxed);
         let rebuild_pipeline_producer_handoff_wait_count = self
             .rebuild_pipeline_producer_handoff_wait_count
@@ -1191,6 +1210,15 @@ impl IndexingProgress {
                 "budget_generation": rebuild_pipeline_budget_generation,
                 "producer_budget_wait_count": rebuild_pipeline_producer_budget_wait_count,
                 "producer_budget_wait_ms": rebuild_pipeline_producer_budget_wait_ms,
+                // #288 park-site telemetry: where the page-production stage is
+                // currently blocked, which page sequence the ordered
+                // reservation barrier admits next, and how many threads are
+                // parked on the byte budget right now (the cumulative
+                // producer_budget_wait_* counters above only advance AFTER a
+                // wait succeeds, so they cannot identify a live park).
+                "producer_state": non_empty_json_string(rebuild_pipeline_producer_state),
+                "reservation_next_sequence": rebuild_pipeline_reservation_next_sequence,
+                "producer_budget_active_waiters": rebuild_pipeline_producer_budget_active_waiters,
                 "producer_handoff_wait_count": rebuild_pipeline_producer_handoff_wait_count,
                 "producer_handoff_wait_ms": rebuild_pipeline_producer_handoff_wait_ms,
                 "host_loadavg_1m": rebuild_pipeline_host_loadavg_1m_milli.map(|value| {
@@ -1716,6 +1744,15 @@ fn reset_progress_to_idle(progress: Option<&Arc<IndexingProgress>>) {
     progress
         .rebuild_pipeline_producer_budget_wait_ms
         .store(0, Ordering::Relaxed);
+    if let Ok(mut producer_state) = progress.rebuild_pipeline_producer_state.lock() {
+        producer_state.clear();
+    }
+    progress
+        .rebuild_pipeline_reservation_next_sequence
+        .store(0, Ordering::Relaxed);
+    progress
+        .rebuild_pipeline_producer_budget_active_waiters
+        .store(0, Ordering::Relaxed);
     progress
         .rebuild_pipeline_producer_handoff_wait_count
         .store(0, Ordering::Relaxed);
@@ -1824,6 +1861,13 @@ fn capture_lexical_rebuild_pipeline_runtime(
         producer_budget_wait_count: producer_snapshot.budget_wait_count,
         producer_budget_wait_ms: producer_snapshot.budget_wait_ms,
         producer_budget_waiter_count: flow_limiter.active_waiter_count(),
+        producer_state: producer_telemetry
+            .map(|_| {
+                LexicalRebuildProducerParkSite::label_for(producer_snapshot.producer_state)
+                    .to_string()
+            })
+            .unwrap_or_default(),
+        reservation_next_sequence: producer_snapshot.reservation_next_sequence,
         producer_handoff_wait_count: producer_snapshot.handoff_wait_count,
         producer_handoff_wait_ms: producer_snapshot.handoff_wait_ms,
         host_loadavg_1m_milli: lexical_rebuild_host_loadavg_1m_milli(),
@@ -1906,6 +1950,16 @@ fn refresh_lexical_rebuild_pipeline_runtime(
     progress
         .rebuild_pipeline_producer_budget_wait_ms
         .store(latest_runtime.producer_budget_wait_ms, Ordering::Relaxed);
+    if let Ok(mut producer_state) = progress.rebuild_pipeline_producer_state.lock() {
+        *producer_state = latest_runtime.producer_state.clone();
+    }
+    progress.rebuild_pipeline_reservation_next_sequence.store(
+        latest_runtime.reservation_next_sequence,
+        Ordering::Relaxed,
+    );
+    progress
+        .rebuild_pipeline_producer_budget_active_waiters
+        .store(latest_runtime.producer_budget_waiter_count, Ordering::Relaxed);
     progress.rebuild_pipeline_producer_handoff_wait_count.store(
         latest_runtime.producer_handoff_wait_count,
         Ordering::Relaxed,
@@ -2429,12 +2483,19 @@ fn should_skip_noop_final_lexical_checkpoint_refresh(
     initial_checkpoint_status: &MatchingLexicalRebuildStateStatus,
     exact_total_counts: Option<(usize, usize)>,
     canonical_mutations: CanonicalMutationCounts,
+    completed_checkpoint_present_at_run_end: bool,
 ) -> bool {
     !full_rebuild
         && !rebuild_was_required
         && exact_total_counts.is_none()
         && !canonical_mutations.changed()
         && initial_checkpoint_status.has_completed_checkpoint
+        // #289: the run-start status can go stale before the end of the run —
+        // the federated-bundle materialization that happens on the next writer
+        // open used to wipe the live directory's sidecars. Only skip the final
+        // refresh when the checkpoint file still exists at run end; if it went
+        // missing mid-run, fall through and re-persist it.
+        && completed_checkpoint_present_at_run_end
 }
 
 fn should_skip_post_full_scan_authoritative_rebuild(
@@ -5734,6 +5795,14 @@ pub(crate) struct LexicalRebuildPipelineRuntimeSnapshot {
     pub producer_budget_wait_ms: usize,
     #[serde(skip)]
     pub producer_budget_waiter_count: usize,
+    /// Current park site of the page-production stage (#288). Transient
+    /// run-time telemetry only — never persisted into checkpoints.
+    #[serde(skip)]
+    pub producer_state: String,
+    /// Next page sequence the ordered reservation barrier will admit (#288).
+    /// Transient run-time telemetry only — never persisted into checkpoints.
+    #[serde(skip)]
+    pub reservation_next_sequence: u64,
     pub producer_handoff_wait_count: usize,
     pub producer_handoff_wait_ms: usize,
     pub host_loadavg_1m_milli: Option<u32>,
@@ -5768,6 +5837,8 @@ impl LexicalRebuildPipelineRuntimeSnapshot {
     fn checkpoint_snapshot(&self) -> Self {
         let mut snapshot = self.clone();
         snapshot.producer_budget_waiter_count = 0;
+        snapshot.producer_state = String::new();
+        snapshot.reservation_next_sequence = 0;
         snapshot
     }
 
@@ -5784,6 +5855,8 @@ impl LexicalRebuildPipelineRuntimeSnapshot {
             || self.producer_budget_wait_count > 0
             || self.producer_budget_wait_ms > 0
             || self.producer_budget_waiter_count > 0
+            || !self.producer_state.is_empty()
+            || self.reservation_next_sequence > 0
             || self.producer_handoff_wait_count > 0
             || self.producer_handoff_wait_ms > 0
             || self.host_loadavg_1m_milli.is_some()
@@ -7391,6 +7464,16 @@ impl LexicalRebuildPipelineBudgetController {
         self.commit_interval_message_bytes
             .store(snapshot.commit_interval_message_bytes, Ordering::Relaxed);
         let new_generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        if lexical_pipeline_trace_enabled() {
+            tracing::info!(
+                new_generation,
+                page_conversation_limit = snapshot.page_conversation_limit,
+                batch_fetch_message_limit = snapshot.batch_fetch_message_limit,
+                batch_fetch_message_bytes_limit = snapshot.batch_fetch_message_bytes_limit,
+                max_message_bytes_in_flight = snapshot.max_message_bytes_in_flight,
+                "CASS_PIPELINE_TRACE lexical rebuild pipeline budget generation bump"
+            );
+        }
         let mut guard = self
             .generation_lock
             .lock()
@@ -7428,6 +7511,71 @@ impl LexicalRebuildPipelineBudgetController {
     }
 }
 
+/// Opt-in high-detail tracing for the lexical-rebuild flow-control path
+/// (#288). When truthy, the producer/worker park-site transitions, every
+/// budget-generation bump, and the periodic bounded-condvar-wait probes are
+/// emitted at INFO so a parked pipeline can be diagnosed from logs without a
+/// debugger; when unset the same probes stay at DEBUG/TRACE.
+fn lexical_pipeline_trace_enabled() -> bool {
+    dotenvy_truthy("CASS_PIPELINE_TRACE")
+}
+
+/// How long a lexical-rebuild flow-control condvar wait may park before the
+/// blocked predicate is logged and the wait re-arms. Pure observability: the
+/// waiting thread always continues waiting after logging (#288).
+const LEXICAL_PIPELINE_BLOCKED_WAIT_LOG_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Current blocking site of the lexical-rebuild page-production stage
+/// (producer thread + ordered page-prep workers), published through an
+/// `AtomicU8` so the stall watchdog can report *where* the pipeline is
+/// parked instead of only the cumulative after-success wait counters
+/// (#288: `producer_budget_wait_count` kept growing while the controller
+/// reported `steady_budget_with_headroom` and every thread was parked —
+/// the payload never said which condvar held the pipeline).
+///
+/// Updated on entry to each blocking section and reset to `Idle` when the
+/// section completes. Multiple threads share the cell (last writer wins);
+/// in the all-parked starvation case there are no further writers, so the
+/// final value identifies a genuine park site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum LexicalRebuildProducerParkSite {
+    Idle = 0,
+    ListingDb = 1,
+    WaitingResult = 2,
+    WaitingTurn = 3,
+    WaitingBudget = 4,
+    HandoffSend = 5,
+}
+
+impl LexicalRebuildProducerParkSite {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::ListingDb => "listing_db",
+            Self::WaitingResult => "waiting_result",
+            Self::WaitingTurn => "waiting_turn",
+            Self::WaitingBudget => "waiting_budget",
+            Self::HandoffSend => "handoff_send",
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::ListingDb,
+            2 => Self::WaitingResult,
+            3 => Self::WaitingTurn,
+            4 => Self::WaitingBudget,
+            5 => Self::HandoffSend,
+            _ => Self::Idle,
+        }
+    }
+
+    fn label_for(value: u8) -> &'static str {
+        Self::from_u8(value).as_str()
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct LexicalRebuildProducerTelemetrySnapshot {
     page_prep_workers: usize,
@@ -7437,6 +7585,8 @@ struct LexicalRebuildProducerTelemetrySnapshot {
     budget_wait_ms: usize,
     handoff_wait_count: usize,
     handoff_wait_ms: usize,
+    producer_state: u8,
+    reservation_next_sequence: u64,
 }
 
 #[derive(Debug, Default)]
@@ -7448,6 +7598,12 @@ struct LexicalRebuildProducerTelemetry {
     budget_wait_ms: AtomicUsize,
     handoff_wait_count: AtomicUsize,
     handoff_wait_ms: AtomicUsize,
+    /// See [`LexicalRebuildProducerParkSite`].
+    producer_state: AtomicU8,
+    /// Mirror of `LexicalRebuildReservationOrder::next_sequence`, refreshed
+    /// around each ordered budget acquisition so the stall payload can show
+    /// which page sequence the reservation barrier is waiting to admit.
+    reservation_next_sequence: AtomicU64,
 }
 
 impl LexicalRebuildProducerTelemetry {
@@ -7475,7 +7631,25 @@ impl LexicalRebuildProducerTelemetry {
             budget_wait_ms: self.budget_wait_ms.load(Ordering::Relaxed),
             handoff_wait_count: self.handoff_wait_count.load(Ordering::Relaxed),
             handoff_wait_ms: self.handoff_wait_ms.load(Ordering::Relaxed),
+            producer_state: self.producer_state.load(Ordering::Relaxed),
+            reservation_next_sequence: self.reservation_next_sequence.load(Ordering::Relaxed),
         }
+    }
+
+    fn set_producer_state(&self, state: LexicalRebuildProducerParkSite) {
+        let previous = self.producer_state.swap(state as u8, Ordering::Relaxed);
+        if previous != state as u8 && lexical_pipeline_trace_enabled() {
+            tracing::info!(
+                from = LexicalRebuildProducerParkSite::label_for(previous),
+                to = state.as_str(),
+                "CASS_PIPELINE_TRACE lexical rebuild page-production park-site transition"
+            );
+        }
+    }
+
+    fn record_reservation_next_sequence(&self, next_sequence: u64) {
+        self.reservation_next_sequence
+            .store(next_sequence, Ordering::Relaxed);
     }
 
     fn record(
@@ -10646,7 +10820,40 @@ impl StreamingByteLimiter {
             waited = true;
             active_waiter
                 .get_or_insert_with(|| ActiveStreamingByteWaiter::new(&self.active_waiter_count));
-            state = self.cv.wait(state).unwrap_or_else(|e| e.into_inner());
+            // #288: bounded wait so a parked pipeline periodically logs the
+            // blocked predicate (bytes in flight vs cap) instead of vanishing
+            // into an unbounded condvar park. Pure observability — the loop
+            // always re-arms and continues waiting.
+            let (next_state, timeout_result) = self
+                .cv
+                .wait_timeout(state, LEXICAL_PIPELINE_BLOCKED_WAIT_LOG_INTERVAL)
+                .unwrap_or_else(|e| e.into_inner());
+            state = next_state;
+            if timeout_result.timed_out() {
+                let waited_ms = wait_started.elapsed().as_millis() as u64;
+                let bytes_in_flight = state.bytes_in_flight;
+                let max_bytes_in_flight = self.max_bytes_in_flight.load(Ordering::Acquire);
+                let active_waiters = self.active_waiter_count.load(Ordering::Relaxed);
+                if lexical_pipeline_trace_enabled() {
+                    tracing::info!(
+                        requested_bytes,
+                        bytes_in_flight,
+                        max_bytes_in_flight,
+                        active_waiters,
+                        waited_ms,
+                        "CASS_PIPELINE_TRACE streaming byte budget still parked waiting for capacity"
+                    );
+                } else {
+                    tracing::debug!(
+                        requested_bytes,
+                        bytes_in_flight,
+                        max_bytes_in_flight,
+                        active_waiters,
+                        waited_ms,
+                        "streaming byte budget still parked waiting for capacity"
+                    );
+                }
+            }
         }
     }
 
@@ -10733,6 +10940,7 @@ impl LexicalRebuildReservationOrder {
 
     fn wait_for_turn(&self, sequence: u64) -> Result<()> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let wait_started = Instant::now();
         loop {
             if state.closed {
                 return Err(anyhow::anyhow!(
@@ -10750,8 +10958,40 @@ impl LexicalRebuildReservationOrder {
             if sequence == state.next_sequence {
                 return Ok(());
             }
-            state = self.cv.wait(state).unwrap_or_else(|e| e.into_inner());
+            // #288: bounded wait so a parked pipeline periodically logs the
+            // blocked predicate instead of vanishing into an unbounded
+            // condvar park. Pure observability — the loop always re-arms.
+            let (next_state, timeout_result) = self
+                .cv
+                .wait_timeout(state, LEXICAL_PIPELINE_BLOCKED_WAIT_LOG_INTERVAL)
+                .unwrap_or_else(|e| e.into_inner());
+            state = next_state;
+            if timeout_result.timed_out() {
+                let waited_ms = wait_started.elapsed().as_millis() as u64;
+                if lexical_pipeline_trace_enabled() {
+                    tracing::info!(
+                        sequence,
+                        holds_turn = state.next_sequence,
+                        waited_ms,
+                        "CASS_PIPELINE_TRACE lexical rebuild page still parked waiting for ordered reservation turn"
+                    );
+                } else {
+                    tracing::debug!(
+                        sequence,
+                        holds_turn = state.next_sequence,
+                        waited_ms,
+                        "lexical rebuild page still parked waiting for ordered reservation turn"
+                    );
+                }
+            }
         }
+    }
+
+    fn next_sequence(&self) -> u64 {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .next_sequence
     }
 
     fn finish_turn(&self, sequence: u64) {
@@ -10772,20 +11012,32 @@ impl LexicalRebuildReservationOrder {
 fn acquire_ordered_lexical_rebuild_page_budget(
     reservation_order: &LexicalRebuildReservationOrder,
     flow_limiter: &StreamingByteLimiter,
+    producer_telemetry: &LexicalRebuildProducerTelemetry,
     sequence: u64,
     page_message_bytes: usize,
 ) -> Result<(usize, Duration, bool)> {
-    reservation_order.wait_for_turn(sequence)?;
-    match flow_limiter.acquire_with_wait(page_message_bytes) {
+    producer_telemetry.set_producer_state(LexicalRebuildProducerParkSite::WaitingTurn);
+    producer_telemetry.record_reservation_next_sequence(reservation_order.next_sequence());
+    let turn = reservation_order.wait_for_turn(sequence);
+    producer_telemetry.record_reservation_next_sequence(reservation_order.next_sequence());
+    if let Err(err) = turn {
+        producer_telemetry.set_producer_state(LexicalRebuildProducerParkSite::Idle);
+        return Err(err);
+    }
+    producer_telemetry.set_producer_state(LexicalRebuildProducerParkSite::WaitingBudget);
+    let acquired = match flow_limiter.acquire_with_wait(page_message_bytes) {
         Ok(acquired) => {
             reservation_order.finish_turn(sequence);
+            producer_telemetry.record_reservation_next_sequence(reservation_order.next_sequence());
             Ok(acquired)
         }
         Err(err) => {
             reservation_order.close();
             Err(err)
         }
-    }
+    };
+    producer_telemetry.set_producer_state(LexicalRebuildProducerParkSite::Idle);
+    acquired
 }
 
 fn conversation_batch_footprint(conv: &NormalizedConversation) -> (usize, usize) {
@@ -13076,19 +13328,24 @@ pub fn run_index(
     complete_preflight_phase!();
     let mut needs_rebuild =
         should_force_authoritative_rebuild(canonical_storage_rebuilt, tantivy_requires_rebuild);
+    // #289: pass the real `tantivy_requires_rebuild` instead of hardcoding
+    // `authoritative_rebuild_required: true`. The hardcoded value made every
+    // plain populated incremental over the automatic-repair DB-size cap
+    // (default 1 GiB) report a deferred repair probe even when no
+    // authoritative rebuild was required, which suppressed the end-of-run
+    // lexical checkpoint refresh — including the cheap metadata-only
+    // bootstrap that rewrites a missing `.lexical-rebuild-state.json` — so a
+    // lost checkpoint could never converge on large archives.
     let large_incremental_authoritative_lexical_repair_probe_deferred =
         should_defer_incremental_authoritative_lexical_repair(
             &opts,
             canonical_storage_rebuilt,
             initial_canonical_sessions_before_salvage,
-            true,
+            tantivy_requires_rebuild,
             observed_tantivy_docs,
         );
-    let deferred_incremental_authoritative_lexical_repair = if tantivy_requires_rebuild {
-        large_incremental_authoritative_lexical_repair_probe_deferred
-    } else {
-        None
-    };
+    let deferred_incremental_authoritative_lexical_repair =
+        large_incremental_authoritative_lexical_repair_probe_deferred;
     if let Some(deferred) = &deferred_incremental_authoritative_lexical_repair {
         tracing::warn!(
             db_path = %opts.db_path.display(),
@@ -14030,6 +14287,7 @@ pub fn run_index(
         &initial_matching_lexical_checkpoint,
         exact_total_counts,
         scan_canonical_mutations,
+        lexical_rebuild_state_path(&index_path).is_file(),
     ) {
         tracing::info!(
             db_path = %opts.db_path.display(),
@@ -15973,6 +16231,20 @@ impl Drop for StreamingByteReservation<'_> {
     }
 }
 
+/// Test-only panic injection for the page-prep worker panic-containment
+/// regression test (#288). Armed by the test immediately before sending a
+/// work item; consumed (and disarmed) by the first
+/// `prepare_lexical_rebuild_page_work` call that observes it.
+#[cfg(test)]
+static LEXICAL_REBUILD_PAGE_PREP_INJECTED_PANIC: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+fn lexical_rebuild_page_prep_injected_panic_hook() {
+    if LEXICAL_REBUILD_PAGE_PREP_INJECTED_PANIC.swap(false, Ordering::SeqCst) {
+        panic!("injected lexical rebuild page-prep panic for the #288 regression test");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_lexical_rebuild_page_work(
     storage: &mut FrankenStorage,
@@ -15983,6 +16255,8 @@ fn prepare_lexical_rebuild_page_work(
     lexical_rebuild_worker_pool: Option<&ThreadPool>,
     work: LexicalRebuildPagePrepWork,
 ) -> Result<LexicalRebuildSequencedPreparedPage> {
+    #[cfg(test)]
+    lexical_rebuild_page_prep_injected_panic_hook();
     let sequence = work.sequence;
     let conversation_ids = work
         .conversation_page
@@ -15994,6 +16268,7 @@ fn prepare_lexical_rebuild_page_work(
         acquire_ordered_lexical_rebuild_page_budget(
             reservation_order,
             flow_limiter,
+            producer_telemetry,
             sequence,
             work.pipeline_budget.batch_fetch_message_bytes_limit,
         )
@@ -16169,16 +16444,30 @@ fn spawn_lexical_rebuild_page_prep_workers(
 
                         while let Ok(work) = worker_rx.recv() {
                             let sequence = work.sequence;
-                            match prepare_lexical_rebuild_page_work(
-                                &mut storage,
-                                worker_source_map.as_ref(),
-                                worker_flow_limiter.as_ref(),
-                                worker_reservation_order.as_ref(),
-                                worker_producer_telemetry.as_ref(),
-                                worker_pool.as_deref(),
-                                work,
-                            ) {
-                                Ok(prepared) => {
+                            // #288: a panicking page-prep worker used to unwind
+                            // silently — the surviving workers' `result_tx`
+                            // clones kept the channel open, the producer's
+                            // `active_work` count never drained, and the
+                            // producer parked forever at `result_rx.recv()`
+                            // (the reporter's all-parked dump: queue_depth=0,
+                            // active_page_prep_jobs=0, inflight=0). Convert the
+                            // panic into the same teardown as the `Err` arm so
+                            // the producer observes a result and aborts loudly.
+                            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                || {
+                                    prepare_lexical_rebuild_page_work(
+                                        &mut storage,
+                                        worker_source_map.as_ref(),
+                                        worker_flow_limiter.as_ref(),
+                                        worker_reservation_order.as_ref(),
+                                        worker_producer_telemetry.as_ref(),
+                                        worker_pool.as_deref(),
+                                        work,
+                                    )
+                                },
+                            ));
+                            match outcome {
+                                Ok(Ok(prepared)) => {
                                     let reserved_bytes =
                                         lexical_rebuild_prepared_page_reserved_bytes(&prepared.page);
                                     if worker_result_tx
@@ -16190,11 +16479,22 @@ fn spawn_lexical_rebuild_page_prep_workers(
                                         break;
                                     }
                                 }
-                                Err(err) => {
+                                Ok(Err(err)) => {
                                     worker_reservation_order.close();
                                     let _ = worker_result_tx.send(LexicalRebuildPagePrepResult::Error {
                                         sequence,
                                         error: format!("{err:#}"),
+                                    });
+                                    break;
+                                }
+                                Err(payload) => {
+                                    worker_reservation_order.close();
+                                    let _ = worker_result_tx.send(LexicalRebuildPagePrepResult::Error {
+                                        sequence,
+                                        error: format!(
+                                            "lexical rebuild page-prep worker {worker_idx} panicked while preparing page sequence {sequence}: {}",
+                                            panic_payload_message(payload)
+                                        ),
                                     });
                                     break;
                                 }
@@ -16448,6 +16748,8 @@ fn spawn_lexical_rebuild_packet_producer(
                             .and_then(LexicalRebuildPlannedShardCursor::current)
                             .cloned();
                         let conversation_list_started = Instant::now();
+                        producer_telemetry
+                            .set_producer_state(LexicalRebuildProducerParkSite::ListingDb);
                         let conversation_page = if let Some(shard) = &current_planned_shard {
                             storage
                                 .list_conversations_for_lexical_rebuild_after_id_through_id(
@@ -16480,6 +16782,7 @@ fn spawn_lexical_rebuild_packet_producer(
                                     )
                                 })?
                         };
+                        producer_telemetry.set_producer_state(LexicalRebuildProducerParkSite::Idle);
                         let conversation_list_duration = conversation_list_started.elapsed();
 
                         if conversation_page.is_empty() {
@@ -16589,7 +16892,13 @@ fn spawn_lexical_rebuild_packet_producer(
                             Ok(()) => {}
                             Err(TrySendError::Full(message)) => {
                                 let handoff_wait_started = Instant::now();
-                                if tx.send(message).is_err() {
+                                producer_telemetry.set_producer_state(
+                                    LexicalRebuildProducerParkSite::HandoffSend,
+                                );
+                                let handoff_send = tx.send(message);
+                                producer_telemetry
+                                    .set_producer_state(LexicalRebuildProducerParkSite::Idle);
+                                if handoff_send.is_err() {
                                     reservation_order.close();
                                     flow_limiter.release(reserved_bytes);
                                     release_completed_lexical_rebuild_pages(
@@ -16701,7 +17010,11 @@ fn spawn_lexical_rebuild_packet_producer(
                         break;
                     }
 
-                    match result_rx.recv() {
+                    producer_telemetry
+                        .set_producer_state(LexicalRebuildProducerParkSite::WaitingResult);
+                    let page_prep_result = result_rx.recv();
+                    producer_telemetry.set_producer_state(LexicalRebuildProducerParkSite::Idle);
+                    match page_prep_result {
                         Ok(LexicalRebuildPagePrepResult::Prepared(prepared)) => {
                             active_work = active_work.saturating_sub(1);
                             producer_telemetry.record(
@@ -25729,6 +26042,40 @@ pub mod persist {
             assert_eq!(
                 deferred.reason,
                 crate::indexer::DEFERRED_LARGE_INCREMENTAL_LEXICAL_REPAIR_REASON
+            );
+        }
+
+        /// #289: the run-level probe binding used to hardcode
+        /// `authoritative_rebuild_required: true`, so every plain populated
+        /// incremental over the DB-size cap reported a deferred repair probe
+        /// even when no rebuild was required — which suppressed the
+        /// end-of-run checkpoint refresh (including the cheap metadata-only
+        /// bootstrap of a missing checkpoint) forever on large archives.
+        #[test]
+        #[serial]
+        fn large_incremental_repair_probe_not_deferred_when_no_rebuild_required() {
+            let _max_guard = set_env(
+                "CASS_INCREMENTAL_AUTHORITATIVE_LEXICAL_REPAIR_MAX_DB_BYTES",
+                "8",
+            );
+            let _force_guard = set_env("CASS_INCREMENTAL_AUTHORITATIVE_LEXICAL_REPAIR", "0");
+            let dir = tempfile::TempDir::new().unwrap();
+            let db_path = dir.path().join("agent_search.db");
+            std::fs::write(&db_path, b"0123456789abcdef").unwrap();
+            let opts =
+                incremental_repair_policy_test_options(dir.path().to_path_buf(), db_path.clone());
+
+            assert_eq!(
+                crate::indexer::should_defer_incremental_authoritative_lexical_repair(
+                    &opts,
+                    false,
+                    42,
+                    false,
+                    Some(7),
+                ),
+                None,
+                "a healthy lexical index must not report a deferred repair probe; \
+                 the final checkpoint refresh (and missing-checkpoint bootstrap) depends on it"
             );
         }
 
@@ -35450,15 +35797,19 @@ mod tests {
     fn lexical_rebuild_reservation_order_keeps_later_pages_from_spending_budget_first() {
         let order = Arc::new(LexicalRebuildReservationOrder::new());
         let limiter = Arc::new(StreamingByteLimiter::new(64));
+        let telemetry = Arc::new(LexicalRebuildProducerTelemetry::default());
         let (ready_tx, ready_rx) = bounded(1);
         let (result_tx, result_rx) = bounded(1);
         let waiter = {
             let order = order.clone();
             let limiter = limiter.clone();
+            let telemetry = telemetry.clone();
             thread::spawn(move || {
                 ready_tx.send(()).unwrap();
-                let (reserved, _, _) =
-                    acquire_ordered_lexical_rebuild_page_budget(&order, &limiter, 1, 64).unwrap();
+                let (reserved, _, _) = acquire_ordered_lexical_rebuild_page_budget(
+                    &order, &limiter, &telemetry, 1, 64,
+                )
+                .unwrap();
                 result_tx.send(reserved).unwrap();
             })
         };
@@ -35473,9 +35824,22 @@ mod tests {
             0,
             "later pages must not reserve bytes before earlier sequences"
         );
+        let waiting_turn_deadline = Instant::now() + Duration::from_secs(2);
+        while telemetry.snapshot().producer_state
+            != LexicalRebuildProducerParkSite::WaitingTurn as u8
+            && Instant::now() < waiting_turn_deadline
+        {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            telemetry.snapshot().producer_state,
+            LexicalRebuildProducerParkSite::WaitingTurn as u8,
+            "a parked ordered reservation must publish the waiting_turn park site (#288)"
+        );
 
         let (first, _, _) =
-            acquire_ordered_lexical_rebuild_page_budget(&order, &limiter, 0, 1).unwrap();
+            acquire_ordered_lexical_rebuild_page_budget(&order, &limiter, &telemetry, 0, 1)
+                .unwrap();
         assert_eq!(first, 1);
         assert_eq!(limiter.bytes_in_flight(), 1);
         assert!(
@@ -35487,6 +35851,91 @@ mod tests {
         assert_eq!(result_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 64);
         limiter.release(64);
         waiter.join().unwrap();
+        assert_eq!(
+            telemetry.snapshot().producer_state,
+            LexicalRebuildProducerParkSite::Idle as u8,
+            "a completed ordered acquisition must settle the park site back to idle"
+        );
+        assert_eq!(
+            telemetry.snapshot().reservation_next_sequence,
+            2,
+            "the reservation barrier mirror must track the next admissible sequence"
+        );
+    }
+
+    /// #288 regression: a panic inside a page-prep worker must surface as a
+    /// `LexicalRebuildPagePrepResult::Error` on the result channel. Before
+    /// the catch_unwind containment, the panicking thread unwound silently,
+    /// the surviving workers kept the result channel open, and the producer
+    /// parked forever at `result_rx.recv()` — exactly the reporter's
+    /// all-parked thread dump (queue_depth=0, active_page_prep_jobs=0,
+    /// inflight=0).
+    #[test]
+    #[serial]
+    fn page_prep_worker_panic_surfaces_as_error_result_instead_of_parking_producer() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("agent_search.db");
+        let storage = FrankenStorage::open(&db_path).unwrap();
+        storage.close().unwrap();
+
+        let worker_count = 2usize;
+        let (work_tx, work_rx) = bounded::<LexicalRebuildPagePrepWork>(worker_count);
+        let (result_tx, result_rx) = bounded::<LexicalRebuildPagePrepResult>(worker_count);
+        let flow_limiter = Arc::new(StreamingByteLimiter::new(1024));
+        let reservation_order = Arc::new(LexicalRebuildReservationOrder::new());
+        let telemetry = Arc::new(LexicalRebuildProducerTelemetry::default());
+        let worker_handles = spawn_lexical_rebuild_page_prep_workers(
+            worker_count,
+            db_path,
+            Arc::new(HashMap::new()),
+            work_rx,
+            result_tx,
+            Arc::clone(&flow_limiter),
+            Arc::clone(&reservation_order),
+            Arc::clone(&telemetry),
+            None,
+        )
+        .unwrap();
+
+        LEXICAL_REBUILD_PAGE_PREP_INJECTED_PANIC.store(true, Ordering::SeqCst);
+        work_tx
+            .send(LexicalRebuildPagePrepWork {
+                sequence: 0,
+                conversation_page: Vec::new(),
+                page_last_conversation_id: 0,
+                configured_page_size: 16,
+                planned_shard_index: None,
+                finishes_planned_shard: false,
+                conversation_list_duration: Duration::ZERO,
+                pipeline_budget: LexicalRebuildPipelineBudgetSnapshot::new(
+                    16, 64, 1024, 1024, 16, 64, 1024,
+                ),
+                budget_generation: 0,
+            })
+            .unwrap();
+
+        let result = result_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("a panicking page-prep worker must still emit an Error result (#288)");
+        match result {
+            LexicalRebuildPagePrepResult::Error { sequence, error } => {
+                assert_eq!(sequence, 0);
+                assert!(
+                    error.contains("panicked"),
+                    "error must identify the panic: {error}"
+                );
+                assert!(
+                    error.contains("injected lexical rebuild page-prep panic"),
+                    "error must preserve the panic payload text: {error}"
+                );
+            }
+            other => panic!("expected a page-prep Error result, got {other:?}"),
+        }
+
+        drop(work_tx);
+        for handle in worker_handles {
+            let _ = handle.join();
+        }
     }
 
     /// `coding_agent_session_search-wxsy8`: stress-pin the
@@ -47347,6 +47796,7 @@ mod tests {
             },
             exact_counts,
             no_mutations,
+            true,
         ));
         assert!(!should_skip_noop_final_lexical_checkpoint_refresh(
             true,
@@ -47360,6 +47810,7 @@ mod tests {
             },
             exact_counts,
             no_mutations,
+            true,
         ));
         assert!(!should_skip_noop_final_lexical_checkpoint_refresh(
             false,
@@ -47373,6 +47824,7 @@ mod tests {
             },
             exact_counts,
             no_mutations,
+            true,
         ));
         assert!(!should_skip_noop_final_lexical_checkpoint_refresh(
             false,
@@ -47386,6 +47838,7 @@ mod tests {
             },
             Some((1, 2)),
             no_mutations,
+            true,
         ));
         assert!(!should_skip_noop_final_lexical_checkpoint_refresh(
             false,
@@ -47399,6 +47852,7 @@ mod tests {
             },
             exact_counts,
             changed,
+            true,
         ));
         assert!(!should_skip_noop_final_lexical_checkpoint_refresh(
             false,
@@ -47412,6 +47866,25 @@ mod tests {
             },
             exact_counts,
             no_mutations,
+            true,
+        ));
+        // #289: a run-start completed checkpoint is not enough — if the
+        // checkpoint file vanished mid-run (e.g. the federated-bundle
+        // materialization replaced the live directory), the final refresh
+        // must run so the checkpoint is re-persisted.
+        assert!(!should_skip_noop_final_lexical_checkpoint_refresh(
+            false,
+            false,
+            &MatchingLexicalRebuildStateStatus {
+                has_pending_resume: false,
+                has_completed_checkpoint: true,
+                completed_indexed_docs: Some(0),
+                completed_exact_totals: Some((0, 0)),
+                completed_storage_fingerprint: Some("content-v1:0:0:0".to_string()),
+            },
+            exact_counts,
+            no_mutations,
+            false,
         ));
     }
 
