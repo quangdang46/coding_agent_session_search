@@ -39,6 +39,7 @@ pub mod privacy_exposure;
 pub mod proof_artifact;
 pub mod query_cost_planner;
 pub mod raw_mirror;
+pub(crate) mod recovery_support_bundle;
 pub mod release_verify;
 pub mod repro_capsule;
 pub mod resource_plan;
