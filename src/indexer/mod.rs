@@ -243,6 +243,65 @@ fn should_skip_active_session_source(
     true
 }
 
+/// Whether `CASS_SKIP_SUBAGENTS` is enabled (#292). Subagent transcripts
+/// (Claude Code's `<project>/<session>/subagents/agent-*.jsonl`) are ephemeral
+/// one-task scratchpads whose conclusions already live in the parent session;
+/// on a subagent-heavy corpus they dominate the corpus by count and are the
+/// main source of false-positive OOM quarantines, so operators can exclude the
+/// whole class from indexing with one toggle. `0`/`false`/empty disables.
+fn skip_subagents_active() -> bool {
+    dotenvy::var("CASS_SKIP_SUBAGENTS")
+        .ok()
+        .map(|raw| {
+            let value = raw.trim();
+            !(value.is_empty() || value == "0" || value.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(false)
+}
+
+/// True when `source_path` is a subagent transcript — it lives directly inside a
+/// `subagents/` directory (e.g. `.../<session>/subagents/agent-1234.jsonl`).
+fn conversation_source_is_subagent(source_path: &Path) -> bool {
+    source_path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .is_some_and(|name| name == "subagents")
+}
+
+/// Combined scan-time skip for the `CASS_SKIP_SUBAGENTS` toggle (#292): drop
+/// subagent-class transcripts before they are ingested, so they never enter the
+/// canonical DB / lexical index / raw-mirror and never trigger the OOM→quarantine
+/// path. Applied at every connector scan callback.
+fn should_skip_subagent_source(source_path: &Path) -> bool {
+    skip_subagents_active() && conversation_source_is_subagent(source_path)
+}
+
+#[cfg(test)]
+mod subagent_skip_tests {
+    use super::conversation_source_is_subagent;
+    use std::path::Path;
+
+    #[test]
+    fn detects_subagent_transcripts_by_parent_dir() {
+        // Claude Code subagent transcript: file directly inside a subagents/ dir.
+        assert!(conversation_source_is_subagent(Path::new(
+            "/home/u/.claude/projects/proj/session-1/subagents/agent-abc.jsonl"
+        )));
+        // A top-level session transcript is not a subagent.
+        assert!(!conversation_source_is_subagent(Path::new(
+            "/home/u/.claude/projects/proj/session-1.jsonl"
+        )));
+        // A file merely named like an agent but not under subagents/ is kept.
+        assert!(!conversation_source_is_subagent(Path::new(
+            "/home/u/.codex/sessions/agent-notes.jsonl"
+        )));
+        // A subagents/ dir higher up does not match a file nested deeper under it.
+        assert!(!conversation_source_is_subagent(Path::new(
+            "/home/u/subagents/archive/session.jsonl"
+        )));
+    }
+}
+
 #[cfg(unix)]
 fn source_file_id(path: &Path) -> Option<SourceFileId> {
     use std::os::unix::fs::MetadataExt;
@@ -11459,6 +11518,9 @@ fn spawn_connector_producer(
                 ) {
                     return Ok(());
                 }
+                if should_skip_subagent_source(&conversation.source_path) {
+                    return Ok(());
+                }
                 prepare_conversation_for_ingest(
                     &config.data_dir,
                     name,
@@ -11547,6 +11609,9 @@ fn spawn_connector_producer(
                     &root.origin.source_id,
                     &conversation.source_path,
                 ) {
+                    return Ok(());
+                }
+                if should_skip_subagent_source(&conversation.source_path) {
                     return Ok(());
                 }
                 prepare_conversation_for_ingest(
