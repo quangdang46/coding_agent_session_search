@@ -57,6 +57,7 @@ pub mod reranker;
 pub mod reranker_registry;
 pub mod runtime_optimizations;
 pub(crate) mod salvage_ledger;
+pub(crate) mod search_mode_metadata;
 pub mod semantic_manifest;
 pub(crate) mod semantic_publish_safety;
 pub(crate) mod semantic_readiness;

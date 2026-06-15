@@ -3109,6 +3109,7 @@ schemas: (auto-generated from contract)
         - result_identity: object
         - schema_version: string
         - summary: string
+      - refinement_level: string
       - request_id: ?
       - requested_search_mode: ?
       - search_completeness: object
@@ -3120,6 +3121,7 @@ schemas: (auto-generated from contract)
         - quarantine_status: string
         - quarantined_conversations: integer
       - search_mode: ?
+      - semantic_fallback_reason: ?
       - semantic_refinement: ?
       - state: object
         - _meta: object

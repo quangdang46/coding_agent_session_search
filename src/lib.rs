@@ -23389,6 +23389,29 @@ impl SearchModeMeta {
         self.fallback_tier = Some("lexical");
         self.fallback_reason = Some(reason.into());
     }
+
+    /// The realized refinement level for `--robot-meta` (bead .5.4): a precise
+    /// `lexical_only` / `fully_hybrid_refined` instead of a bare bool. A
+    /// one-shot CLI search runs to completion, so the quality tier contributes
+    /// whenever semantic/hybrid did not fail open to lexical.
+    fn realized_refinement(&self) -> crate::search::readiness::SearchRefinementLevel {
+        if self.fallback_tier.is_some() {
+            crate::search::readiness::SearchRefinementLevel::LexicalOnly
+        } else {
+            crate::search::search_mode_metadata::refinement_level(self.realized, true)
+        }
+    }
+
+    /// The typed semantic fallback reason for `--robot-meta` (bead .5.4),
+    /// classifying the free-form fallback string into a code agents can branch
+    /// on. `None` when no fail-open happened.
+    fn semantic_fallback_reason(
+        &self,
+    ) -> Option<crate::search::search_mode_metadata::SemanticFallbackReason> {
+        self.fallback_reason
+            .as_deref()
+            .map(crate::search::search_mode_metadata::classify_fallback_reason)
+    }
 }
 
 fn search_mode_label(mode: crate::search::query::SearchMode) -> &'static str {
@@ -24129,6 +24152,8 @@ fn output_robot_results(
                     "fallback_tier": search_mode_meta.fallback_tier,
                     "fallback_reason": search_mode_meta.fallback_reason.clone(),
                     "semantic_refinement": search_mode_meta.semantic_refinement(),
+                    "refinement_level": search_mode_meta.realized_refinement(),
+                    "semantic_fallback_reason": search_mode_meta.semantic_fallback_reason(),
                     "wildcard_fallback": result.wildcard_fallback,
                     "cache_stats": {
                         "hits": result.cache_stats.cache_hits,
@@ -24259,6 +24284,8 @@ fn output_robot_results(
                         "fallback_tier": search_mode_meta.fallback_tier,
                         "fallback_reason": search_mode_meta.fallback_reason.clone(),
                         "semantic_refinement": search_mode_meta.semantic_refinement(),
+                        "refinement_level": search_mode_meta.realized_refinement(),
+                        "semantic_fallback_reason": search_mode_meta.semantic_fallback_reason(),
                         "wildcard_fallback": result.wildcard_fallback,
                         "cache_stats": {
                             "hits": result.cache_stats.cache_hits,
@@ -24435,6 +24462,8 @@ fn output_robot_results(
                     "fallback_tier": search_mode_meta.fallback_tier,
                     "fallback_reason": search_mode_meta.fallback_reason.clone(),
                     "semantic_refinement": search_mode_meta.semantic_refinement(),
+                    "refinement_level": search_mode_meta.realized_refinement(),
+                    "semantic_fallback_reason": search_mode_meta.semantic_fallback_reason(),
                     "wildcard_fallback": result.wildcard_fallback,
                     "tokens_estimated": tokens_estimated,
                     "max_tokens": max_tokens,
@@ -24560,6 +24589,8 @@ fn output_robot_results(
                     "fallback_tier": search_mode_meta.fallback_tier,
                     "fallback_reason": search_mode_meta.fallback_reason.clone(),
                     "semantic_refinement": search_mode_meta.semantic_refinement(),
+                    "refinement_level": search_mode_meta.realized_refinement(),
+                    "semantic_fallback_reason": search_mode_meta.semantic_fallback_reason(),
                     "wildcard_fallback": result.wildcard_fallback,
                     "tokens_estimated": tokens_estimated,
                     "max_tokens": max_tokens,
@@ -78035,6 +78066,15 @@ fn response_schema_search_meta() -> serde_json::Value {
         (
             "semantic_refinement",
             serde_json::json!({ "type": ["boolean", "null"] }),
+        ),
+        // Truthful refinement level + typed fallback reason (bead .5.4).
+        (
+            "refinement_level",
+            serde_json::json!({ "type": "string" }),
+        ),
+        (
+            "semantic_fallback_reason",
+            serde_json::json!({ "type": ["string", "null"] }),
         ),
         (
             "wildcard_fallback",

@@ -29127,6 +29127,15 @@
                 "null"
               ]
             },
+            "refinement_level": {
+              "type": "string"
+            },
+            "semantic_fallback_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "wildcard_fallback": {
               "type": "boolean"
             },
