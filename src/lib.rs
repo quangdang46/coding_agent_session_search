@@ -92255,13 +92255,19 @@ fn run_models_install(
             })?;
         }
 
-        // Write verified marker
-        let marker_path = model_dir.join(".verified");
-        let content = format!(
-            "revision={}\nverified_at={}\n",
-            manifest.revision,
-            chrono::Utc::now().to_rfc3339()
-        );
+        // Write verified marker. The hardened marker records the install
+        // source provenance (`from-file`), the local source path, and the
+        // model fingerprint so an air-gapped install is auditable and
+        // distinguishable from a network download (bead
+        // cass-fleet-resilience-20260608-uojcg.5.5). Byte-compatible with the
+        // legacy reader: `revision=` stays first and unknown lines are ignored.
+        let marker_path = model_dir.join(crate::search::model_acquisition::VERIFIED_MARKER_NAME);
+        let content = crate::search::model_acquisition::VerifiedMarker::for_from_file(
+            &manifest,
+            source_path,
+            chrono::Utc::now().to_rfc3339(),
+        )
+        .render();
         std::fs::write(&marker_path, content).map_err(|e| CliError {
             code: 22,
             kind: CliErrorKind::Io.kind_str(),
