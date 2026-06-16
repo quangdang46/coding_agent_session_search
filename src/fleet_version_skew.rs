@@ -27,9 +27,7 @@ pub const VERSION_SKEW_SCHEMA_VERSION: u32 = 1;
 
 /// How far behind the host binary is, in capability terms (not just numeric
 /// distance). Ordered none→missing so a fleet rollup can take a `max`.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CapabilityGap {
     /// Host is at the current version (or ahead) with full capabilities.
@@ -46,9 +44,7 @@ pub enum CapabilityGap {
 }
 
 /// Whether and how the host can be upgraded.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum UpgradeMethod {
     /// The host's binary supports `cass self-update` (or is recent enough to).
@@ -309,7 +305,10 @@ mod tests {
         let a = assess_host(&host, CURRENT);
         assert_eq!(a.capability_gap, CapabilityGap::Minor);
         assert!(a.upgrade_needed);
-        assert!(!a.upgrade_before_repair, "minor gap can be repaired without upgrading first");
+        assert!(
+            !a.upgrade_before_repair,
+            "minor gap can be repaired without upgrading first"
+        );
         assert_eq!(a.install_hint.method, UpgradeMethod::SelfUpdate);
         assert_eq!(a.install_hint.command.as_deref(), Some("cass self-update"));
     }
@@ -325,7 +324,10 @@ mod tests {
         let mut skewed = host;
         skewed.status = HostProbeStatus::OldBinarySkew;
         let a2 = assess_host(&skewed, CURRENT);
-        assert!(a2.upgrade_before_repair, "old-binary-skew must upgrade before repair");
+        assert!(
+            a2.upgrade_before_repair,
+            "old-binary-skew must upgrade before repair"
+        );
         assert_eq!(a2.install_hint.method, UpgradeMethod::ManualInstaller);
     }
 

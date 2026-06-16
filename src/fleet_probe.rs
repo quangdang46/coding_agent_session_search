@@ -13,9 +13,7 @@
 //! the policy is deterministic and unit-testable. No mutation, no source-log
 //! writes happen here; it is inert data.
 
-use crate::fleet_doctor_schema::{
-    FleetDoctorReport, HostDoctorReport, HostProbeStatus,
-};
+use crate::fleet_doctor_schema::{FleetDoctorReport, HostDoctorReport, HostProbeStatus};
 use serde::{Deserialize, Serialize};
 
 /// Per-host and overall time budgets for a bounded fleet sweep.
@@ -54,17 +52,17 @@ pub struct HostProbeOutcome {
 /// (unreachable / command-not-found) — is downgraded to `timed-out` with its
 /// partial facts preserved and a recommended next probe, so it never blocks the
 /// fleet report. The host's `elapsed_ms` is always recorded.
-pub fn finalize_host(mut report: HostDoctorReport, elapsed_ms: u64, per_host_ms: u64) -> HostDoctorReport {
+pub fn finalize_host(
+    mut report: HostDoctorReport,
+    elapsed_ms: u64,
+    per_host_ms: u64,
+) -> HostDoctorReport {
     report.elapsed_ms = elapsed_ms;
     let overran = per_host_ms > 0 && elapsed_ms >= per_host_ms;
     if overran && !report.status.is_hard_failure() && report.status != HostProbeStatus::TimedOut {
         report.status = HostProbeStatus::TimedOut;
         report.timed_out = true;
-        if !report
-            .skipped_sections
-            .iter()
-            .any(|s| s == "deep-probe")
-        {
+        if !report.skipped_sections.iter().any(|s| s == "deep-probe") {
             report.skipped_sections.push("deep-probe".to_string());
         }
         if report.recommended_action.is_none() {
@@ -112,15 +110,26 @@ mod tests {
         assert!(finalized.timed_out);
         assert_eq!(finalized.elapsed_ms, 9_000);
         assert!(finalized.skipped_sections.iter().any(|s| s == "deep-probe"));
-        assert_eq!(finalized.readiness, Some(ReadinessState::Ready), "partial facts preserved");
-        assert!(finalized.recommended_action.is_some(), "next command provided");
+        assert_eq!(
+            finalized.readiness,
+            Some(ReadinessState::Ready),
+            "partial facts preserved"
+        );
+        assert!(
+            finalized.recommended_action.is_some(),
+            "next command provided"
+        );
     }
 
     #[test]
     fn unreachable_host_is_not_downgraded_to_timeout() {
         // mac-mini-old: SSH timeout => already Unreachable; budget overrun must not
         // mask the hard failure.
-        let finalized = finalize_host(host("mac-mini-old", HostProbeStatus::Unreachable), 12_000, 8_000);
+        let finalized = finalize_host(
+            host("mac-mini-old", HostProbeStatus::Unreachable),
+            12_000,
+            8_000,
+        );
         assert_eq!(finalized.status, HostProbeStatus::Unreachable);
         assert!(finalized.unreachable);
     }
@@ -160,9 +169,17 @@ mod tests {
     #[test]
     fn assemble_fleet_includes_every_host_and_no_host_blocks() {
         let outcomes = vec![
-            HostProbeOutcome { report: host("local", HostProbeStatus::Ok), elapsed_ms: 40, error: None },
             HostProbeOutcome {
-                report: { let mut r = host("ts2", HostProbeStatus::Ok); r.readiness = Some(ReadinessState::Ready); r },
+                report: host("local", HostProbeStatus::Ok),
+                elapsed_ms: 40,
+                error: None,
+            },
+            HostProbeOutcome {
+                report: {
+                    let mut r = host("ts2", HostProbeStatus::Ok);
+                    r.readiness = Some(ReadinessState::Ready);
+                    r
+                },
                 elapsed_ms: 9_000, // overruns -> timed-out
                 error: None,
             },
@@ -171,9 +188,19 @@ mod tests {
                 elapsed_ms: 12_000,
                 error: Some("ssh: connect timeout".to_string()),
             },
-            HostProbeOutcome { report: host("csd", HostProbeStatus::OldBinarySkew), elapsed_ms: 200, error: None },
+            HostProbeOutcome {
+                report: host("csd", HostProbeStatus::OldBinarySkew),
+                elapsed_ms: 200,
+                error: None,
+            },
         ];
-        let report = assemble_fleet(outcomes, ProbeBudget { per_host_ms: 8_000, total_ms: 60_000 });
+        let report = assemble_fleet(
+            outcomes,
+            ProbeBudget {
+                per_host_ms: 8_000,
+                total_ms: 60_000,
+            },
+        );
         assert_eq!(report.hosts.len(), 4, "every host appears; none is dropped");
         assert_eq!(report.summary.total_hosts, 4);
         // ts2 was forced to timed-out by the per-host budget; identity + facts kept.
@@ -181,7 +208,11 @@ mod tests {
         assert_eq!(ts2.status, HostProbeStatus::TimedOut);
         assert_eq!(ts2.readiness, Some(ReadinessState::Ready));
         // unreachable stays unreachable.
-        let old = report.hosts.iter().find(|h| h.host_alias == "mac-mini-old").unwrap();
+        let old = report
+            .hosts
+            .iter()
+            .find(|h| h.host_alias == "mac-mini-old")
+            .unwrap();
         assert_eq!(old.status, HostProbeStatus::Unreachable);
         assert_eq!(report.summary.unreachable, 1);
         assert_eq!(report.summary.timed_out, 1);
@@ -194,7 +225,10 @@ mod tests {
 
     #[test]
     fn should_stop_sweep_respects_total_budget() {
-        let b = ProbeBudget { per_host_ms: 8_000, total_ms: 60_000 };
+        let b = ProbeBudget {
+            per_host_ms: 8_000,
+            total_ms: 60_000,
+        };
         assert!(!should_stop_sweep(30_000, b));
         assert!(should_stop_sweep(60_000, b));
         assert!(should_stop_sweep(120_000, b));

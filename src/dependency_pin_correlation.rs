@@ -87,9 +87,7 @@ pub struct PinObservation {
 }
 
 /// The reconciled state of a dependency pin vs. what is actually present.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PinState {
     /// Observed local rev matches the pin and the tree is clean.
@@ -241,7 +239,13 @@ fn recommend(obs: &PinObservation, state: PinState) -> String {
 mod tests {
     use super::*;
 
-    fn obs(pkg: &str, pinned: &str, local: Option<&str>, dirty: bool, present: bool) -> PinObservation {
+    fn obs(
+        pkg: &str,
+        pinned: &str,
+        local: Option<&str>,
+        dirty: bool,
+        present: bool,
+    ) -> PinObservation {
         PinObservation {
             package: pkg.to_string(),
             pinned_rev: pinned.to_string(),
@@ -253,7 +257,13 @@ mod tests {
 
     #[test]
     fn current_pin_matches_and_needs_no_action() {
-        let a = assess_pin(&obs("frankensqlite", "a4923d4", Some("a4923d4"), false, true));
+        let a = assess_pin(&obs(
+            "frankensqlite",
+            "a4923d4",
+            Some("a4923d4"),
+            false,
+            true,
+        ));
         assert_eq!(a.pin_state, PinState::Current);
         // Pin is at the fixed rev, so the known fixes are present.
         assert!(!a.upstream_fix_possibly_missing);
@@ -262,17 +272,32 @@ mod tests {
 
     #[test]
     fn old_pin_is_stale_and_flags_missing_fix() {
-        let a = assess_pin(&obs("frankensqlite", "a4923d4", Some("0000abc"), false, true));
+        let a = assess_pin(&obs(
+            "frankensqlite",
+            "a4923d4",
+            Some("0000abc"),
+            false,
+            true,
+        ));
         assert_eq!(a.pin_state, PinState::Stale);
         // Local rev does not carry the fix.
         assert!(a.upstream_fix_possibly_missing);
-        assert!(a.known_issue_ids.contains(&"fsqlite-openread-001".to_string()));
+        assert!(
+            a.known_issue_ids
+                .contains(&"fsqlite-openread-001".to_string())
+        );
         assert!(a.recommended_validation.contains("cargo update"));
     }
 
     #[test]
     fn dirty_local_patch_is_unverifiable() {
-        let a = assess_pin(&obs("frankensqlite", "a4923d4", Some("a4923d4"), true, true));
+        let a = assess_pin(&obs(
+            "frankensqlite",
+            "a4923d4",
+            Some("a4923d4"),
+            true,
+            true,
+        ));
         assert_eq!(a.pin_state, PinState::DirtyLocalPatch);
         // Even though the rev matches, dirtiness means the fix presence is unconfirmed.
         assert!(a.upstream_fix_possibly_missing);
@@ -299,12 +324,21 @@ mod tests {
     #[test]
     fn unverified_with_pin_at_fixed_rev_still_lists_issues() {
         let a = assess_pin(&obs("frankensearch", "be455cc", None, false, true));
-        assert!(a.known_issue_ids.contains(&"frankensearch-tantivy-001".to_string()));
+        assert!(
+            a.known_issue_ids
+                .contains(&"frankensearch-tantivy-001".to_string())
+        );
     }
 
     #[test]
     fn package_without_known_issues_has_no_fix_flag() {
-        let a = assess_pin(&obs("asupersync", "deadbeef0", Some("cafef00d1"), false, true));
+        let a = assess_pin(&obs(
+            "asupersync",
+            "deadbeef0",
+            Some("cafef00d1"),
+            false,
+            true,
+        ));
         assert_eq!(a.pin_state, PinState::Stale); // revs differ
         assert!(a.known_issue_ids.is_empty());
         // No known issues for this package → nothing to flag as possibly-missing.
@@ -333,12 +367,21 @@ mod tests {
             true,
         ));
         assert_eq!(a.pin_state, PinState::Current);
-        assert!(!a.upstream_fix_possibly_missing, "fix rev prefix-matches the pin");
+        assert!(
+            !a.upstream_fix_possibly_missing,
+            "fix rev prefix-matches the pin"
+        );
     }
 
     #[test]
     fn assessment_serializes_with_stable_fields_and_round_trips() {
-        let a = assess_pin(&obs("frankensqlite", "a4923d4", Some("0000abc"), false, true));
+        let a = assess_pin(&obs(
+            "frankensqlite",
+            "a4923d4",
+            Some("0000abc"),
+            false,
+            true,
+        ));
         let value = serde_json::to_value(&a).unwrap();
         assert_eq!(value["schema_version"], DEPENDENCY_PIN_SCHEMA_VERSION);
         assert_eq!(value["package"], "frankensqlite");
@@ -359,7 +402,10 @@ mod tests {
             (PinState::MissingCheckout, "missing-checkout"),
             (PinState::Unverified, "unverified"),
         ] {
-            assert_eq!(serde_json::to_string(&state).unwrap(), format!("\"{wire}\""));
+            assert_eq!(
+                serde_json::to_string(&state).unwrap(),
+                format!("\"{wire}\"")
+            );
         }
     }
 

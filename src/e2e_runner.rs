@@ -244,7 +244,11 @@ impl RunEvent {
             self.elapsed_ms,
             self.exit_code
                 .map(|c| c.to_string())
-                .unwrap_or_else(|| if self.timed_out { "timeout".into() } else { "signal".into() }),
+                .unwrap_or_else(|| if self.timed_out {
+                    "timeout".into()
+                } else {
+                    "signal".into()
+                }),
         )
     }
 }
@@ -388,8 +392,8 @@ pub fn run(spec: &RunSpec, expect: &RunExpectation<'_>, now_ms: u64) -> RunEvent
         v.extend(spec.args.iter().cloned());
         v
     };
-    let base = |raw: &RawRun, outcome: RunOutcome, parsed_json_ok: bool, failures: Vec<String>| {
-        RunEvent {
+    let base =
+        |raw: &RawRun, outcome: RunOutcome, parsed_json_ok: bool, failures: Vec<String>| RunEvent {
             schema_version: E2E_RUNNER_SCHEMA_VERSION,
             mode: spec.mode,
             command_line: command_line.clone(),
@@ -412,8 +416,7 @@ pub fn run(spec: &RunSpec, expect: &RunExpectation<'_>, now_ms: u64) -> RunEvent
             artifact_paths: Vec::new(),
             stdout_len: raw.stdout.len(),
             stderr_len: raw.stderr.len(),
-        }
-    };
+        };
 
     // Fixture precondition: report MissingFixture without executing.
     if let Some(path) = &spec.require_path
@@ -448,7 +451,12 @@ pub fn run(spec: &RunSpec, expect: &RunExpectation<'_>, now_ms: u64) -> RunEvent
                 stderr: format!("spawn failed: {err}"),
                 elapsed_ms: 0,
             };
-            return base(&raw, RunOutcome::CommandFailure { exit_code: -1 }, true, Vec::new());
+            return base(
+                &raw,
+                RunOutcome::CommandFailure { exit_code: -1 },
+                true,
+                Vec::new(),
+            );
         }
     };
 
@@ -489,7 +497,10 @@ mod tests {
     #[test]
     fn success_with_valid_json_classifies_success() {
         let spec = sh_spec("printf '{\"ok\":true}'", 5_000);
-        let mut expect = RunExpectation { expect_json: true, ..Default::default() };
+        let mut expect = RunExpectation {
+            expect_json: true,
+            ..Default::default()
+        };
         expect.assertions.push((
             "has_ok".to_string(),
             Box::new(|out: &str, _err: &str| out.contains("\"ok\"")),
@@ -516,13 +527,20 @@ mod tests {
         assert!(ev.timed_out);
         assert_eq!(ev.exit_code, None);
         // Bounded: well under the 5s the command wanted.
-        assert!(ev.elapsed_ms < 3_000, "timeout was not bounded: {}ms", ev.elapsed_ms);
+        assert!(
+            ev.elapsed_ms < 3_000,
+            "timeout was not bounded: {}ms",
+            ev.elapsed_ms
+        );
     }
 
     #[test]
     fn invalid_json_when_json_expected() {
         let spec = sh_spec("printf 'not json at all'", 5_000);
-        let expect = RunExpectation { expect_json: true, ..Default::default() };
+        let expect = RunExpectation {
+            expect_json: true,
+            ..Default::default()
+        };
         let ev = run(&spec, &expect, 0);
         assert_eq!(ev.outcome, RunOutcome::InvalidJson);
         assert!(!ev.parsed_json_ok);
@@ -539,7 +557,9 @@ mod tests {
         let ev = run(&spec, &expect, 0);
         assert_eq!(
             ev.outcome,
-            RunOutcome::AssertionFailure { failed: vec!["contains_world".to_string()] }
+            RunOutcome::AssertionFailure {
+                failed: vec!["contains_world".to_string()]
+            }
         );
         assert_eq!(ev.assertion_failures, vec!["contains_world".to_string()]);
     }
@@ -566,7 +586,14 @@ mod tests {
 
     #[test]
     fn run_event_jsonl_and_summary_are_stable_and_round_trip() {
-        let ev = run(&sh_spec("printf '{}'", 5_000), &RunExpectation { expect_json: true, ..Default::default() }, 42);
+        let ev = run(
+            &sh_spec("printf '{}'", 5_000),
+            &RunExpectation {
+                expect_json: true,
+                ..Default::default()
+            },
+            42,
+        );
         let line = ev.to_jsonl();
         // One line, no embedded newline.
         assert!(!line.contains('\n'));
@@ -582,12 +609,35 @@ mod tests {
     #[test]
     fn classify_outcome_precedence_is_timeout_then_exit_then_json_then_assert() {
         // timeout wins even with a non-zero exit recorded.
-        let raw = RawRun { exit_code: Some(2), timed_out: true, signal: None, stdout: String::new(), stderr: String::new(), elapsed_ms: 10 };
-        assert_eq!(classify_outcome(&raw, &RunExpectation::default()), RunOutcome::Timeout);
-        // exit wins over json.
-        let raw = RawRun { exit_code: Some(2), timed_out: false, signal: None, stdout: "bad".into(), stderr: String::new(), elapsed_ms: 1 };
+        let raw = RawRun {
+            exit_code: Some(2),
+            timed_out: true,
+            signal: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            elapsed_ms: 10,
+        };
         assert_eq!(
-            classify_outcome(&raw, &RunExpectation { expect_json: true, ..Default::default() }),
+            classify_outcome(&raw, &RunExpectation::default()),
+            RunOutcome::Timeout
+        );
+        // exit wins over json.
+        let raw = RawRun {
+            exit_code: Some(2),
+            timed_out: false,
+            signal: None,
+            stdout: "bad".into(),
+            stderr: String::new(),
+            elapsed_ms: 1,
+        };
+        assert_eq!(
+            classify_outcome(
+                &raw,
+                &RunExpectation {
+                    expect_json: true,
+                    ..Default::default()
+                }
+            ),
             RunOutcome::CommandFailure { exit_code: 2 }
         );
     }

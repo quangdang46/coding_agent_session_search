@@ -105,7 +105,10 @@ fn render_payload(fixture_id: &str, source_kind: &str, facts: ReplayFacts) -> Va
 
     let kind_histogram = histogram(&facts.events, |event| event.kind.clone());
     let actor_histogram = histogram(&facts.events, |event| {
-        event.actor.clone().unwrap_or_else(|| "unspecified".to_string())
+        event
+            .actor
+            .clone()
+            .unwrap_or_else(|| "unspecified".to_string())
     });
     let (first_ts, last_ts) = time_span(&facts.events);
     let events_value = Value::Array(scrubbed_events.clone());
@@ -213,9 +216,12 @@ fn scrub_payload(value: &Value, tally: &mut RedactionTally) -> Value {
             }
             Value::String(redacted)
         }
-        Value::Array(items) => {
-            Value::Array(items.iter().map(|item| scrub_payload(item, tally)).collect())
-        }
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| scrub_payload(item, tally))
+                .collect(),
+        ),
         Value::Object(map) => {
             let mut out = Map::new();
             for (key, val) in map {
@@ -304,11 +310,9 @@ fn replay_assertions(raw: &[Event], scrubbed: &[Value], tally: &RedactionTally) 
         .filter_map(|event| event.get("ts_ms").and_then(Value::as_i64))
         .collect();
     let ts_monotonic = ts.windows(2).all(|pair| pair[0] <= pair[1]);
-    let no_raw_payload = !scrubbed.iter().any(|event| {
-        event
-            .get("payload")
-            .is_some_and(retains_droppable_text)
-    });
+    let no_raw_payload = !scrubbed
+        .iter()
+        .any(|event| event.get("payload").is_some_and(retains_droppable_text));
     json!([
         {"assertion": "event_count_preserved", "ok": raw.len() == scrubbed.len()},
         {"assertion": "events_sorted_by_seq", "ok": seqs_sorted(scrubbed)},
@@ -555,9 +559,15 @@ mod tests {
         assert_no_leak(&out);
         // The free-text body must be dropped to the omission marker.
         let events = out["events"].as_array().unwrap();
-        let mail = events.iter().find(|e| e["kind"] == json!("mail_send")).unwrap();
+        let mail = events
+            .iter()
+            .find(|e| e["kind"] == json!("mail_send"))
+            .unwrap();
         assert_eq!(mail["payload"]["body"], json!(OMITTED));
-        assert_eq!(out["redaction_report"]["raw_payload_text_retained"], json!(false));
+        assert_eq!(
+            out["redaction_report"]["raw_payload_text_retained"],
+            json!(false)
+        );
     }
 
     #[test]
@@ -593,9 +603,20 @@ mod tests {
     fn manifest_has_counts_and_timeline() {
         let out = render_replay_fixture_fixture("replay", Some(&source()));
         assert_eq!(out["manifest"]["event_count"], json!(2));
-        assert_eq!(out["manifest"]["timeline"]["first_ts_ms"], json!(1_749_455_000_000i64));
-        assert_eq!(out["manifest"]["timeline"]["last_ts_ms"], json!(1_749_456_000_000i64));
-        assert!(out["redaction_report"]["text_fields_dropped"].as_u64().unwrap() >= 1);
+        assert_eq!(
+            out["manifest"]["timeline"]["first_ts_ms"],
+            json!(1_749_455_000_000i64)
+        );
+        assert_eq!(
+            out["manifest"]["timeline"]["last_ts_ms"],
+            json!(1_749_456_000_000i64)
+        );
+        assert!(
+            out["redaction_report"]["text_fields_dropped"]
+                .as_u64()
+                .unwrap()
+                >= 1
+        );
     }
 
     #[test]
@@ -610,7 +631,10 @@ mod tests {
     fn live_is_empty_and_read_only() {
         let out = render_replay_fixture_live();
         assert_eq!(out["manifest"]["event_count"], json!(0));
-        assert_eq!(out["summary"]["recommended_action"], json!("no-events-to-replay"));
+        assert_eq!(
+            out["summary"]["recommended_action"],
+            json!("no-events-to-replay")
+        );
         assert_eq!(out["mutation_contract"]["touches_network"], json!(false));
     }
 }

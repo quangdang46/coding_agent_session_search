@@ -675,7 +675,9 @@ mod tests {
     #[test]
     fn redacted_samples_classify_kinds() {
         let output = render_privacy_exposure_fixture("privacy-risky", Some(&risky_source()));
-        let samples = output["providers"][0]["redacted_samples"].as_array().unwrap();
+        let samples = output["providers"][0]["redacted_samples"]
+            .as_array()
+            .unwrap();
         let kinds: Vec<&str> = samples
             .iter()
             .map(|sample| sample["kind"].as_str().unwrap())
@@ -703,9 +705,18 @@ mod tests {
     fn live_preview_is_policy_only_and_read_only() {
         let output = render_privacy_exposure_live();
         assert_eq!(output["live_enumeration"]["performed"], json!(false));
-        assert_eq!(output["mutation_contract"]["reads_file_contents"], json!(false));
-        assert_eq!(output["summary"]["recommended_action"], json!("supply-fixture-or-enable-scan"));
+        assert_eq!(
+            output["mutation_contract"]["reads_file_contents"],
+            json!(false)
+        );
+        assert_eq!(
+            output["summary"]["recommended_action"],
+            json!("supply-fixture-or-enable-scan")
+        );
         // The opt-in catalog is always present, even with no providers.
-        assert_eq!(output["required_opt_ins"].as_array().unwrap().len(), OPT_IN_MODES.len());
+        assert_eq!(
+            output["required_opt_ins"].as_array().unwrap().len(),
+            OPT_IN_MODES.len()
+        );
     }
 }

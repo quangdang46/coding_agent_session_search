@@ -45,19 +45,44 @@ const MACROS: &[WorkflowMacro] = &[
     WorkflowMacro {
         id: "investigate-no-hit-search",
         title: "Investigate a search that returns no hits",
-        intent_aliases: &["no-hit search", "empty search results", "search returns nothing"],
+        intent_aliases: &[
+            "no-hit search",
+            "empty search results",
+            "search returns nothing",
+        ],
         privacy_tier: "low",
         required_preflight_facts: &["index_present", "search_assets_ready"],
         steps: &[
-            MacroStep { intent: "check readiness of search assets", command: "search.readiness", proof_gate: "readiness-ok", mutates: false, rch_rule: "none" },
-            MacroStep { intent: "re-run query in two-tier mode with explain", command: "search.two-tier-explain", proof_gate: "explain-rendered", mutates: false, rch_rule: "none" },
-            MacroStep { intent: "inspect lexical vs semantic coverage", command: "diag.search-coverage", proof_gate: "coverage-reported", mutates: false, rch_rule: "none" },
+            MacroStep {
+                intent: "check readiness of search assets",
+                command: "search.readiness",
+                proof_gate: "readiness-ok",
+                mutates: false,
+                rch_rule: "none",
+            },
+            MacroStep {
+                intent: "re-run query in two-tier mode with explain",
+                command: "search.two-tier-explain",
+                proof_gate: "explain-rendered",
+                mutates: false,
+                rch_rule: "none",
+            },
+            MacroStep {
+                intent: "inspect lexical vs semantic coverage",
+                command: "diag.search-coverage",
+                proof_gate: "coverage-reported",
+                mutates: false,
+                rch_rule: "none",
+            },
         ],
         proof_gates: &["readiness-ok", "explain-rendered"],
         optional_mutations: &["rebuild-semantic-index"],
         rollback_notes: "All steps are read-only; the optional rebuild is resumable and leaves the prior index until it completes.",
         rch_rules: "Offload any index rebuild to a dedicated CARGO_TARGET_DIR; never rebuild on the interactive pane.",
-        stop_conditions: &["readiness reports blocked", "query returns hits after re-run"],
+        stop_conditions: &[
+            "readiness reports blocked",
+            "query returns hits after re-run",
+        ],
     },
     WorkflowMacro {
         id: "fix-ci-regression",
@@ -66,9 +91,27 @@ const MACROS: &[WorkflowMacro] = &[
         privacy_tier: "low",
         required_preflight_facts: &["git_clean_or_known", "ci_logs_available"],
         steps: &[
-            MacroStep { intent: "identify the first failing gate", command: "diag.ci-first-failure", proof_gate: "first-failure-found", mutates: false, rch_rule: "none" },
-            MacroStep { intent: "reproduce the failing gate locally", command: "verify.reproduce-gate", proof_gate: "repro-confirmed", mutates: false, rch_rule: "offload-build" },
-            MacroStep { intent: "apply the minimal fix and re-run the gate", command: "verify.rerun-gate", proof_gate: "gate-green", mutates: true, rch_rule: "offload-build" },
+            MacroStep {
+                intent: "identify the first failing gate",
+                command: "diag.ci-first-failure",
+                proof_gate: "first-failure-found",
+                mutates: false,
+                rch_rule: "none",
+            },
+            MacroStep {
+                intent: "reproduce the failing gate locally",
+                command: "verify.reproduce-gate",
+                proof_gate: "repro-confirmed",
+                mutates: false,
+                rch_rule: "offload-build",
+            },
+            MacroStep {
+                intent: "apply the minimal fix and re-run the gate",
+                command: "verify.rerun-gate",
+                proof_gate: "gate-green",
+                mutates: true,
+                rch_rule: "offload-build",
+            },
         ],
         proof_gates: &["first-failure-found", "repro-confirmed", "gate-green"],
         optional_mutations: &["apply-source-fix"],
@@ -83,15 +126,36 @@ const MACROS: &[WorkflowMacro] = &[
         privacy_tier: "low",
         required_preflight_facts: &["git_clean_or_known", "version_bumped"],
         steps: &[
-            MacroStep { intent: "run the full verification gauntlet", command: "verify.release-gauntlet", proof_gate: "gauntlet-green", mutates: false, rch_rule: "offload-build" },
-            MacroStep { intent: "verify distribution channels", command: "release.verify-channels", proof_gate: "channels-ready", mutates: false, rch_rule: "none" },
-            MacroStep { intent: "review the changelog and tag plan", command: "release.changelog-review", proof_gate: "changelog-approved", mutates: false, rch_rule: "none" },
+            MacroStep {
+                intent: "run the full verification gauntlet",
+                command: "verify.release-gauntlet",
+                proof_gate: "gauntlet-green",
+                mutates: false,
+                rch_rule: "offload-build",
+            },
+            MacroStep {
+                intent: "verify distribution channels",
+                command: "release.verify-channels",
+                proof_gate: "channels-ready",
+                mutates: false,
+                rch_rule: "none",
+            },
+            MacroStep {
+                intent: "review the changelog and tag plan",
+                command: "release.changelog-review",
+                proof_gate: "changelog-approved",
+                mutates: false,
+                rch_rule: "none",
+            },
         ],
         proof_gates: &["gauntlet-green", "channels-ready"],
         optional_mutations: &["create-git-tag"],
         rollback_notes: "Tagging is the only mutation; an unpushed tag is deletable locally before release.",
         rch_rules: "Cross-platform builds go through the release CI/dsr path, not the interactive pane.",
-        stop_conditions: &["a channel reports not-ready", "gauntlet finds a release blocker"],
+        stop_conditions: &[
+            "a channel reports not-ready",
+            "gauntlet finds a release blocker",
+        ],
     },
     WorkflowMacro {
         id: "repair-derived-assets",
@@ -100,9 +164,27 @@ const MACROS: &[WorkflowMacro] = &[
         privacy_tier: "low",
         required_preflight_facts: &["db_present", "disk_headroom_ok"],
         steps: &[
-            MacroStep { intent: "diagnose which derived assets are stale", command: "doctor.asset-truth-table", proof_gate: "assets-classified", mutates: false, rch_rule: "none" },
-            MacroStep { intent: "plan the rebuild resource impact", command: "resource.what-if-rebuild", proof_gate: "rebuild-planned", mutates: false, rch_rule: "none" },
-            MacroStep { intent: "rebuild only the stale assets", command: "doctor.rebuild-stale-assets", proof_gate: "assets-fresh", mutates: true, rch_rule: "offload-build" },
+            MacroStep {
+                intent: "diagnose which derived assets are stale",
+                command: "doctor.asset-truth-table",
+                proof_gate: "assets-classified",
+                mutates: false,
+                rch_rule: "none",
+            },
+            MacroStep {
+                intent: "plan the rebuild resource impact",
+                command: "resource.what-if-rebuild",
+                proof_gate: "rebuild-planned",
+                mutates: false,
+                rch_rule: "none",
+            },
+            MacroStep {
+                intent: "rebuild only the stale assets",
+                command: "doctor.rebuild-stale-assets",
+                proof_gate: "assets-fresh",
+                mutates: true,
+                rch_rule: "offload-build",
+            },
         ],
         proof_gates: &["assets-classified", "rebuild-planned", "assets-fresh"],
         optional_mutations: &["rebuild-stale-assets"],
@@ -117,15 +199,36 @@ const MACROS: &[WorkflowMacro] = &[
         privacy_tier: "redacted",
         required_preflight_facts: &["sources_config_writable"],
         steps: &[
-            MacroStep { intent: "preview the privacy exposure of the candidate source", command: "privacy.preview-exposure", proof_gate: "exposure-reviewed", mutates: false, rch_rule: "none" },
-            MacroStep { intent: "register the source and run a dry sync", command: "sources.dry-sync", proof_gate: "dry-sync-ok", mutates: false, rch_rule: "none" },
-            MacroStep { intent: "index the newly onboarded source", command: "index.incremental", proof_gate: "index-updated", mutates: true, rch_rule: "offload-build" },
+            MacroStep {
+                intent: "preview the privacy exposure of the candidate source",
+                command: "privacy.preview-exposure",
+                proof_gate: "exposure-reviewed",
+                mutates: false,
+                rch_rule: "none",
+            },
+            MacroStep {
+                intent: "register the source and run a dry sync",
+                command: "sources.dry-sync",
+                proof_gate: "dry-sync-ok",
+                mutates: false,
+                rch_rule: "none",
+            },
+            MacroStep {
+                intent: "index the newly onboarded source",
+                command: "index.incremental",
+                proof_gate: "index-updated",
+                mutates: true,
+                rch_rule: "offload-build",
+            },
         ],
         proof_gates: &["exposure-reviewed", "dry-sync-ok", "index-updated"],
         optional_mutations: &["register-source", "incremental-index"],
         rollback_notes: "Source registration is a config edit; remove the source entry to undo before indexing.",
         rch_rules: "Indexing of a large source should run off the interactive pane.",
-        stop_conditions: &["privacy exposure requires an opt-in the operator declines", "source path is unreadable"],
+        stop_conditions: &[
+            "privacy exposure requires an opt-in the operator declines",
+            "source path is unreadable",
+        ],
     },
     WorkflowMacro {
         id: "export-encrypted-session",
@@ -134,32 +237,82 @@ const MACROS: &[WorkflowMacro] = &[
         privacy_tier: "sensitive",
         required_preflight_facts: &["session_selected", "export_key_available"],
         steps: &[
-            MacroStep { intent: "preview what the export would include", command: "privacy.preview-exposure", proof_gate: "exposure-reviewed", mutates: false, rch_rule: "none" },
-            MacroStep { intent: "confirm the encryption key and recipient policy", command: "export.confirm-key-policy", proof_gate: "key-policy-confirmed", mutates: false, rch_rule: "none" },
-            MacroStep { intent: "produce the redaction-first encrypted export", command: "export.encrypted-html", proof_gate: "export-produced", mutates: true, rch_rule: "none" },
+            MacroStep {
+                intent: "preview what the export would include",
+                command: "privacy.preview-exposure",
+                proof_gate: "exposure-reviewed",
+                mutates: false,
+                rch_rule: "none",
+            },
+            MacroStep {
+                intent: "confirm the encryption key and recipient policy",
+                command: "export.confirm-key-policy",
+                proof_gate: "key-policy-confirmed",
+                mutates: false,
+                rch_rule: "none",
+            },
+            MacroStep {
+                intent: "produce the redaction-first encrypted export",
+                command: "export.encrypted-html",
+                proof_gate: "export-produced",
+                mutates: true,
+                rch_rule: "none",
+            },
         ],
-        proof_gates: &["exposure-reviewed", "key-policy-confirmed", "export-produced"],
+        proof_gates: &[
+            "exposure-reviewed",
+            "key-policy-confirmed",
+            "export-produced",
+        ],
         optional_mutations: &["write-encrypted-export"],
         rollback_notes: "The export is a new file; delete the output to undo. No source data is modified.",
         rch_rules: "Local-only; encryption never offloads.",
-        stop_conditions: &["the export key is unavailable", "privacy exposure is unacceptable for the recipient tier"],
+        stop_conditions: &[
+            "the export key is unavailable",
+            "privacy exposure is unacceptable for the recipient tier",
+        ],
     },
     WorkflowMacro {
         id: "create-support-capsule",
         title: "Create a redacted support capsule",
-        intent_aliases: &["support bundle", "diagnostics capsule", "share a bug report"],
+        intent_aliases: &[
+            "support bundle",
+            "diagnostics capsule",
+            "share a bug report",
+        ],
         privacy_tier: "redacted",
         required_preflight_facts: &["db_present"],
         steps: &[
-            MacroStep { intent: "preview the capsule's privacy exposure", command: "privacy.preview-exposure", proof_gate: "exposure-reviewed", mutates: false, rch_rule: "none" },
-            MacroStep { intent: "gather redacted health and status evidence", command: "support.gather-evidence", proof_gate: "evidence-gathered", mutates: false, rch_rule: "none" },
-            MacroStep { intent: "produce the redacted support capsule", command: "support.produce-capsule", proof_gate: "capsule-produced", mutates: true, rch_rule: "none" },
+            MacroStep {
+                intent: "preview the capsule's privacy exposure",
+                command: "privacy.preview-exposure",
+                proof_gate: "exposure-reviewed",
+                mutates: false,
+                rch_rule: "none",
+            },
+            MacroStep {
+                intent: "gather redacted health and status evidence",
+                command: "support.gather-evidence",
+                proof_gate: "evidence-gathered",
+                mutates: false,
+                rch_rule: "none",
+            },
+            MacroStep {
+                intent: "produce the redacted support capsule",
+                command: "support.produce-capsule",
+                proof_gate: "capsule-produced",
+                mutates: true,
+                rch_rule: "none",
+            },
         ],
         proof_gates: &["exposure-reviewed", "evidence-gathered", "capsule-produced"],
         optional_mutations: &["write-support-capsule"],
         rollback_notes: "The capsule is a new bundle file; delete it to undo. Source data is untouched.",
         rch_rules: "Local-only; capsule generation never offloads.",
-        stop_conditions: &["required evidence is unavailable", "redaction would leave the capsule empty"],
+        stop_conditions: &[
+            "required evidence is unavailable",
+            "redaction would leave the capsule empty",
+        ],
     },
 ];
 
@@ -193,12 +346,7 @@ pub fn render_workflow_macros_fixture(fixture_id: &str, source: Option<&Value>) 
     let macro_filter = source
         .and_then(|value| value.get("macro"))
         .and_then(Value::as_str);
-    render_payload(
-        fixture_id,
-        "fixture",
-        facts,
-        macro_filter,
-    )
+    render_payload(fixture_id, "fixture", facts, macro_filter)
 }
 
 fn render_payload(
@@ -359,7 +507,10 @@ fn validate_macro(entry: &WorkflowMacro) -> Vec<String> {
             || step.command == "cass"
             || step.command == "bv"
         {
-            problems.push(format!("step command `{}` is a bare cass/bv example", step.command));
+            problems.push(format!(
+                "step command `{}` is a bare cass/bv example",
+                step.command
+            ));
         }
     }
     for text in texts {
@@ -427,10 +578,19 @@ mod tests {
         // guided_workflow.surface legitimately names the `cass swarm macros` command).
         let text = serde_json::to_string(&out["macros"]).unwrap();
         // Structured dotted intents only — no runnable `cass `/`bv ` invocations.
-        assert!(!text.contains("cass "), "rendered macros must not embed `cass ` examples");
-        assert!(!text.contains("bv "), "rendered macros must not embed `bv ` examples");
+        assert!(
+            !text.contains("cass "),
+            "rendered macros must not embed `cass ` examples"
+        );
+        assert!(
+            !text.contains("bv "),
+            "rendered macros must not embed `bv ` examples"
+        );
         for token in ["rm -rf", "git reset --hard", "drop table"] {
-            assert!(!text.to_ascii_lowercase().contains(token), "destructive token leaked: {token}");
+            assert!(
+                !text.to_ascii_lowercase().contains(token),
+                "destructive token leaked: {token}"
+            );
         }
         assert_eq!(out["summary"]["invalid_count"], json!(0));
     }
@@ -481,7 +641,10 @@ mod tests {
         let src = json!({"macro": "does-not-exist"});
         let out = render_workflow_macros_fixture("macros-unknown", Some(&src));
         assert_eq!(out["summary"]["macro_count"], json!(0));
-        assert_eq!(out["summary"]["recommended_action"], json!("unknown-macro-id"));
+        assert_eq!(
+            out["summary"]["recommended_action"],
+            json!("unknown-macro-id")
+        );
     }
 
     #[test]

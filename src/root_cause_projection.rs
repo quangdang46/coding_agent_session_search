@@ -162,7 +162,8 @@ fn collect_hits(s: &ProjectionSignals) -> Vec<FamilyHit> {
         }
         if let Some(code) = s.transport_ssh_exit_code {
             ev.push(
-                EvidenceRef::new("transport.ssh_exit_code", "sources").with_detail(code.to_string()),
+                EvidenceRef::new("transport.ssh_exit_code", "sources")
+                    .with_detail(code.to_string()),
             );
         }
         if s.transport_connect_timeout {
@@ -183,8 +184,10 @@ fn collect_hits(s: &ProjectionSignals) -> Vec<FamilyHit> {
         hits.push(FamilyHit {
             family: RootCauseFamily::SemanticAssets,
             score: 1,
-            evidence: vec![EvidenceRef::new("semantic.vector_index_built", "diag")
-                .with_detail("false".to_string())],
+            evidence: vec![
+                EvidenceRef::new("semantic.vector_index_built", "diag")
+                    .with_detail("false".to_string()),
+            ],
             direct: false,
         });
     }
@@ -327,7 +330,11 @@ mod tests {
         assert_eq!(a.family, RootCauseFamily::FrankensqliteStorage);
         assert_eq!(a.locus, FaultLocus::Dependency);
         assert_eq!(a.confidence, AttributionConfidence::Confirmed);
-        assert!(a.evidence_refs.iter().any(|e| e.kind == "fsqlite.error_code"));
+        assert!(
+            a.evidence_refs
+                .iter()
+                .any(|e| e.kind == "fsqlite.error_code")
+        );
         assert!(a.recommended_next_probe.is_some());
     }
 
@@ -380,7 +387,11 @@ mod tests {
         let a = project_root_cause(&s);
         assert_eq!(a.family, RootCauseFamily::RemoteTransportAuth);
         assert_eq!(a.confidence, AttributionConfidence::Confirmed);
-        assert!(a.evidence_refs.iter().any(|e| e.kind == "transport.auth_failure"));
+        assert!(
+            a.evidence_refs
+                .iter()
+                .any(|e| e.kind == "transport.auth_failure")
+        );
     }
 
     #[test]
@@ -405,7 +416,7 @@ mod tests {
     fn mixed_evidence_picks_dominant_with_possible_confidence() {
         // Two direct families implicated => top is Possible, competitor named.
         let s = ProjectionSignals {
-            open_read_failure: true,        // FrankensqliteStorage (direct, score 2)
+            open_read_failure: true,            // FrankensqliteStorage (direct, score 2)
             derived_truth_table_mismatch: true, // CassDerivedState (direct, score 2)
             ..Default::default()
         };
@@ -423,7 +434,7 @@ mod tests {
     fn dominant_direct_over_circumstantial_is_probable() {
         // One direct (score 2) + one circumstantial (score 1) => Probable, no tie.
         let s = ProjectionSignals {
-            binary_behind_contract: true, // OldBinarySkew, direct, score 2
+            binary_behind_contract: true,        // OldBinarySkew, direct, score 2
             workspace_provenance_mismatch: true, // WorkspaceProvenance, score 1
             ..Default::default()
         };

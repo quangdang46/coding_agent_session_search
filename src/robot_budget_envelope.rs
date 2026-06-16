@@ -34,9 +34,7 @@ pub const BUDGET_ENVELOPE_SCHEMA_VERSION: u32 = 1;
 pub const NEAR_LIMIT_FRACTION: f64 = 0.8;
 
 /// The phase of budget consumption, derived purely from elapsed vs. total.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BudgetPhase {
     /// Comfortably within budget; do the full work.
@@ -121,9 +119,7 @@ impl RobotBudget {
 }
 
 /// Outcome of a budgeted robot operation.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BudgetOutcome {
     /// All requested work completed within budget.
@@ -177,7 +173,12 @@ impl<T> BudgetEnvelope<T> {
     }
 
     /// A partial result returned proactively (sections shed before the deadline).
-    pub fn partial(data: T, elapsed_ms: u64, budget_ms: u64, skipped_sections: Vec<String>) -> Self {
+    pub fn partial(
+        data: T,
+        elapsed_ms: u64,
+        budget_ms: u64,
+        skipped_sections: Vec<String>,
+    ) -> Self {
         Self {
             schema_version: BUDGET_ENVELOPE_SCHEMA_VERSION,
             outcome: BudgetOutcome::Partial,
@@ -287,7 +288,10 @@ mod tests {
         // Immediately after construction we are well within budget.
         assert!(!b.is_exhausted());
         assert!(b.remaining_ms() <= 60_000);
-        assert!(b.remaining_ms() > 50_000, "should have most of the budget left");
+        assert!(
+            b.remaining_ms() > 50_000,
+            "should have most of the budget left"
+        );
         assert_eq!(b.total_ms(), 60_000);
     }
 
@@ -368,13 +372,9 @@ mod tests {
 
     #[test]
     fn envelope_round_trips_through_json() {
-        let env = BudgetEnvelope::partial(
-            json!({"k": 1}),
-            7000,
-            8000,
-            vec!["semantic".to_string()],
-        )
-        .with_next_probe("cass triage --json");
+        let env =
+            BudgetEnvelope::partial(json!({"k": 1}), 7000, 8000, vec!["semantic".to_string()])
+                .with_next_probe("cass triage --json");
         let value = serde_json::to_value(&env).unwrap();
         let back: BudgetEnvelope<serde_json::Value> = serde_json::from_value(value).unwrap();
         assert_eq!(back, env);
@@ -382,10 +382,25 @@ mod tests {
 
     #[test]
     fn outcome_and_phase_wire_values_are_kebab() {
-        assert_eq!(serde_json::to_string(&BudgetOutcome::TimedOut).unwrap(), "\"timed-out\"");
-        assert_eq!(serde_json::to_string(&BudgetOutcome::Partial).unwrap(), "\"partial\"");
-        assert_eq!(serde_json::to_string(&BudgetOutcome::Complete).unwrap(), "\"complete\"");
-        assert_eq!(serde_json::to_string(&BudgetPhase::NearLimit).unwrap(), "\"near-limit\"");
-        assert_eq!(serde_json::to_string(&BudgetPhase::Exhausted).unwrap(), "\"exhausted\"");
+        assert_eq!(
+            serde_json::to_string(&BudgetOutcome::TimedOut).unwrap(),
+            "\"timed-out\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BudgetOutcome::Partial).unwrap(),
+            "\"partial\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BudgetOutcome::Complete).unwrap(),
+            "\"complete\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BudgetPhase::NearLimit).unwrap(),
+            "\"near-limit\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BudgetPhase::Exhausted).unwrap(),
+            "\"exhausted\""
+        );
     }
 }

@@ -23,9 +23,7 @@ pub const PROOF_ARTIFACT_SCHEMA_VERSION: u32 = 1;
 
 /// The classified outcome of a proof run. Ordered so a fleet/gate rollup can take
 /// the "worst" status with `max` (Pass is the floor of concern).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProofStatus {
     /// The command ran, assertions executed, and it succeeded.
@@ -257,7 +255,11 @@ mod tests {
         run.timeout_ms = 7_200_000;
         run.timed_out = true;
         let a = ProofArtifact::from_run(run);
-        assert_eq!(a.status, ProofStatus::Timeout, "timeout must outrank a zero exit");
+        assert_eq!(
+            a.status,
+            ProofStatus::Timeout,
+            "timeout must outrank a zero exit"
+        );
         assert!(!a.is_trustworthy_pass());
     }
 
@@ -298,14 +300,20 @@ mod tests {
     fn old_artifact_is_stale() {
         let mut run = base_run();
         run.artifact_age_ms = Some(48 * 60 * 60 * 1000);
-        assert_eq!(classify(&run, DEFAULT_STALE_AFTER_MS), ProofStatus::StaleArtifact);
+        assert_eq!(
+            classify(&run, DEFAULT_STALE_AFTER_MS),
+            ProofStatus::StaleArtifact
+        );
     }
 
     #[test]
     fn incomplete_run_is_partial_proof() {
         let mut run = base_run();
         run.completed = false;
-        assert_eq!(classify(&run, DEFAULT_STALE_AFTER_MS), ProofStatus::PartialProof);
+        assert_eq!(
+            classify(&run, DEFAULT_STALE_AFTER_MS),
+            ProofStatus::PartialProof
+        );
     }
 
     #[test]

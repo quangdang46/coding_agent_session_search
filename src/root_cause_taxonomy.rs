@@ -37,9 +37,7 @@ pub const ROOT_CAUSE_TAXONOMY_VERSION: u32 = 1;
 /// variant is a breaking change that requires bumping
 /// [`ROOT_CAUSE_TAXONOMY_VERSION`]. [`RootCauseFamily::Unknown`] is the explicit
 /// fallback — a diagnostic must never invent a family or leave one unset.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RootCauseFamily {
     /// CASS's own derived state is wrong or stale (index, caches, summaries,
@@ -379,9 +377,7 @@ impl FromStr for RootCauseFamily {
 /// Coarse classification of *where* a fault lives, derived from the family.
 /// Lets consumers separate genuine CASS defects from dependency/host/skew noise
 /// without matching on individual families.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FaultLocus {
     /// The fault is in CASS proper.
@@ -399,9 +395,7 @@ pub enum FaultLocus {
 /// Confidence with which a [`RootCauseFamily`] is attributed to an observation.
 /// A diagnostic must always state a confidence; `Unknown` is distinct from a
 /// low-but-nonzero `Possible`.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AttributionConfidence {
     /// Direct, unambiguous evidence (e.g. an explicit fsqlite error code).
@@ -589,13 +583,20 @@ mod tests {
             "unknown",
         ];
         let actual: Vec<&str> = RootCauseFamily::ALL.iter().map(|f| f.as_str()).collect();
-        assert_eq!(actual, required, "family set/order must match the bead contract");
+        assert_eq!(
+            actual, required,
+            "family set/order must match the bead contract"
+        );
 
         // No duplicates.
         let mut sorted = actual.clone();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), RootCauseFamily::ALL.len(), "families must be unique");
+        assert_eq!(
+            sorted.len(),
+            RootCauseFamily::ALL.len(),
+            "families must be unique"
+        );
 
         // Unknown fallback is present.
         assert!(RootCauseFamily::ALL.contains(&RootCauseFamily::Unknown));
@@ -634,12 +635,18 @@ mod tests {
             assert_eq!(d.family, family, "descriptor must report its own family");
             assert!(!d.title.is_empty(), "{family}: empty title");
             assert!(!d.examples.is_empty(), "{family}: must have examples");
-            assert!(d.examples.iter().all(|e| !e.is_empty()), "{family}: empty example");
+            assert!(
+                d.examples.iter().all(|e| !e.is_empty()),
+                "{family}: empty example"
+            );
             assert!(
                 !d.typical_evidence.is_empty(),
                 "{family}: must list typical evidence kinds"
             );
-            assert!(!d.first_probe.is_empty(), "{family}: must have a first probe");
+            assert!(
+                !d.first_probe.is_empty(),
+                "{family}: must have a first probe"
+            );
             assert!(
                 d.false_positive_guidance.len() > 20,
                 "{family}: false-positive guidance must be substantive"
@@ -650,7 +657,10 @@ mod tests {
     #[test]
     fn locus_classification_separates_cass_from_dependency_and_host() {
         assert_eq!(RootCauseFamily::CassDerivedState.locus(), FaultLocus::Cass);
-        assert_eq!(RootCauseFamily::WorkspaceProvenance.locus(), FaultLocus::Cass);
+        assert_eq!(
+            RootCauseFamily::WorkspaceProvenance.locus(),
+            FaultLocus::Cass
+        );
         for dep in [
             RootCauseFamily::FrankensqliteStorage,
             RootCauseFamily::FrankensearchSearch,
@@ -658,12 +668,19 @@ mod tests {
             RootCauseFamily::RemoteTransportAuth,
             RootCauseFamily::SemanticAssets,
         ] {
-            assert_eq!(dep.locus(), FaultLocus::Dependency, "{dep} should be a dependency");
+            assert_eq!(
+                dep.locus(),
+                FaultLocus::Dependency,
+                "{dep} should be a dependency"
+            );
             assert!(dep.is_external_to_cass(), "{dep} masquerades as CASS");
         }
         assert_eq!(RootCauseFamily::HostDiskPressure.locus(), FaultLocus::Host);
         assert_eq!(RootCauseFamily::HostOomLoad.locus(), FaultLocus::Host);
-        assert_eq!(RootCauseFamily::OldBinarySkew.locus(), FaultLocus::BinarySkew);
+        assert_eq!(
+            RootCauseFamily::OldBinarySkew.locus(),
+            FaultLocus::BinarySkew
+        );
         assert_eq!(RootCauseFamily::Unknown.locus(), FaultLocus::Unknown);
 
         // CASS-proper families and Unknown are not "external".
@@ -722,7 +739,10 @@ mod tests {
     #[test]
     fn evidence_ref_omits_detail_when_absent() {
         let value = serde_json::to_value(EvidenceRef::new("host.disk_free_pct", "/")).unwrap();
-        assert!(value.get("detail").is_none(), "absent detail must be skipped");
+        assert!(
+            value.get("detail").is_none(),
+            "absent detail must be skipped"
+        );
         assert_eq!(value["kind"], "host.disk_free_pct");
         assert_eq!(value["locator"], "/");
     }
@@ -731,8 +751,10 @@ mod tests {
     fn full_taxonomy_catalog_is_serializable_and_complete() {
         // A light golden: the whole taxonomy projected to JSON, as a consumer
         // (status/doctor/fleet) would embed it. Every family string must appear.
-        let catalog: Vec<RootCauseDescriptor> =
-            RootCauseFamily::ALL.iter().map(|f| f.descriptor()).collect();
+        let catalog: Vec<RootCauseDescriptor> = RootCauseFamily::ALL
+            .iter()
+            .map(|f| f.descriptor())
+            .collect();
         let json = serde_json::to_string(&catalog).expect("serialize catalog");
         for family in RootCauseFamily::ALL {
             assert!(

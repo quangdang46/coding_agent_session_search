@@ -30,7 +30,11 @@ pub fn detect_host_os(uname_s: &str) -> HostOs {
         HostOs::MacOs
     } else if s == "linux" {
         HostOs::Linux
-    } else if s.starts_with("mingw") || s.starts_with("msys") || s.starts_with("cygwin") || s.contains("windows") {
+    } else if s.starts_with("mingw")
+        || s.starts_with("msys")
+        || s.starts_with("cygwin")
+        || s.contains("windows")
+    {
         HostOs::Windows
     } else {
         HostOs::Other
@@ -59,9 +63,7 @@ pub fn default_data_dir(os: HostOs, home: &str, xdg_data_home: Option<&str>) -> 
 
 /// Where a path appears to originate, so the controller can reason about
 /// workspace provenance without assuming a single layout.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PathOrigin {
     /// `/Users/<name>/…` — a macOS home directory.
@@ -141,7 +143,10 @@ pub fn tool_notes_for(os: HostOs) -> Vec<String> {
             "data_dir=library-application-support".to_string(),
             "home=/Users".to_string(),
         ],
-        HostOs::Windows => vec!["shell=non-posix".to_string(), "data_dir=appdata".to_string()],
+        HostOs::Windows => vec![
+            "shell=non-posix".to_string(),
+            "data_dir=appdata".to_string(),
+        ],
         HostOs::Linux | HostOs::Other => Vec::new(),
     }
 }
@@ -206,9 +211,18 @@ mod tests {
 
     #[test]
     fn classifies_users_home_dp_and_linux_paths() {
-        assert_eq!(classify_path_origin("/Users/alice/.claude"), PathOrigin::MacUsersHome);
-        assert_eq!(classify_path_origin("/home/bob/.codex"), PathOrigin::LinuxHome);
-        assert_eq!(classify_path_origin("/dp/frankensqlite"), PathOrigin::DpCheckout);
+        assert_eq!(
+            classify_path_origin("/Users/alice/.claude"),
+            PathOrigin::MacUsersHome
+        );
+        assert_eq!(
+            classify_path_origin("/home/bob/.codex"),
+            PathOrigin::LinuxHome
+        );
+        assert_eq!(
+            classify_path_origin("/dp/frankensqlite"),
+            PathOrigin::DpCheckout
+        );
         assert_eq!(
             classify_path_origin("/data/projects/coding_agent_session_search"),
             PathOrigin::DpCheckout
@@ -218,7 +232,10 @@ mod tests {
 
     #[test]
     fn redacts_username_from_home_paths() {
-        assert_eq!(redact_user_path("/Users/alice/.claude/x"), "/Users/<user>/.claude/x");
+        assert_eq!(
+            redact_user_path("/Users/alice/.claude/x"),
+            "/Users/<user>/.claude/x"
+        );
         assert_eq!(redact_user_path("/home/bob/.codex"), "/home/<user>/.codex");
         assert_eq!(redact_user_path("/Users/alice"), "/Users/<user>");
         // Non-home paths are unchanged.
@@ -228,7 +245,10 @@ mod tests {
 
     #[test]
     fn portable_timestamp_avoids_gnu_only_flags() {
-        assert_eq!(PORTABLE_ISO_TIMESTAMP.command, "date -u +%Y-%m-%dT%H:%M:%SZ");
+        assert_eq!(
+            PORTABLE_ISO_TIMESTAMP.command,
+            "date -u +%Y-%m-%dT%H:%M:%SZ"
+        );
         assert!(!PORTABLE_ISO_TIMESTAMP.command.contains("-Is"));
         assert!(!PORTABLE_ISO_TIMESTAMP.command.contains("--iso-8601"));
         assert!(PORTABLE_ISO_TIMESTAMP.avoids.contains("GNU-only"));
@@ -263,7 +283,10 @@ mod tests {
             (PathOrigin::DpCheckout, "dp-checkout"),
             (PathOrigin::Other, "other"),
         ] {
-            assert_eq!(serde_json::to_string(&origin).unwrap(), format!("\"{wire}\""));
+            assert_eq!(
+                serde_json::to_string(&origin).unwrap(),
+                format!("\"{wire}\"")
+            );
         }
     }
 }

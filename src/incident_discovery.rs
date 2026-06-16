@@ -51,9 +51,7 @@ impl Default for DiscoveryCaps {
 }
 
 /// Why a bounded scan stopped.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StopReason {
     /// All candidates were scanned within every cap.
@@ -302,7 +300,10 @@ mod tests {
         assert_eq!(report.evidence.len(), 2, "evidence retained is capped");
         assert!(report.evidence_truncated, "overflow marks truncation");
         // No raw long line is present — only bounded pointers.
-        assert_eq!(report.evidence[0].reason.as_deref(), Some("err.kind=OpenRead"));
+        assert_eq!(
+            report.evidence[0].reason.as_deref(),
+            Some("err.kind=OpenRead")
+        );
     }
 
     #[test]

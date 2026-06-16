@@ -199,11 +199,14 @@ pub fn recommend(observation: &OnboardingObservation) -> OnboardingReport {
     let (recommended_command, rollback_note) = match recommended_action {
         OnboardingAction::DiscoverSources => (
             "cass sources discover --json".to_string(),
-            "read-only discovery; nothing is written until you run an explicit add/index".to_string(),
+            "read-only discovery; nothing is written until you run an explicit add/index"
+                .to_string(),
         ),
         OnboardingAction::FixSourcePermissions => (
-            "fix read permissions on the unreadable session root, then re-run cass triage --json".to_string(),
-            "no cass state changes; this only adjusts host filesystem permissions you control".to_string(),
+            "fix read permissions on the unreadable session root, then re-run cass triage --json"
+                .to_string(),
+            "no cass state changes; this only adjusts host filesystem permissions you control"
+                .to_string(),
         ),
         OnboardingAction::RunFirstIndex => (
             "cass index --json".to_string(),
@@ -297,10 +300,18 @@ mod tests {
     #[test]
     fn many_providers_are_ordered_deterministically_and_summed() {
         let mut o = base();
-        o.providers = vec![provider("codex", 5), provider("claude_code", 10), provider("cursor", 3)];
+        o.providers = vec![
+            provider("codex", 5),
+            provider("claude_code", 10),
+            provider("cursor", 3),
+        ];
         let r = recommend(&o);
         let names: Vec<&str> = r.providers.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, vec!["claude_code", "codex", "cursor"], "providers sorted by name");
+        assert_eq!(
+            names,
+            vec!["claude_code", "codex", "cursor"],
+            "providers sorted by name"
+        );
         assert_eq!(r.estimated_index_sessions, 18);
         assert_eq!(r.recommended_action, OnboardingAction::RunFirstIndex);
     }
@@ -311,7 +322,12 @@ mod tests {
         o.providers = vec![provider("codex", 1)];
         o.remote_sources_configured = false;
         let r = recommend(&o);
-        assert!(r.remote_hint.as_deref().unwrap().contains("cass sources add"));
+        assert!(
+            r.remote_hint
+                .as_deref()
+                .unwrap()
+                .contains("cass sources add")
+        );
         // Configured => no hint.
         let mut o2 = o.clone();
         o2.remote_sources_configured = true;
@@ -391,8 +407,19 @@ mod tests {
         ];
         for o in observations {
             let cmd = recommend(&o).recommended_command.to_ascii_lowercase();
-            for needle in ["--delete", "rm -rf", "rm -r ", "--remove-source-files", "prune", "shred", "drop "] {
-                assert!(!cmd.contains(needle), "destructive recommended command: {cmd:?}");
+            for needle in [
+                "--delete",
+                "rm -rf",
+                "rm -r ",
+                "--remove-source-files",
+                "prune",
+                "shred",
+                "drop ",
+            ] {
+                assert!(
+                    !cmd.contains(needle),
+                    "destructive recommended command: {cmd:?}"
+                );
             }
         }
     }

@@ -293,9 +293,7 @@ impl LessonGraph {
                 continue;
             }
             let key = (l.topic.clone(), l.project.clone());
-            let is_active = freshest
-                .get(&key)
-                .is_some_and(|(_, id)| id == &l.lesson_id);
+            let is_active = freshest.get(&key).is_some_and(|(_, id)| id == &l.lesson_id);
             l.status = if is_active {
                 LessonStatus::Active
             } else {
@@ -364,23 +362,53 @@ mod tests {
         assert_eq!(a, b, "same content must yield the same id across runs");
         assert!(a.starts_with("lsn-"));
         // Any identity field change yields a different id.
-        assert_ne!(a, stable_lesson_id("rch", "cass", LessonKind::Gotcha, "other"));
-        assert_ne!(a, stable_lesson_id("rch", "cass", LessonKind::Invariant, "preflight broken"));
-        assert_ne!(a, stable_lesson_id("other", "cass", LessonKind::Gotcha, "preflight broken"));
+        assert_ne!(
+            a,
+            stable_lesson_id("rch", "cass", LessonKind::Gotcha, "other")
+        );
+        assert_ne!(
+            a,
+            stable_lesson_id("rch", "cass", LessonKind::Invariant, "preflight broken")
+        );
+        assert_ne!(
+            a,
+            stable_lesson_id("other", "cass", LessonKind::Gotcha, "preflight broken")
+        );
     }
 
     #[test]
     fn duplicate_candidates_dedupe_and_merge_provenance() {
         // Same lesson mined twice from different sources (a "repeated fix").
         let g = LessonGraph::build(vec![
-            candidate("commit-race", LessonKind::Gotcha, LessonConfidence::Medium, 100, "use bare git commit on index", "bead-1"),
-            candidate("commit-race", LessonKind::Gotcha, LessonConfidence::High, 200, "use bare git commit on index", "commit-abc"),
+            candidate(
+                "commit-race",
+                LessonKind::Gotcha,
+                LessonConfidence::Medium,
+                100,
+                "use bare git commit on index",
+                "bead-1",
+            ),
+            candidate(
+                "commit-race",
+                LessonKind::Gotcha,
+                LessonConfidence::High,
+                200,
+                "use bare git commit on index",
+                "commit-abc",
+            ),
         ]);
         assert_eq!(g.summary.total, 1, "identical lessons must dedupe");
         let l = &g.lessons[0];
-        assert_eq!(l.source_refs, vec!["bead-1".to_string(), "commit-abc".to_string()]);
+        assert_eq!(
+            l.source_refs,
+            vec!["bead-1".to_string(), "commit-abc".to_string()]
+        );
         assert_eq!(l.freshness_ms, 200, "freshest metadata kept");
-        assert_eq!(l.confidence, LessonConfidence::High, "highest confidence wins");
+        assert_eq!(
+            l.confidence,
+            LessonConfidence::High,
+            "highest confidence wins"
+        );
         assert_eq!(l.status, LessonStatus::Active);
     }
 
@@ -388,8 +416,22 @@ mod tests {
     fn fresher_lesson_supersedes_older_on_same_topic() {
         // A "failed workaround" replaced by a "high-confidence landed decision".
         let g = LessonGraph::build(vec![
-            candidate("frankensqlite-group-by", LessonKind::FailedApproach, LessonConfidence::Low, 100, "tried bare 0 in grouped query", "old"),
-            candidate("frankensqlite-group-by", LessonKind::ReusableDecision, LessonConfidence::High, 300, "use SUM(0) in grouped query", "new"),
+            candidate(
+                "frankensqlite-group-by",
+                LessonKind::FailedApproach,
+                LessonConfidence::Low,
+                100,
+                "tried bare 0 in grouped query",
+                "old",
+            ),
+            candidate(
+                "frankensqlite-group-by",
+                LessonKind::ReusableDecision,
+                LessonConfidence::High,
+                300,
+                "use SUM(0) in grouped query",
+                "new",
+            ),
         ]);
         assert_eq!(g.summary.total, 2);
         assert_eq!(g.summary.active, 1);
@@ -403,7 +445,14 @@ mod tests {
     #[test]
     fn outdated_advice_is_marked_and_never_active() {
         // "outdated advice" in the corpus.
-        let mut c = candidate("rch-local-patch", LessonKind::CommandRecipe, LessonConfidence::Medium, 50, "use local patch override", "old-doc");
+        let mut c = candidate(
+            "rch-local-patch",
+            LessonKind::CommandRecipe,
+            LessonConfidence::Medium,
+            50,
+            "use local patch override",
+            "old-doc",
+        );
         c.outdated = true;
         let g = LessonGraph::build(vec![c]);
         assert_eq!(g.summary.outdated, 1);
@@ -433,7 +482,14 @@ mod tests {
     fn record_stores_only_redacted_summary_no_raw_field_exists() {
         // No-raw-leakage by construction: the record's only free-text field is
         // the caller-provided redacted summary; nothing else carries text.
-        let c = candidate("topic", LessonKind::Gotcha, LessonConfidence::Low, 1, "REDACTED-SUMMARY", "ref");
+        let c = candidate(
+            "topic",
+            LessonKind::Gotcha,
+            LessonConfidence::Low,
+            1,
+            "REDACTED-SUMMARY",
+            "ref",
+        );
         let rec = LessonRecord::from_candidate(c);
         assert_eq!(rec.summary, "REDACTED-SUMMARY");
         // Serialized form contains only the redacted summary as free text.
@@ -445,8 +501,22 @@ mod tests {
     #[test]
     fn graph_json_contract_is_stable_and_round_trips() {
         let g = LessonGraph::build(vec![
-            candidate("a", LessonKind::Invariant, LessonConfidence::High, 10, "x", "r1"),
-            candidate("b", LessonKind::Gotcha, LessonConfidence::Low, 20, "y", "r2"),
+            candidate(
+                "a",
+                LessonKind::Invariant,
+                LessonConfidence::High,
+                10,
+                "x",
+                "r1",
+            ),
+            candidate(
+                "b",
+                LessonKind::Gotcha,
+                LessonConfidence::Low,
+                20,
+                "y",
+                "r2",
+            ),
         ]);
         let value = serde_json::to_value(&g).unwrap();
         assert_eq!(value["schema_version"], LESSONS_SCHEMA_VERSION);

@@ -629,7 +629,9 @@ mod tests {
         });
         let out = render_workflow_analytics_fixture("wf", Some(&src));
         // One record missing skill/command/proof_gate -> coverage < 1000 per-mille.
-        let coverage = out["summary"]["evidence_coverage_per_mille"].as_u64().unwrap();
+        let coverage = out["summary"]["evidence_coverage_per_mille"]
+            .as_u64()
+            .unwrap();
         assert!(coverage < 1000, "coverage should reflect missing metadata");
         // No absolute path may leak (file_area redacted as a dimension key).
         let text = serde_json::to_string(&out).unwrap();
@@ -648,7 +650,10 @@ mod tests {
     fn live_is_empty_and_read_only() {
         let out = render_workflow_analytics_live();
         assert_eq!(out["summary"]["records_in_scope"], json!(0));
-        assert_eq!(out["summary"]["recommended_action"], json!("no-records-in-window"));
+        assert_eq!(
+            out["summary"]["recommended_action"],
+            json!("no-records-in-window")
+        );
         assert_eq!(out["mutation_contract"]["touches_network"], json!(false));
     }
 }

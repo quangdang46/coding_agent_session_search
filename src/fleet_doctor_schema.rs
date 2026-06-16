@@ -39,9 +39,7 @@ pub const FLEET_DOCTOR_SCHEMA_VERSION: u32 = 1;
 /// the scalar [`HostDoctorReport::timed_out`] / [`HostDoctorReport::unreachable`]
 /// flags mirror the timeout/unreachable cases for consumers that only branch on
 /// booleans.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HostProbeStatus {
     /// Every requested section was probed and the host is healthy.
@@ -93,9 +91,7 @@ impl HostProbeStatus {
 
 /// Host operating system family. Distinguishes macOS so consumers can account
 /// for path and tooling differences (the recurring fleet heterogeneity issue).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HostOs {
     Linux,
@@ -109,9 +105,7 @@ pub enum HostOs {
 
 /// Filesystem path convention, so a Linux controller can correctly interpret a
 /// macOS/Windows host's paths.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PathStyle {
     Posix,
@@ -150,9 +144,7 @@ impl Platform {
 
 /// What the host's `cass` binary can do, used to gate which probes are even
 /// meaningful and to surface version/feature skew across the fleet.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CapabilityTier {
     /// All features present (semantic, remote sync, robot envelopes, …).
@@ -166,9 +158,7 @@ pub enum CapabilityTier {
 }
 
 /// Coarse DB / readiness state for the host's CASS store.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReadinessState {
     Ready,
@@ -178,9 +168,7 @@ pub enum ReadinessState {
 }
 
 /// Semantic-search asset/state on the host.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SemanticState {
     Enabled,
@@ -191,9 +179,7 @@ pub enum SemanticState {
 }
 
 /// Remote source-sync state for the host's mirrors.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RemoteSyncState {
     Synced,
@@ -207,9 +193,7 @@ pub enum RemoteSyncState {
 /// Risk that derived/archive state is unrecoverable or diverging — drives the
 /// "back this up / re-archive" recommendation. Ordered low→high so
 /// [`FleetSummary::highest_archive_risk`] can take a `max`.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ArchiveRisk {
     Unknown,
@@ -389,8 +373,12 @@ impl HostDoctorReport {
         elapsed_ms: u64,
         recommended_action: impl Into<String>,
     ) -> Self {
-        let mut report =
-            Self::skeleton(host_alias, platform, HostProbeStatus::Unreachable, elapsed_ms);
+        let mut report = Self::skeleton(
+            host_alias,
+            platform,
+            HostProbeStatus::Unreachable,
+            elapsed_ms,
+        );
         report.likely_root_cause = Some(RootCauseFamily::RemoteTransportAuth);
         report.root_cause = Some(transport_root_cause_attribution(report.status, None));
         report.recommended_action = Some(recommended_action.into());
@@ -428,8 +416,7 @@ impl HostDoctorReport {
     /// [`HostProbeStatus::Partial`] (incomplete) and is flagged via
     /// [`Self::cancelled`] rather than counted as a transport failure.
     pub fn cancelled(host_alias: impl Into<String>, platform: Platform, elapsed_ms: u64) -> Self {
-        let mut report =
-            Self::skeleton(host_alias, platform, HostProbeStatus::Partial, elapsed_ms);
+        let mut report = Self::skeleton(host_alias, platform, HostProbeStatus::Partial, elapsed_ms);
         report.cancelled = true;
         report.connection_error = Some("probe cancelled by operator".to_string());
         report.retry_hint = Some("rerun the fleet probe to collect fresh evidence".to_string());
@@ -761,12 +748,19 @@ pub fn host_report_from_checks(
     let recommended_action = checks
         .iter()
         .find(|c| c.is_fail())
-        .or_else(|| checks.iter().find(|c| c.status.eq_ignore_ascii_case("warn")))
+        .or_else(|| {
+            checks
+                .iter()
+                .find(|c| c.status.eq_ignore_ascii_case("warn"))
+        })
         .and_then(|c| c.remediation.clone());
 
     let mut report = HostDoctorReport::skeleton(host_alias, platform, status, elapsed_ms);
     report.recommended_action = recommended_action;
-    if matches!(status, HostProbeStatus::Unreachable | HostProbeStatus::CommandNotFound) {
+    if matches!(
+        status,
+        HostProbeStatus::Unreachable | HostProbeStatus::CommandNotFound
+    ) {
         report.likely_root_cause = Some(RootCauseFamily::RemoteTransportAuth);
         report.root_cause = Some(transport_root_cause_attribution(status, None));
     }
@@ -783,7 +777,10 @@ mod tests {
 
     #[test]
     fn host_report_ok_when_all_checks_pass() {
-        let checks = [chk("SSH connectivity", "pass"), chk("rsync available", "pass")];
+        let checks = [
+            chk("SSH connectivity", "pass"),
+            chk("rsync available", "pass"),
+        ];
         let r = host_report_from_checks("ts1", Platform::linux_x86_64(), 30, &checks);
         assert_eq!(r.status, HostProbeStatus::Ok);
         assert_eq!(r.host_alias, "ts1");
@@ -794,19 +791,38 @@ mod tests {
 
     #[test]
     fn ssh_fail_marks_unreachable_with_transport_root_cause() {
-        let checks = [chk("SSH connectivity", "fail"), chk("rsync available", "pass")];
+        let checks = [
+            chk("SSH connectivity", "fail"),
+            chk("rsync available", "pass"),
+        ];
         let r = host_report_from_checks("mac-mini-old", Platform::linux_x86_64(), 5000, &checks);
         assert_eq!(r.status, HostProbeStatus::Unreachable);
         assert!(r.unreachable, "unreachable flag must mirror status");
-        assert_eq!(r.likely_root_cause, Some(RootCauseFamily::RemoteTransportAuth));
+        assert_eq!(
+            r.likely_root_cause,
+            Some(RootCauseFamily::RemoteTransportAuth)
+        );
         // bead 9.5 fleet slice: the full attribution rides alongside the family.
-        let rc = r.root_cause.as_ref().expect("unreachable host carries root_cause");
+        let rc = r
+            .root_cause
+            .as_ref()
+            .expect("unreachable host carries root_cause");
         assert_eq!(rc.family, RootCauseFamily::RemoteTransportAuth);
         assert_eq!(rc.confidence, AttributionConfidence::Confirmed);
         assert!(rc.recommended_next_probe.is_some());
-        assert!(rc.evidence_refs.iter().any(|e| e.kind == "transport.probe_status"));
-        assert_eq!(r.recommended_action.as_deref(), Some("fix SSH connectivity"));
-        assert_eq!(r.host_alias, "mac-mini-old", "identity preserved when unreachable");
+        assert!(
+            rc.evidence_refs
+                .iter()
+                .any(|e| e.kind == "transport.probe_status")
+        );
+        assert_eq!(
+            r.recommended_action.as_deref(),
+            Some("fix SSH connectivity")
+        );
+        assert_eq!(
+            r.host_alias, "mac-mini-old",
+            "identity preserved when unreachable"
+        );
     }
 
     #[test]
@@ -817,7 +833,10 @@ mod tests {
             1200,
             "ssh: connect to host css port 22: Connection timed out",
         );
-        let rc = r.root_cause.as_ref().expect("failed host carries root_cause");
+        let rc = r
+            .root_cause
+            .as_ref()
+            .expect("failed host carries root_cause");
         assert_eq!(rc.family, RootCauseFamily::RemoteTransportAuth);
         // A timeout is Probable, not a Confirmed hard failure.
         assert_eq!(rc.confidence, AttributionConfidence::Probable);
@@ -825,26 +844,40 @@ mod tests {
             rc.evidence_refs
                 .iter()
                 .any(|e| e.kind == "transport.connection_error"
-                    && e.detail.as_deref().is_some_and(|d| d.contains("Connection timed out"))),
+                    && e.detail
+                        .as_deref()
+                        .is_some_and(|d| d.contains("Connection timed out"))),
             "connection error must be preserved as evidence: {rc:?}"
         );
     }
 
     #[test]
     fn rsync_fail_marks_command_not_found() {
-        let checks = [chk("SSH connectivity", "pass"), chk("rsync available", "fail")];
+        let checks = [
+            chk("SSH connectivity", "pass"),
+            chk("rsync available", "fail"),
+        ];
         let r = host_report_from_checks("ts2", Platform::linux_x86_64(), 80, &checks);
         assert_eq!(r.status, HostProbeStatus::CommandNotFound);
         assert!(r.status.is_hard_failure());
-        assert_eq!(r.likely_root_cause, Some(RootCauseFamily::RemoteTransportAuth));
+        assert_eq!(
+            r.likely_root_cause,
+            Some(RootCauseFamily::RemoteTransportAuth)
+        );
     }
 
     #[test]
     fn other_fail_is_degraded_and_warn_is_partial() {
-        let degraded = [chk("SSH connectivity", "pass"), chk("Remote Path: paths[0]", "fail")];
+        let degraded = [
+            chk("SSH connectivity", "pass"),
+            chk("Remote Path: paths[0]", "fail"),
+        ];
         let r = host_report_from_checks("css", Platform::linux_x86_64(), 50, &degraded);
         assert_eq!(r.status, HostProbeStatus::Degraded);
-        assert_eq!(r.recommended_action.as_deref(), Some("fix Remote Path: paths[0]"));
+        assert_eq!(
+            r.recommended_action.as_deref(),
+            Some("fix Remote Path: paths[0]")
+        );
 
         let warned = [chk("SSH connectivity", "pass"), chk("storage", "warn")];
         let r2 = host_report_from_checks("csd", Platform::linux_x86_64(), 50, &warned);
@@ -866,12 +899,8 @@ mod tests {
     }
 
     fn populated_ok_host() -> HostDoctorReport {
-        let mut h = HostDoctorReport::skeleton(
-            "ts1",
-            Platform::linux_x86_64(),
-            HostProbeStatus::Ok,
-            42,
-        );
+        let mut h =
+            HostDoctorReport::skeleton("ts1", Platform::linux_x86_64(), HostProbeStatus::Ok, 42);
         h.cass_version = Some("0.6.13".to_string());
         h.capability_tier = Some(CapabilityTier::Full);
         h.data_dir = Some("/home/ubuntu/.cass".to_string());
@@ -925,7 +954,10 @@ mod tests {
         assert_eq!(value["skipped_sections"][0], "semantic");
         // Deep, unprobed fields are omitted entirely (not null noise).
         assert!(value.get("semantic").is_none());
-        assert_eq!(serde_json::from_value::<HostDoctorReport>(value).unwrap(), h);
+        assert_eq!(
+            serde_json::from_value::<HostDoctorReport>(value).unwrap(),
+            h
+        );
     }
 
     #[test]
@@ -942,7 +974,10 @@ mod tests {
         assert_eq!(value["status"], "timed-out");
         assert_eq!(value["timed_out"], true);
         assert_eq!(value["host_alias"], "csd", "identity survives timeout");
-        assert!(value.get("readiness").is_none(), "deep state absent on timeout");
+        assert!(
+            value.get("readiness").is_none(),
+            "deep state absent on timeout"
+        );
     }
 
     #[test]
@@ -966,7 +1001,10 @@ mod tests {
         assert_eq!(value["status"], "old-binary-skew");
         assert_eq!(value["cass_version"], "0.5.0");
         assert_eq!(value["likely_root_cause"], "old-binary-skew");
-        assert_eq!(serde_json::from_value::<HostDoctorReport>(value).unwrap(), h);
+        assert_eq!(
+            serde_json::from_value::<HostDoctorReport>(value).unwrap(),
+            h
+        );
     }
 
     #[test]
@@ -998,11 +1036,17 @@ mod tests {
         );
         assert!(h.unreachable);
         assert_eq!(h.status, HostProbeStatus::Unreachable);
-        assert_eq!(h.likely_root_cause, Some(RootCauseFamily::RemoteTransportAuth));
+        assert_eq!(
+            h.likely_root_cause,
+            Some(RootCauseFamily::RemoteTransportAuth)
+        );
         let value = serde_json::to_value(&h).unwrap();
         assert_eq!(value["status"], "unreachable");
         assert_eq!(value["unreachable"], true);
-        assert_eq!(value["host_alias"], "mac-mini-old", "identity survives unreachable");
+        assert_eq!(
+            value["host_alias"], "mac-mini-old",
+            "identity survives unreachable"
+        );
         assert!(value["recommended_action"].is_string());
         // No deep state leaked.
         assert!(value.get("readiness").is_none());
@@ -1074,10 +1118,21 @@ mod tests {
         assert_eq!(dns.elapsed_ms, 3_200);
         let value = serde_json::to_value(&dns).unwrap();
         assert_eq!(value["status"], "unreachable");
-        assert_eq!(value["host_alias"], "mac-mini-old", "identity survives failure");
-        assert!(value["connection_error"].as_str().unwrap().contains("resolve"));
+        assert_eq!(
+            value["host_alias"], "mac-mini-old",
+            "identity survives failure"
+        );
+        assert!(
+            value["connection_error"]
+                .as_str()
+                .unwrap()
+                .contains("resolve")
+        );
         assert!(value["retry_hint"].is_string());
-        assert_eq!(serde_json::from_value::<HostDoctorReport>(value).unwrap(), dns);
+        assert_eq!(
+            serde_json::from_value::<HostDoctorReport>(value).unwrap(),
+            dns
+        );
 
         // Auth failure scenario.
         let auth = HostDoctorReport::failed(
@@ -1087,7 +1142,12 @@ mod tests {
             "Permission denied (publickey).",
         );
         assert_eq!(auth.status, HostProbeStatus::Unreachable);
-        assert!(auth.connection_error.as_deref().unwrap().contains("Permission denied"));
+        assert!(
+            auth.connection_error
+                .as_deref()
+                .unwrap()
+                .contains("Permission denied")
+        );
 
         // Banner-exchange timeout scenario → timed-out, scalar flag mirrors.
         let banner = HostDoctorReport::failed(
@@ -1120,7 +1180,10 @@ mod tests {
         let value = serde_json::to_value(&cancelled).unwrap();
         assert_eq!(value["cancelled"], true);
         assert_eq!(value["status"], "partial");
-        assert_eq!(serde_json::from_value::<HostDoctorReport>(value).unwrap(), cancelled);
+        assert_eq!(
+            serde_json::from_value::<HostDoctorReport>(value).unwrap(),
+            cancelled
+        );
     }
 
     #[test]
@@ -1140,7 +1203,10 @@ mod tests {
         .with_last_known(&healthy);
 
         assert_eq!(now_failed.status, HostProbeStatus::TimedOut);
-        assert!(now_failed.stale_data, "carried last-known evidence marks stale");
+        assert!(
+            now_failed.stale_data,
+            "carried last-known evidence marks stale"
+        );
         assert_eq!(now_failed.cass_version.as_deref(), Some("0.6.10"));
         assert_eq!(
             now_failed.data_dir.as_deref(),
@@ -1216,7 +1282,10 @@ mod tests {
         let value = serde_json::to_value(&h).unwrap();
         assert_eq!(value["platform"]["os"], "macos");
         assert_eq!(value["platform"]["tool_notes"][0], "rsync=bsd");
-        assert_eq!(serde_json::from_value::<HostDoctorReport>(value).unwrap(), h);
+        assert_eq!(
+            serde_json::from_value::<HostDoctorReport>(value).unwrap(),
+            h
+        );
     }
 
     #[test]
@@ -1227,7 +1296,10 @@ mod tests {
         h.recommended_action = Some("back up derived archive before re-index".to_string());
         let value = serde_json::to_value(&h).unwrap();
         assert_eq!(value["archive_risk"], "high");
-        assert_eq!(serde_json::from_value::<HostDoctorReport>(value).unwrap(), h);
+        assert_eq!(
+            serde_json::from_value::<HostDoctorReport>(value).unwrap(),
+            h
+        );
     }
 
     #[test]
@@ -1280,7 +1352,12 @@ mod tests {
     fn fleet_summary_is_derived_and_takes_max_archive_risk() {
         let hosts = vec![
             populated_ok_host(),
-            HostDoctorReport::skeleton("csd", Platform::linux_x86_64(), HostProbeStatus::TimedOut, 8000),
+            HostDoctorReport::skeleton(
+                "csd",
+                Platform::linux_x86_64(),
+                HostProbeStatus::TimedOut,
+                8000,
+            ),
             HostDoctorReport::unreachable(
                 "mac-mini-old",
                 Platform::linux_x86_64(),
@@ -1321,7 +1398,10 @@ mod tests {
             10,
         )];
         let report = FleetDoctorReport::from_hosts(hosts);
-        assert_eq!(report.summary.unreachable, 1, "command-not-found is a hard failure");
+        assert_eq!(
+            report.summary.unreachable, 1,
+            "command-not-found is a hard failure"
+        );
     }
 
     // --- bead 10.4: attribution-aware fleet rollups over the host matrix ---
@@ -1385,11 +1465,17 @@ mod tests {
             Some(RootCauseFamily::FrankensqliteStorage)
         );
         assert_eq!(
-            report.summary.root_cause_distribution.get(&RootCauseFamily::FrankensqliteStorage),
+            report
+                .summary
+                .root_cause_distribution
+                .get(&RootCauseFamily::FrankensqliteStorage),
             Some(&3)
         );
         assert_eq!(
-            report.summary.root_cause_distribution.get(&RootCauseFamily::RemoteTransportAuth),
+            report
+                .summary
+                .root_cause_distribution
+                .get(&RootCauseFamily::RemoteTransportAuth),
             Some(&1)
         );
     }
@@ -1414,7 +1500,12 @@ mod tests {
     fn fleet_rollup_unattributed_fleet_has_empty_distribution_and_no_dominant() {
         let hosts = vec![
             HostDoctorReport::skeleton("ts1", Platform::linux_x86_64(), HostProbeStatus::Ok, 10),
-            HostDoctorReport::skeleton("ts2", Platform::linux_x86_64(), HostProbeStatus::Partial, 12),
+            HostDoctorReport::skeleton(
+                "ts2",
+                Platform::linux_x86_64(),
+                HostProbeStatus::Partial,
+                12,
+            ),
         ];
         let report = FleetDoctorReport::from_hosts(hosts);
         assert!(report.summary.root_cause_distribution.is_empty());

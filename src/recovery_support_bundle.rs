@@ -166,7 +166,10 @@ impl RecoverySupportBundle {
     /// embedded, paths are basename-only, and no full-path/raw opt-in was used.
     pub(crate) fn is_share_safe(&self) -> bool {
         !self.redaction.full_paths
-            && !matches!(self.redaction.private_text_policy, PrivateTextPolicy::RawOptIn)
+            && !matches!(
+                self.redaction.private_text_policy,
+                PrivateTextPolicy::RawOptIn
+            )
             && !self.embeds_full_paths()
     }
 
@@ -224,11 +227,7 @@ pub(crate) fn default_redaction_policy() -> RedactionPolicy {
 /// home/user layout in a shared bundle.
 fn basename(path: &str) -> String {
     let trimmed = path.trim_end_matches('/');
-    trimmed
-        .rsplit('/')
-        .next()
-        .unwrap_or(trimmed)
-        .to_string()
+    trimmed.rsplit('/').next().unwrap_or(trimmed).to_string()
 }
 
 /// Assemble a redacted recovery/support bundle. Pure: no I/O, no clock, no
@@ -513,7 +512,11 @@ mod tests {
                 .contains(&"raw_tool_payload".to_string())
         );
         // Truncated dirs are recorded.
-        for dir in ["manifest.data_dir", "manifest.config_dir", "manifest.model_dir"] {
+        for dir in [
+            "manifest.data_dir",
+            "manifest.config_dir",
+            "manifest.model_dir",
+        ] {
             assert!(
                 b.redaction.fields_truncated.contains(&dir.to_string()),
                 "{dir} should be recorded as truncated"

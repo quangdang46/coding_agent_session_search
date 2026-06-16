@@ -30,9 +30,7 @@ pub const DEFAULT_STALE_AFTER_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
 /// What kind of source root this is — used to separate real agent histories
 /// from noisy dependency/workspace roots that should not inflate coverage.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RootKind {
     Claude,
@@ -97,7 +95,10 @@ pub fn classify_root_kind(path: &str, agent: Option<&str>) -> RootKind {
         RootKind::Gemini
     } else if lower.contains(".cass") || lower.contains("coding_agent_session_search") {
         RootKind::CassWorkspace
-    } else if lower.contains("/data/projects") || lower.contains("node_modules") || lower.contains("target") {
+    } else if lower.contains("/data/projects")
+        || lower.contains("node_modules")
+        || lower.contains("target")
+    {
         RootKind::DependencyWorkspace
     } else {
         RootKind::Other
@@ -139,9 +140,7 @@ pub struct SourceRootStat {
 
 /// Coverage / freshness state for a host's source roots, in priority order of
 /// operator concern.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CoverageState {
     /// Indexed recently and consistent with the remote mirror.
@@ -161,9 +160,7 @@ pub enum CoverageState {
 }
 
 /// A specific provenance/coverage gap worth surfacing.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProvenanceGapKind {
     /// A configured root does not exist.
@@ -239,7 +236,9 @@ pub fn summarize_coverage(
     let mut any_source_pruned = false;
 
     for root in roots {
-        *root_kind_counts.entry(root.kind.as_str().to_string()).or_insert(0) += 1;
+        *root_kind_counts
+            .entry(root.kind.as_str().to_string())
+            .or_insert(0) += 1;
         total_estimated_bytes = total_estimated_bytes.saturating_add(root.estimated_bytes);
         approximate |= root.approximate;
 
@@ -376,7 +375,9 @@ fn derive_archive_risk(
     let has_unreadable = gaps
         .iter()
         .any(|g| g.kind == ProvenanceGapKind::UnreadableRoot);
-    let never_synced = gaps.iter().any(|g| g.kind == ProvenanceGapKind::NeverSynced)
+    let never_synced = gaps
+        .iter()
+        .any(|g| g.kind == ProvenanceGapKind::NeverSynced)
         || remote_sync == RemoteSyncState::NeverSynced
         || remote_sync == RemoteSyncState::Failed;
 
@@ -390,9 +391,9 @@ fn derive_archive_risk(
         CoverageState::MissingDerivedAssets => ArchiveRisk::Medium,
         // Local-only newer data that was never synced is at risk of loss.
         CoverageState::LocalArchiveAhead if never_synced => ArchiveRisk::High,
-        CoverageState::LocalArchiveAhead | CoverageState::Stale | CoverageState::RemoteCopyAhead => {
-            ArchiveRisk::Medium
-        }
+        CoverageState::LocalArchiveAhead
+        | CoverageState::Stale
+        | CoverageState::RemoteCopyAhead => ArchiveRisk::Medium,
         CoverageState::Unknown => {
             if has_unreadable {
                 ArchiveRisk::High
@@ -435,9 +436,18 @@ mod tests {
 
     #[test]
     fn classify_uses_agent_then_path() {
-        assert_eq!(classify_root_kind("/whatever", Some("Claude")), RootKind::Claude);
-        assert_eq!(classify_root_kind("/home/u/.codex/sessions", None), RootKind::Codex);
-        assert_eq!(classify_root_kind("/home/u/.gemini", None), RootKind::Gemini);
+        assert_eq!(
+            classify_root_kind("/whatever", Some("Claude")),
+            RootKind::Claude
+        );
+        assert_eq!(
+            classify_root_kind("/home/u/.codex/sessions", None),
+            RootKind::Codex
+        );
+        assert_eq!(
+            classify_root_kind("/home/u/.gemini", None),
+            RootKind::Gemini
+        );
         assert_eq!(
             classify_root_kind("/home/u/.gemini/antigravity-cli", None),
             RootKind::Antigravity
@@ -446,7 +456,10 @@ mod tests {
             classify_root_kind("/x", Some("antigravity")),
             RootKind::Antigravity
         );
-        assert_eq!(classify_root_kind("/home/u/.cass", None), RootKind::CassWorkspace);
+        assert_eq!(
+            classify_root_kind("/home/u/.cass", None),
+            RootKind::CassWorkspace
+        );
         assert_eq!(
             classify_root_kind("/data/projects/frankensqlite", None),
             RootKind::DependencyWorkspace
@@ -473,17 +486,29 @@ mod tests {
         r.live_sessions = Some(50_000);
         r.approximate = true;
         let s = summarize_coverage(&[r], RemoteSyncState::Synced, NOW, DEFAULT_STALE_AFTER_MS);
-        assert!(s.approximate, "approximate must propagate from a sampled huge root");
+        assert!(
+            s.approximate,
+            "approximate must propagate from a sampled huge root"
+        );
         assert_eq!(s.total_estimated_sessions, 50_000);
     }
 
     #[test]
     fn noisy_dependency_root_does_not_count_as_sessions() {
-        let roots = vec![
-            root(RootKind::DependencyWorkspace, "/data/projects/frankensqlite"),
-        ];
-        let s = summarize_coverage(&roots, RemoteSyncState::NotConfigured, NOW, DEFAULT_STALE_AFTER_MS);
-        assert_eq!(s.total_estimated_sessions, 0, "dependency roots are not session-bearing");
+        let roots = vec![root(
+            RootKind::DependencyWorkspace,
+            "/data/projects/frankensqlite",
+        )];
+        let s = summarize_coverage(
+            &roots,
+            RemoteSyncState::NotConfigured,
+            NOW,
+            DEFAULT_STALE_AFTER_MS,
+        );
+        assert_eq!(
+            s.total_estimated_sessions, 0,
+            "dependency roots are not session-bearing"
+        );
         // No readable session-bearing root => Unknown coverage.
         assert_eq!(s.coverage_state, CoverageState::Unknown);
         assert_eq!(*s.root_kind_counts.get("dependency-workspace").unwrap(), 1);
@@ -494,10 +519,11 @@ mod tests {
         let mut r = root(RootKind::Claude, "/home/u/.claude");
         r.exists = false;
         let s = summarize_coverage(&[r], RemoteSyncState::Synced, NOW, DEFAULT_STALE_AFTER_MS);
-        assert!(s
-            .provenance_gaps
-            .iter()
-            .any(|g| g.kind == ProvenanceGapKind::MissingRoot));
+        assert!(
+            s.provenance_gaps
+                .iter()
+                .any(|g| g.kind == ProvenanceGapKind::MissingRoot)
+        );
         // No readable session root remained.
         assert_eq!(s.coverage_state, CoverageState::Unknown);
     }
@@ -507,12 +533,17 @@ mod tests {
         let mut r = root(RootKind::Claude, "/home/u/.claude");
         r.readable = false;
         let s = summarize_coverage(&[r], RemoteSyncState::Synced, NOW, DEFAULT_STALE_AFTER_MS);
-        assert!(s
-            .provenance_gaps
-            .iter()
-            .any(|g| g.kind == ProvenanceGapKind::UnreadableRoot));
+        assert!(
+            s.provenance_gaps
+                .iter()
+                .any(|g| g.kind == ProvenanceGapKind::UnreadableRoot)
+        );
         assert_eq!(s.coverage_state, CoverageState::Unknown);
-        assert_eq!(s.archive_risk, ArchiveRisk::High, "unreadable root is high risk");
+        assert_eq!(
+            s.archive_risk,
+            ArchiveRisk::High,
+            "unreadable root is high risk"
+        );
     }
 
     #[test]
@@ -522,17 +553,23 @@ mod tests {
         let s = summarize_coverage(&[r], RemoteSyncState::Synced, NOW, DEFAULT_STALE_AFTER_MS);
         assert_eq!(s.coverage_state, CoverageState::MissingDerivedAssets);
         assert_eq!(s.archive_risk, ArchiveRisk::Medium);
-        assert!(s
-            .provenance_gaps
-            .iter()
-            .any(|g| g.kind == ProvenanceGapKind::NoDerivedAssets));
+        assert!(
+            s.provenance_gaps
+                .iter()
+                .any(|g| g.kind == ProvenanceGapKind::NoDerivedAssets)
+        );
     }
 
     #[test]
     fn pruned_live_source_with_no_remote_is_high_risk() {
         let mut r = root(RootKind::Claude, "/home/u/.claude");
         r.live_sessions = Some(10); // 10 live vs 100 archived => pruned
-        let s = summarize_coverage(&[r], RemoteSyncState::NeverSynced, NOW, DEFAULT_STALE_AFTER_MS);
+        let s = summarize_coverage(
+            &[r],
+            RemoteSyncState::NeverSynced,
+            NOW,
+            DEFAULT_STALE_AFTER_MS,
+        );
         assert_eq!(s.coverage_state, CoverageState::SourcePruned);
         assert_eq!(s.archive_risk, ArchiveRisk::High);
     }

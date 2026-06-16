@@ -371,9 +371,13 @@ fn degradation_mode(facts: &PackFacts) -> &'static str {
 fn degradation_note(facts: &PackFacts) -> &'static str {
     match (facts.semantic_available, facts.search_assets_ready) {
         (true, true) => "all ranking signals available",
-        (false, true) => "semantic model unavailable; semantic-only candidates dropped, lexical ranking retained",
+        (false, true) => {
+            "semantic model unavailable; semantic-only candidates dropped, lexical ranking retained"
+        }
         (true, false) => "search assets not ready; selection falls back to metadata-first ranking",
-        (false, false) => "neither semantic model nor search assets available; metadata-first ranking only",
+        (false, false) => {
+            "neither semantic model nor search assets available; metadata-first ranking only"
+        }
     }
 }
 
@@ -604,14 +608,20 @@ mod tests {
         let out = render_context_pack_fixture("empty", None);
         assert_eq!(out["status"], json!("partial"));
         assert_eq!(out["mutation_contract"]["read_only"], json!(true));
-        assert_eq!(out["summary"]["recommended_action"], json!("supply-context-pack-fixture"));
+        assert_eq!(
+            out["summary"]["recommended_action"],
+            json!("supply-context-pack-fixture")
+        );
     }
 
     #[test]
     fn live_is_empty_metadata_only_and_read_only() {
         let out = render_context_pack_live();
         assert_eq!(out["summary"]["candidate_count"], json!(0));
-        assert_eq!(out["degradation"]["mode"], json!("metadata-only-no-semantic"));
+        assert_eq!(
+            out["degradation"]["mode"],
+            json!("metadata-only-no-semantic")
+        );
         assert_eq!(out["mutation_contract"]["touches_network"], json!(false));
     }
 }

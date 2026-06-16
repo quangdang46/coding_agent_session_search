@@ -253,7 +253,10 @@ fn canonical_hash(value: &Value, seed: &str) -> String {
     write_canonical(value, &mut canonical);
     canonical.push_str("::");
     canonical.push_str(seed);
-    format!("capsule-blake3:{}", blake3::hash(canonical.as_bytes()).to_hex())
+    format!(
+        "capsule-blake3:{}",
+        blake3::hash(canonical.as_bytes()).to_hex()
+    )
 }
 
 fn write_canonical(value: &Value, out: &mut String) {
@@ -327,7 +330,10 @@ fn fixture_facts(source: Option<&Value>) -> CapsuleFacts {
         cass_version: string_field("cass_version", env!("CARGO_PKG_VERSION")),
         command: string_field("command", ""),
         transcript: string_field("transcript", ""),
-        env: source.get("env").cloned().unwrap_or(Value::Object(Map::new())),
+        env: source
+            .get("env")
+            .cloned()
+            .unwrap_or(Value::Object(Map::new())),
         health_excerpt: source
             .get("health_excerpt")
             .cloned()
@@ -392,8 +398,14 @@ mod tests {
         let out = render_repro_capsule_fixture("capsule", Some(&risky_source("redacted")));
         assert_no_leak(&out);
         assert_eq!(out["capsule"]["session_text"], json!(OMITTED));
-        assert_eq!(out["redaction_report"]["private_session_text_dropped"], json!(true));
-        assert_eq!(out["redaction_report"]["raw_session_content_included"], json!(false));
+        assert_eq!(
+            out["redaction_report"]["private_session_text_dropped"],
+            json!(true)
+        );
+        assert_eq!(
+            out["redaction_report"]["raw_session_content_included"],
+            json!(false)
+        );
         assert_eq!(out["privacy"]["session_text_opt_in"], json!(false));
     }
 
@@ -435,7 +447,11 @@ mod tests {
         for kind in INCIDENT_KINDS {
             let src = json!({"incident_kind": kind, "command": "x"});
             let out = render_repro_capsule_fixture("capsule", Some(&src));
-            assert_eq!(out["summary"]["incident_kind_known"], json!(true), "kind {kind}");
+            assert_eq!(
+                out["summary"]["incident_kind_known"],
+                json!(true),
+                "kind {kind}"
+            );
             assert_eq!(out["status"], json!("ok"), "kind {kind}");
         }
     }
@@ -446,7 +462,10 @@ mod tests {
         let out = render_repro_capsule_fixture("capsule", Some(&src));
         assert_eq!(out["summary"]["incident_kind_known"], json!(false));
         assert_eq!(out["status"], json!("warning"));
-        assert_eq!(out["capsule"]["incident_kind"], json!("other:meteor-strike"));
+        assert_eq!(
+            out["capsule"]["incident_kind"],
+            json!("other:meteor-strike")
+        );
     }
 
     #[test]

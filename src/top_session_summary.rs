@@ -155,7 +155,10 @@ pub fn summarize_top_sessions(hits: &[IncidentHit], top_n: usize) -> TopSessionS
             });
         entry.hit_count += 1;
         entry.any_redacted |= hit.redacted;
-        *entry.category_counts.entry(hit.category.clone()).or_insert(0) += 1;
+        *entry
+            .category_counts
+            .entry(hit.category.clone())
+            .or_insert(0) += 1;
         // Prefer a definite existence state over Unknown if any hit knows it.
         if entry.exists_state == SessionExistsState::Unknown
             && hit.exists_state != SessionExistsState::Unknown
@@ -181,7 +184,11 @@ pub fn summarize_top_sessions(hits: &[IncidentHit], top_n: usize) -> TopSessionS
         .take(top_n)
         .map(|(session_id, acc)| {
             // Dominant categories: count desc, then label asc; capped.
-            let mut cats: Vec<(String, usize)> = acc.category_counts.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            let mut cats: Vec<(String, usize)> = acc
+                .category_counts
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect();
             cats.sort_by(|(a_k, a_v), (b_k, b_v)| b_v.cmp(a_v).then_with(|| a_k.cmp(b_k)));
             let dominant_categories: Vec<String> = cats
                 .into_iter()
@@ -304,7 +311,10 @@ mod tests {
         let mut known = hit("s", "local", "b");
         known.exists_state = SessionExistsState::ArchiveOnly;
         let summary = summarize_top_sessions(&[unknown, known], 10);
-        assert_eq!(summary.top_sessions[0].exists_state, SessionExistsState::ArchiveOnly);
+        assert_eq!(
+            summary.top_sessions[0].exists_state,
+            SessionExistsState::ArchiveOnly
+        );
     }
 
     #[test]
@@ -325,7 +335,9 @@ mod tests {
     #[test]
     fn suggested_command_is_safe_and_read_only() {
         let summary = summarize_top_sessions(&[hit("s1", "local", "x")], 10);
-        let cmd = summary.top_sessions[0].suggested_command.to_ascii_lowercase();
+        let cmd = summary.top_sessions[0]
+            .suggested_command
+            .to_ascii_lowercase();
         assert!(cmd.starts_with("cass view ") || cmd.starts_with("cass pack "));
         assert!(cmd.contains("--json"));
         for needle in ["--delete", "rm -rf", "prune", "index", "repair"] {
@@ -352,7 +364,10 @@ mod tests {
         let value = serde_json::to_value(&summary).unwrap();
         assert_eq!(value["schema_version"], TOP_SESSION_SCHEMA_VERSION);
         assert_eq!(value["top_sessions"][0]["exists_state"], "exists");
-        assert_eq!(value["top_sessions"][0]["redaction_status"], "not_applicable");
+        assert_eq!(
+            value["top_sessions"][0]["redaction_status"],
+            "not_applicable"
+        );
         let back: TopSessionSummary = serde_json::from_value(value).unwrap();
         assert_eq!(back, summary);
     }

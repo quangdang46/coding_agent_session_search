@@ -206,32 +206,45 @@ pub fn safe_next_command(state: SourceDoctorState, source_id: &str) -> Option<St
     let cmd = match state {
         SourceDoctorState::Reachable => return None,
         SourceDoctorState::Unreachable | SourceDoctorState::Timeout => {
-            format!("cass sources doctor --source {source_id} --json   # retry when the host is reachable")
+            format!(
+                "cass sources doctor --source {source_id} --json   # retry when the host is reachable"
+            )
         }
         SourceDoctorState::AuthDenied => {
-            "ssh-add your key (or fix the identity file), then re-run cass sources doctor --json".to_string()
+            "ssh-add your key (or fix the identity file), then re-run cass sources doctor --json"
+                .to_string()
         }
         SourceDoctorState::CassMissing => {
             format!("cass sources setup --source {source_id}   # install cass on the remote")
         }
         SourceDoctorState::OldCass => {
-            format!("cass sources setup --source {source_id} --upgrade   # bring the remote binary current")
+            format!(
+                "cass sources setup --source {source_id} --upgrade   # bring the remote binary current"
+            )
         }
         SourceDoctorState::SourceRootUnreadable => {
-            format!("verify the configured paths for '{source_id}' (cass sources list --json); fix permissions on the host")
+            format!(
+                "verify the configured paths for '{source_id}' (cass sources list --json); fix permissions on the host"
+            )
         }
         SourceDoctorState::RemotePruned => {
-            "preserve the local archive/mirror; do NOT rebuild from the now-missing remote source".to_string()
+            "preserve the local archive/mirror; do NOT rebuild from the now-missing remote source"
+                .to_string()
         }
-        SourceDoctorState::StaleIndex => "cass index --json   # refresh the local index".to_string(),
+        SourceDoctorState::StaleIndex => {
+            "cass index --json   # refresh the local index".to_string()
+        }
         SourceDoctorState::MissingLexicalMetadata => {
             "cass index --rebuild-lexical --json   # restore lexical metadata".to_string()
         }
         SourceDoctorState::MirrorAhead => {
-            "local archive is ahead; inspect before any remote-backed rebuild (additive only)".to_string()
+            "local archive is ahead; inspect before any remote-backed rebuild (additive only)"
+                .to_string()
         }
         SourceDoctorState::MirrorBehind => {
-            format!("cass sources sync --source {source_id} --json   # additive sync to add coverage")
+            format!(
+                "cass sources sync --source {source_id} --json   # additive sync to add coverage"
+            )
         }
     };
     Some(cmd)
@@ -363,24 +376,34 @@ mod tests {
         let mut o = reachable_healthy("x");
         o.host_reachable = false;
         o.connection_error = Some("ssh: connect to host x: No route to host".to_string());
-        assert_eq!(classify_source_doctor_state(&o), SourceDoctorState::Unreachable);
+        assert_eq!(
+            classify_source_doctor_state(&o),
+            SourceDoctorState::Unreachable
+        );
 
         // timeout
         let mut o = reachable_healthy("x");
         o.host_reachable = false;
-        o.connection_error = Some("ssh: connect to host x port 22: Connection timed out".to_string());
+        o.connection_error =
+            Some("ssh: connect to host x port 22: Connection timed out".to_string());
         assert_eq!(classify_source_doctor_state(&o), SourceDoctorState::Timeout);
 
         // auth denied
         let mut o = reachable_healthy("x");
         o.host_reachable = false;
         o.connection_error = Some("Permission denied (publickey).".to_string());
-        assert_eq!(classify_source_doctor_state(&o), SourceDoctorState::AuthDenied);
+        assert_eq!(
+            classify_source_doctor_state(&o),
+            SourceDoctorState::AuthDenied
+        );
 
         // cass missing
         let mut o = reachable_healthy("x");
         o.cass_present = Some(false);
-        assert_eq!(classify_source_doctor_state(&o), SourceDoctorState::CassMissing);
+        assert_eq!(
+            classify_source_doctor_state(&o),
+            SourceDoctorState::CassMissing
+        );
 
         // old cass
         let mut o = reachable_healthy("x");
@@ -398,7 +421,10 @@ mod tests {
         // remote pruned
         let mut o = reachable_healthy("x");
         o.remote_pruned = true;
-        assert_eq!(classify_source_doctor_state(&o), SourceDoctorState::RemotePruned);
+        assert_eq!(
+            classify_source_doctor_state(&o),
+            SourceDoctorState::RemotePruned
+        );
 
         // missing lexical metadata
         let mut o = reachable_healthy("x");
@@ -411,17 +437,26 @@ mod tests {
         // stale index
         let mut o = reachable_healthy("x");
         o.index_stale = true;
-        assert_eq!(classify_source_doctor_state(&o), SourceDoctorState::StaleIndex);
+        assert_eq!(
+            classify_source_doctor_state(&o),
+            SourceDoctorState::StaleIndex
+        );
 
         // mirror ahead
         let mut o = reachable_healthy("x");
         o.mirror_ahead = true;
-        assert_eq!(classify_source_doctor_state(&o), SourceDoctorState::MirrorAhead);
+        assert_eq!(
+            classify_source_doctor_state(&o),
+            SourceDoctorState::MirrorAhead
+        );
 
         // mirror behind
         let mut o = reachable_healthy("x");
         o.mirror_behind = true;
-        assert_eq!(classify_source_doctor_state(&o), SourceDoctorState::MirrorBehind);
+        assert_eq!(
+            classify_source_doctor_state(&o),
+            SourceDoctorState::MirrorBehind
+        );
     }
 
     #[test]
@@ -455,7 +490,14 @@ mod tests {
         for state in states {
             if let Some(cmd) = safe_next_command(state, "laptop") {
                 let lower = cmd.to_ascii_lowercase();
-                for needle in ["--delete", "rm -rf", "rm -r ", "--remove-source-files", "prune", "shred"] {
+                for needle in [
+                    "--delete",
+                    "rm -rf",
+                    "rm -r ",
+                    "--remove-source-files",
+                    "prune",
+                    "shred",
+                ] {
                     assert!(
                         !lower.contains(needle),
                         "state {state:?} suggested a destructive command: {cmd:?}"
@@ -473,11 +515,7 @@ mod tests {
         down.host_reachable = false;
         down.connection_error = Some("No route to host".to_string());
 
-        let report = SourceDoctorReport::build(&[
-            reachable_healthy("good"),
-            pruned,
-            down,
-        ]);
+        let report = SourceDoctorReport::build(&[reachable_healthy("good"), pruned, down]);
         assert!(report.mutation_free);
         assert_eq!(report.summary.total, 3);
         assert_eq!(report.summary.healthy, 1);
@@ -491,8 +529,9 @@ mod tests {
     fn entry_preserves_identity_for_unreachable_source() {
         let mut o = reachable_healthy("mac-mini-old");
         o.host_reachable = false;
-        o.connection_error =
-            Some("ssh: Could not resolve hostname mac-mini-old: Name or service not known".to_string());
+        o.connection_error = Some(
+            "ssh: Could not resolve hostname mac-mini-old: Name or service not known".to_string(),
+        );
         let entry = SourceDoctorEntry::from_observation(&o);
         assert_eq!(entry.source_id, "mac-mini-old");
         assert_eq!(entry.host.as_deref(), Some("user@mac-mini-old"));

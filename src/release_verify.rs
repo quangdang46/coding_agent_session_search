@@ -259,7 +259,8 @@ pub fn evaluate_channel(
     if channel == ReleaseChannel::InstallerScript && obs.installer_ok == Some(false) {
         report.state = ChannelState::InstallerFailed;
         report.detail =
-            "installer script ran but did not produce a working expected-version binary".to_string();
+            "installer script ran but did not produce a working expected-version binary"
+                .to_string();
         report.manual_next_action =
             Some("fix the installer script's asset URL/version resolution and re-test".to_string());
         return report;
@@ -292,7 +293,10 @@ pub fn evaluate_channel(
                 channel.as_str()
             ));
         }
-        Some(observed) => match (parse_release_version(expected_version), parse_release_version(observed)) {
+        Some(observed) => match (
+            parse_release_version(expected_version),
+            parse_release_version(observed),
+        ) {
             (Some(want), Some(have)) if have < want => {
                 report.state = ChannelState::Stale;
                 report.detail = format!(
@@ -497,7 +501,9 @@ mod tests {
 
     const V: &str = "0.6.13";
 
-    fn all_channels(make: impl Fn(ReleaseChannel) -> ChannelObservation) -> Vec<(ReleaseChannel, ChannelObservation)> {
+    fn all_channels(
+        make: impl Fn(ReleaseChannel) -> ChannelObservation,
+    ) -> Vec<(ReleaseChannel, ChannelObservation)> {
         [
             ReleaseChannel::GithubRelease,
             ReleaseChannel::Homebrew,
@@ -514,7 +520,10 @@ mod tests {
     fn complete_release_is_overall_ready() {
         let obs = all_channels(|_| ChannelObservation::healthy(V));
         let report = ReleaseVerificationReport::build(V, &obs);
-        assert!(report.overall_ready, "all-healthy release should be ready: {report:?}");
+        assert!(
+            report.overall_ready,
+            "all-healthy release should be ready: {report:?}"
+        );
         assert_eq!(report.summary.total, 5);
         assert_eq!(report.summary.ready, 5);
         assert!(report.manual_actions().is_empty());
@@ -539,7 +548,12 @@ mod tests {
             .find(|c| c.channel == ReleaseChannel::Homebrew)
             .unwrap();
         assert_eq!(brew.state, ChannelState::Missing);
-        assert!(brew.manual_next_action.as_deref().unwrap().contains("dispatch"));
+        assert!(
+            brew.manual_next_action
+                .as_deref()
+                .unwrap()
+                .contains("dispatch")
+        );
     }
 
     #[test]
@@ -648,7 +662,10 @@ mod tests {
     #[test]
     fn ahead_or_not_configured_channels_are_ready() {
         let obs = vec![
-            (ReleaseChannel::GithubRelease, ChannelObservation::healthy("0.6.14")),
+            (
+                ReleaseChannel::GithubRelease,
+                ChannelObservation::healthy("0.6.14"),
+            ),
             (
                 ReleaseChannel::CratesIo,
                 ChannelObservation {
@@ -658,12 +675,12 @@ mod tests {
             ),
         ];
         let report = ReleaseVerificationReport::build(V, &obs);
-        assert!(report.overall_ready, "ahead + not-configured are both ready: {report:?}");
-        assert_eq!(report.summary.ready, 2);
-        assert_eq!(
-            report.channels[1].state,
-            ChannelState::NotConfigured
+        assert!(
+            report.overall_ready,
+            "ahead + not-configured are both ready: {report:?}"
         );
+        assert_eq!(report.summary.ready, 2);
+        assert_eq!(report.channels[1].state, ChannelState::NotConfigured);
     }
 
     #[test]
@@ -676,8 +693,7 @@ mod tests {
         assert_eq!(value["overall_ready"], true);
         assert_eq!(value["channels"][0]["channel"], "github_release");
         assert_eq!(value["channels"][0]["state"], "up_to_date");
-        let back: ReleaseVerificationReport =
-            serde_json::from_value(value).expect("deserialize");
+        let back: ReleaseVerificationReport = serde_json::from_value(value).expect("deserialize");
         assert_eq!(back, report);
     }
 
@@ -692,7 +708,10 @@ mod tests {
             ]
         }"#;
         let report = verify_from_json(input).expect("parse request");
-        assert!(report.overall_ready, "complete-release fixture should be ready: {report:?}");
+        assert!(
+            report.overall_ready,
+            "complete-release fixture should be ready: {report:?}"
+        );
         assert_eq!(report.summary.total, 3);
         assert_eq!(report.expected_version, "0.6.13");
     }
@@ -738,7 +757,10 @@ mod tests {
 
     #[test]
     fn version_parser_tolerates_v_prefix_and_suffix() {
-        assert_eq!(parse_release_version("v0.6.13"), Version::parse("0.6.13").ok());
+        assert_eq!(
+            parse_release_version("v0.6.13"),
+            Version::parse("0.6.13").ok()
+        );
         assert_eq!(
             parse_release_version("0.6.13-dirty"),
             Version::parse("0.6.13").ok()

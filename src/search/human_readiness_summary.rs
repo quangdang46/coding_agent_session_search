@@ -214,7 +214,10 @@ impl HumanReadinessSummary {
         } else {
             "not searchable"
         };
-        let mut line = format!("{} · {usable} · next: {}", self.headline, self.safest_next_action);
+        let mut line = format!(
+            "{} · {usable} · next: {}",
+            self.headline, self.safest_next_action
+        );
         if line.chars().count() > MAX_LINE_LEN {
             let truncated: String = line.chars().take(MAX_LINE_LEN - 1).collect();
             line = format!("{truncated}…");
@@ -365,7 +368,9 @@ fn missing_or_stale_note(
     // "removed/unconfigured source".
     match table.source_coverage {
         SourceCoverageState::Unconfigured => {
-            notes.push("no sources are configured (source=unconfigured) — nothing indexed yet".into());
+            notes.push(
+                "no sources are configured (source=unconfigured) — nothing indexed yet".into(),
+            );
         }
         SourceCoverageState::Unavailable => notes.push(
             "configured sources are unreachable (source=unavailable); the archive is preserved — \
@@ -391,9 +396,7 @@ fn missing_or_stale_note(
 
     // Semantic axis — absent / backfilling / policy-disabled are distinct and
     // none of them break lexical search.
-    if table.db == CanonicalDbAvailability::Available
-        && table.readiness.lexical.is_searchable()
-    {
+    if table.db == CanonicalDbAvailability::Available && table.readiness.lexical.is_searchable() {
         match table.readiness.semantic {
             SemanticReadinessState::Absent => notes.push(
                 "semantic refinement unavailable (semantic=absent); results are lexical-only until \
@@ -433,7 +436,8 @@ fn missing_or_stale_note(
     // surface defers the detail rather than blocking on the scan.
     if robot.quarantine_incomplete {
         if compact {
-            notes.push("quarantined artifacts present (advisory; detail deferred for speed)".into());
+            notes
+                .push("quarantined artifacts present (advisory; detail deferred for speed)".into());
         } else {
             notes.push(format!(
                 "{} artifact(s) quarantined (advisory; results are unaffected)",
@@ -532,13 +536,19 @@ mod tests {
 
     #[test]
     fn stale_searchable_is_distinct_from_missing() {
-        let stale = project_human_summary(&fixture("css_stale_existing_index"), SurfaceKind::Status);
-        let missing =
-            project_human_summary(&fixture("csd_missing_lexical_metadata"), SurfaceKind::Status);
+        let stale =
+            project_human_summary(&fixture("css_stale_existing_index"), SurfaceKind::Status);
+        let missing = project_human_summary(
+            &fixture("csd_missing_lexical_metadata"),
+            SurfaceKind::Status,
+        );
         assert_eq!(stale.class, ReadinessClass::StaleSearchable);
         assert!(stale.search_usable_now, "stale index is still searchable");
         assert_eq!(missing.class, ReadinessClass::Missing);
-        assert!(!missing.search_usable_now, "missing index is not searchable");
+        assert!(
+            !missing.search_usable_now,
+            "missing index is not searchable"
+        );
         assert_ne!(stale.headline, missing.headline);
         assert_ne!(stale.safe_next_action, missing.safe_next_action);
     }
@@ -548,10 +558,7 @@ mod tests {
         // Lexical ready + semantic absent: search IS usable; the note is about
         // refinement, not a broken index.
         let s = project_human_summary(
-            &with_lexical_semantic(
-                LexicalReadinessState::Ready,
-                SemanticReadinessState::Absent,
-            ),
+            &with_lexical_semantic(LexicalReadinessState::Ready, SemanticReadinessState::Absent),
             SurfaceKind::Status,
         );
         assert!(s.search_usable_now);
@@ -588,7 +595,10 @@ mod tests {
     fn quarantine_incomplete_is_distinct_from_no_results() {
         // local_stale_quarantine has quarantined artifacts but is searchable.
         let s = project_human_summary(&fixture("local_stale_quarantine"), SurfaceKind::Status);
-        assert!(s.search_usable_now, "quarantine never makes search unusable");
+        assert!(
+            s.search_usable_now,
+            "quarantine never makes search unusable"
+        );
         let note = s.whats_missing_or_stale.unwrap_or_default();
         assert!(note.contains("quarantined"), "got: {note}");
         assert!(note.contains("advisory"), "quarantine is advisory: {note}");
@@ -626,7 +636,9 @@ mod tests {
                 // The human copy references the same stable state codes the
                 // robot JSON serializes.
                 assert!(
-                    human.state_codes.contains(&format!("class={}", code(&robot.class))),
+                    human
+                        .state_codes
+                        .contains(&format!("class={}", code(&robot.class))),
                     "{name}/{surface:?} class code missing from human copy"
                 );
                 assert!(
@@ -684,7 +696,10 @@ mod tests {
                 );
                 // No rendered line carries a destructive fragment either.
                 for line in human.render_lines() {
-                    assert!(text_is_clean(&line), "{name}/{surface:?} unsafe line: {line}");
+                    assert!(
+                        text_is_clean(&line),
+                        "{name}/{surface:?} unsafe line: {line}"
+                    );
                 }
             }
         }
@@ -725,7 +740,10 @@ mod tests {
             let lines = human.render_lines();
             assert!(lines.len() <= MAX_RENDER_LINES, "too many lines");
             for line in &lines {
-                assert!(line.chars().count() <= MAX_LINE_LEN, "line too long: {line}");
+                assert!(
+                    line.chars().count() <= MAX_LINE_LEN,
+                    "line too long: {line}"
+                );
             }
             assert!(human.render_compact_line().chars().count() <= MAX_LINE_LEN);
         }
@@ -754,7 +772,10 @@ mod tests {
         // reporting a precise count it did not probe.
         let health_note = health.whats_missing_or_stale.clone().unwrap_or_default();
         let status_note = status.whats_missing_or_stale.clone().unwrap_or_default();
-        assert!(health_note.contains("deferred"), "health note: {health_note}");
+        assert!(
+            health_note.contains("deferred"),
+            "health note: {health_note}"
+        );
         assert!(
             status_note.contains("quarantined"),
             "status note: {status_note}"
