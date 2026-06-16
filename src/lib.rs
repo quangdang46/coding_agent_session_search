@@ -8,6 +8,7 @@ pub mod context_pack;
 pub mod crash_replay;
 #[cfg(unix)]
 pub mod daemon;
+pub mod daemon_runtime_state;
 pub mod dependency_drift;
 pub mod dependency_pin_correlation;
 pub mod doctor;
