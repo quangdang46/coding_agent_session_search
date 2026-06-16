@@ -56,17 +56,29 @@ fn status_emits_budget_block_when_healthy() {
     let json = parse_stdout_json(&String::from_utf8_lossy(&output.stdout));
 
     let budget = &json["budget"];
-    assert!(budget.is_object(), "status JSON should carry a budget block: {json}");
-    assert_eq!(budget["timed_out"], false, "healthy run must not be timed_out");
+    assert!(
+        budget.is_object(),
+        "status JSON should carry a budget block: {json}"
+    );
+    assert_eq!(
+        budget["timed_out"], false,
+        "healthy run must not be timed_out"
+    );
     assert_eq!(
         budget["skipped_sections"].as_array().map(Vec::len),
         Some(0),
         "healthy run should skip nothing: {budget}"
     );
     assert!(budget["budget_ms"].as_u64().is_some(), "budget_ms present");
-    assert!(budget["elapsed_ms"].as_u64().is_some(), "elapsed_ms present");
+    assert!(
+        budget["elapsed_ms"].as_u64().is_some(),
+        "elapsed_ms present"
+    );
     // Optional sections are present (not shed) on a healthy run.
-    assert!(!json["quarantine"].is_null(), "quarantine present on healthy run");
+    assert!(
+        !json["quarantine"].is_null(),
+        "quarantine present on healthy run"
+    );
 }
 
 #[test]
@@ -85,10 +97,21 @@ fn status_returns_partial_envelope_when_budget_tripped() {
     let json = parse_stdout_json(&stdout);
 
     let budget = &json["budget"];
-    assert!(budget.is_object(), "status JSON should carry a budget block: {json}");
-    assert_eq!(budget["timed_out"], true, "tripped budget must set timed_out: {budget}");
-    let skipped = budget["skipped_sections"].as_array().expect("skipped_sections array");
-    assert!(!skipped.is_empty(), "tripped budget must record skipped sections: {budget}");
+    assert!(
+        budget.is_object(),
+        "status JSON should carry a budget block: {json}"
+    );
+    assert_eq!(
+        budget["timed_out"], true,
+        "tripped budget must set timed_out: {budget}"
+    );
+    let skipped = budget["skipped_sections"]
+        .as_array()
+        .expect("skipped_sections array");
+    assert!(
+        !skipped.is_empty(),
+        "tripped budget must record skipped sections: {budget}"
+    );
     assert!(
         skipped.iter().any(|s| s == "quarantine"),
         "quarantine should be shed when slow: {budget}"
@@ -104,10 +127,22 @@ fn status_returns_partial_envelope_when_budget_tripped() {
 
     // The shed sections are null, but core readiness facts are still present —
     // enough for an agent to act safely.
-    assert!(json["quarantine"].is_null(), "shed quarantine is null on partial result");
-    assert!(json.get("status").is_some(), "core status field still present");
-    assert!(json.get("index").is_some(), "core index facts still present");
-    assert!(json.get("database").is_some(), "core database facts still present");
+    assert!(
+        json["quarantine"].is_null(),
+        "shed quarantine is null on partial result"
+    );
+    assert!(
+        json.get("status").is_some(),
+        "core status field still present"
+    );
+    assert!(
+        json.get("index").is_some(),
+        "core index facts still present"
+    );
+    assert!(
+        json.get("database").is_some(),
+        "core database facts still present"
+    );
 }
 
 #[test]
@@ -121,5 +156,8 @@ fn status_stdout_stays_pure_json_even_when_budget_tripped() {
         .output()
         .expect("run cass status");
     let json = parse_stdout_json(&String::from_utf8_lossy(&output.stdout));
-    assert!(json.is_object(), "partial status must still be a single JSON object");
+    assert!(
+        json.is_object(),
+        "partial status must still be a single JSON object"
+    );
 }

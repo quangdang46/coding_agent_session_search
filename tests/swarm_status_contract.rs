@@ -3140,12 +3140,21 @@ fn swarm_macros_healthy_case_is_ready_and_valid() -> Result<(), Box<dyn Error>> 
     )?;
     // Registry has at least six macros and no bare cass/bv or destructive recipe.
     let registry = get_path(&output, &["summary", "registry_size"]).and_then(Value::as_u64);
-    require(registry.is_some_and(|n| n >= 6), "registry must have >= 6 macros")?;
+    require(
+        registry.is_some_and(|n| n >= 6),
+        "registry must have >= 6 macros",
+    )?;
     // Scope the bare-command lint to the macro recipes (the envelope's
     // guided_workflow.surface legitimately names the cass swarm macros command).
     let text = serde_json::to_string(&output["macros"])?;
-    require(!text.contains("cass "), "macros must not embed bare `cass ` examples")?;
-    require(!text.contains("rm -rf"), "macros must not embed destructive recipes")?;
+    require(
+        !text.contains("cass "),
+        "macros must not embed bare `cass ` examples",
+    )?;
+    require(
+        !text.contains("rm -rf"),
+        "macros must not embed destructive recipes",
+    )?;
     Ok(())
 }
 
@@ -3204,7 +3213,10 @@ fn swarm_repro_capsule_scrubs_and_targets_fixture_data() -> Result<(), Box<dyn E
     )?;
     require_value_eq(get_path(&output, &["status"]), json!("ok"), "status")?;
     require_value_eq(
-        get_path(&output, &["redaction_report", "private_session_text_dropped"]),
+        get_path(
+            &output,
+            &["redaction_report", "private_session_text_dropped"],
+        ),
         json!(true),
         "private text dropped",
     )?;
@@ -4195,10 +4207,12 @@ fn render_swarm_context_pack_fixture(fixture_path: &Path) -> Result<Value, Box<d
     let source = adapter_set
         .input()
         .source_value(coding_agent_search::swarm_status::SwarmProviderName::ContextPack);
-    Ok(coding_agent_search::context_pack::render_context_pack_fixture(
-        adapter_set.input().fixture_id(),
-        source,
-    ))
+    Ok(
+        coding_agent_search::context_pack::render_context_pack_fixture(
+            adapter_set.input().fixture_id(),
+            source,
+        ),
+    )
 }
 
 fn render_swarm_workflow_analytics_fixture(fixture_path: &Path) -> Result<Value, Box<dyn Error>> {
@@ -4235,10 +4249,12 @@ fn render_swarm_macros_fixture(fixture_path: &Path) -> Result<Value, Box<dyn Err
     let source = adapter_set
         .input()
         .source_value(coding_agent_search::swarm_status::SwarmProviderName::WorkflowMacros);
-    Ok(coding_agent_search::workflow_macros::render_workflow_macros_fixture(
-        adapter_set.input().fixture_id(),
-        source,
-    ))
+    Ok(
+        coding_agent_search::workflow_macros::render_workflow_macros_fixture(
+            adapter_set.input().fixture_id(),
+            source,
+        ),
+    )
 }
 
 fn render_swarm_repro_capsule_fixture(fixture_path: &Path) -> Result<Value, Box<dyn Error>> {
@@ -4247,10 +4263,12 @@ fn render_swarm_repro_capsule_fixture(fixture_path: &Path) -> Result<Value, Box<
     let source = adapter_set
         .input()
         .source_value(coding_agent_search::swarm_status::SwarmProviderName::ReproCapsule);
-    Ok(coding_agent_search::repro_capsule::render_repro_capsule_fixture(
-        adapter_set.input().fixture_id(),
-        source,
-    ))
+    Ok(
+        coding_agent_search::repro_capsule::render_repro_capsule_fixture(
+            adapter_set.input().fixture_id(),
+            source,
+        ),
+    )
 }
 
 fn read_json(path: PathBuf) -> Value {

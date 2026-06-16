@@ -33,9 +33,18 @@ fn noise_classes() -> Vec<(&'static str, &'static str)> {
             "dependency-burst",
             "trace,fsqlite=trace,fsqlite_core=trace,fsqlite_vdbe=trace,fsqlite_mvcc=trace,frankensearch=trace,asupersync=trace",
         ),
-        ("slow-query-warn", "warn,fsqlite=warn,fsqlite.execution=warn,fsqlite.planner=warn"),
-        ("drop-close-warn", "warn,fsqlite=warn,fsqlite.connection=warn,fsqlite.pager=warn"),
-        ("database-busy", "warn,fsqlite=warn,fsqlite.wal=warn,fsqlite_mvcc=warn"),
+        (
+            "slow-query-warn",
+            "warn,fsqlite=warn,fsqlite.execution=warn,fsqlite.planner=warn",
+        ),
+        (
+            "drop-close-warn",
+            "warn,fsqlite=warn,fsqlite.connection=warn,fsqlite.pager=warn",
+        ),
+        (
+            "database-busy",
+            "warn,fsqlite=warn,fsqlite.wal=warn,fsqlite_mvcc=warn",
+        ),
         (
             "host-pressure-oom-disk",
             "warn,cass=warn,cass::host=warn,cass::pressure=warn,cass::diag=warn",
@@ -105,9 +114,24 @@ fn robot_commands_stay_parseable_across_all_noise_classes() {
         let invocations: Vec<Vec<String>> = vec![
             vec!["api-version".into(), "--json".into()],
             vec!["capabilities".into(), "--json".into()],
-            vec!["status".into(), "--json".into(), "--data-dir".into(), data_dir.clone()],
-            vec!["triage".into(), "--json".into(), "--data-dir".into(), data_dir.clone()],
-            vec!["diag".into(), "--json".into(), "--data-dir".into(), data_dir.clone()],
+            vec![
+                "status".into(),
+                "--json".into(),
+                "--data-dir".into(),
+                data_dir.clone(),
+            ],
+            vec![
+                "triage".into(),
+                "--json".into(),
+                "--data-dir".into(),
+                data_dir.clone(),
+            ],
+            vec![
+                "diag".into(),
+                "--json".into(),
+                "--data-dir".into(),
+                data_dir.clone(),
+            ],
         ];
 
         for args in invocations {
@@ -116,7 +140,10 @@ fn robot_commands_stay_parseable_across_all_noise_classes() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let value = assert_parseable_and_bounded(&label, &stdout, &stderr);
-            assert!(value.is_object() || value.is_array(), "{label}: JSON should be object/array");
+            assert!(
+                value.is_object() || value.is_array(),
+                "{label}: JSON should be object/array"
+            );
         }
     }
 }
@@ -128,13 +155,24 @@ fn view_stays_clean_under_dependency_burst() {
     // dependency spans.
     let (_, burst) = noise_classes()[0];
     let output = robot_cmd(burst)
-        .args(["view", "README.md", "--json", "--line", "1", "--context", "0"])
+        .args([
+            "view",
+            "README.md",
+            "--json",
+            "--line",
+            "1",
+            "--context",
+            "0",
+        ])
         .output()
         .expect("run cass");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let value = assert_parseable_and_bounded("view-burst", &stdout, &stderr);
-    assert_eq!(value["path"], "README.md", "view should echo the path: {value}");
+    assert_eq!(
+        value["path"], "README.md",
+        "view should echo the path: {value}"
+    );
 }
 
 #[test]
@@ -152,7 +190,10 @@ fn health_stays_parseable_under_host_pressure_diagnostics() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let value = assert_parseable_and_bounded("health-host-pressure", &stdout, &stderr);
-    assert!(value.is_object(), "health should emit a JSON object: {value}");
+    assert!(
+        value.is_object(),
+        "health should emit a JSON object: {value}"
+    );
 }
 
 #[test]

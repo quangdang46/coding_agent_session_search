@@ -122,7 +122,11 @@ fn render_all(sensitive: bool, partial: bool) -> Vec<(&'static str, Value)> {
     vec![
         (
             "resource_plan",
-            cass::resource_plan::render_resource_plan_fixture("gate", Some(&resource_plan_src), None),
+            cass::resource_plan::render_resource_plan_fixture(
+                "gate",
+                Some(&resource_plan_src),
+                None,
+            ),
         ),
         (
             "privacy_exposure",
@@ -134,7 +138,10 @@ fn render_all(sensitive: bool, partial: bool) -> Vec<(&'static str, Value)> {
         ),
         (
             "workflow_analytics",
-            cass::workflow_analytics::render_workflow_analytics_fixture("gate", Some(&workflow_src)),
+            cass::workflow_analytics::render_workflow_analytics_fixture(
+                "gate",
+                Some(&workflow_src),
+            ),
         ),
         (
             "replay_fixture",
@@ -177,7 +184,9 @@ fn assert_shared_invariants(surface: &str, value: &Value) {
         "{surface}: must expose a privacy projection"
     );
     assert!(
-        value["_meta"]["contract"].as_str().is_some_and(|c| !c.is_empty()),
+        value["_meta"]["contract"]
+            .as_str()
+            .is_some_and(|c| !c.is_empty()),
         "{surface}: must declare a _meta.contract"
     );
 }

@@ -21,7 +21,15 @@ fn view_json(budget_ms: &str) -> Value {
         .env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1")
         .env("CASS_IGNORE_SOURCES_CONFIG", "1")
         .env("CASS_VIEW_BUDGET_MS", budget_ms)
-        .args(["view", "README.md", "--json", "--line", "1", "--context", "0"])
+        .args([
+            "view",
+            "README.md",
+            "--json",
+            "--line",
+            "1",
+            "--context",
+            "0",
+        ])
         .output()
         .expect("run cass view");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -33,21 +41,50 @@ fn view_json(budget_ms: &str) -> Value {
 fn view_emits_budget_block_within_budget() {
     let json = view_json("60000");
     let budget = &json["budget"];
-    assert!(budget.is_object(), "view JSON should carry a budget block: {json}");
-    assert_eq!(budget["timed_out"], false, "generous budget => not timed_out: {budget}");
-    assert_eq!(budget["budget_ms"].as_u64(), Some(60_000), "budget_ms reflects override: {budget}");
-    assert!(budget["elapsed_ms"].as_u64().is_some(), "elapsed_ms present: {budget}");
+    assert!(
+        budget.is_object(),
+        "view JSON should carry a budget block: {json}"
+    );
+    assert_eq!(
+        budget["timed_out"], false,
+        "generous budget => not timed_out: {budget}"
+    );
+    assert_eq!(
+        budget["budget_ms"].as_u64(),
+        Some(60_000),
+        "budget_ms reflects override: {budget}"
+    );
+    assert!(
+        budget["elapsed_ms"].as_u64().is_some(),
+        "elapsed_ms present: {budget}"
+    );
     // The view payload is otherwise intact.
-    assert_eq!(json["path"], "README.md", "view still echoes the path: {json}");
+    assert_eq!(
+        json["path"], "README.md",
+        "view still echoes the path: {json}"
+    );
 }
 
 #[test]
 fn view_reports_timed_out_when_budget_exceeded() {
     let json = view_json("1");
     let budget = &json["budget"];
-    assert_eq!(budget["timed_out"], true, "1ms budget must be exceeded: {budget}");
-    assert_eq!(budget["budget_ms"].as_u64(), Some(1), "budget_ms reflects override: {budget}");
+    assert_eq!(
+        budget["timed_out"], true,
+        "1ms budget must be exceeded: {budget}"
+    );
+    assert_eq!(
+        budget["budget_ms"].as_u64(),
+        Some(1),
+        "budget_ms reflects override: {budget}"
+    );
     // stdout stays a single valid JSON object even when the budget is exceeded.
-    assert!(json.is_object(), "view output must remain valid JSON: {json}");
-    assert_eq!(json["path"], "README.md", "content still returned under exceeded budget: {json}");
+    assert!(
+        json.is_object(),
+        "view output must remain valid JSON: {json}"
+    );
+    assert_eq!(
+        json["path"], "README.md",
+        "content still returned under exceeded budget: {json}"
+    );
 }

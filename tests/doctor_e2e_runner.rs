@@ -3350,17 +3350,25 @@ fn doctor_e2e_runner_records_multi_file_source_artifacts() {
     // never rewritten by a recommended action.
     {
         let mut robot_strings: Vec<String> = Vec::new();
-        if let Some(commands) = payload["remote_source_sync"]["recommended_sync_commands"].as_array()
+        if let Some(commands) =
+            payload["remote_source_sync"]["recommended_sync_commands"].as_array()
         {
-            robot_strings.extend(commands.iter().filter_map(|c| c.as_str().map(str::to_string)));
+            robot_strings.extend(
+                commands
+                    .iter()
+                    .filter_map(|c| c.as_str().map(str::to_string)),
+            );
         }
         for gap in sync_gaps {
             if let Some(action) = gap["recommended_action"].as_str() {
                 robot_strings.push(action.to_string());
             }
             if let Some(evidence) = gap["evidence"].as_array() {
-                robot_strings
-                    .extend(evidence.iter().filter_map(|e| e.as_str().map(str::to_string)));
+                robot_strings.extend(
+                    evidence
+                        .iter()
+                        .filter_map(|e| e.as_str().map(str::to_string)),
+                );
             }
         }
         const ROBOT_DESTRUCTIVE_FLAGS: &[&str] = &[
@@ -3372,8 +3380,12 @@ fn doctor_e2e_runner_records_multi_file_source_artifacts() {
             "--remove-sent-files",
         ];
         const ROBOT_DESTRUCTIVE_TOKENS: &[&str] = &["rm", "rmdir", "shred", "unlink", "wipe"];
-        const ROBOT_DESTRUCTIVE_PHRASES: &[&str] =
-            &["delete the source", "delete source log", "rsync --delete", "rm -rf"];
+        const ROBOT_DESTRUCTIVE_PHRASES: &[&str] = &[
+            "delete the source",
+            "delete source log",
+            "rsync --delete",
+            "rm -rf",
+        ];
         for s in &robot_strings {
             let lower = s.to_ascii_lowercase();
             for flag in ROBOT_DESTRUCTIVE_FLAGS {

@@ -68,7 +68,11 @@ fn seed_archive_row(db_path: &Path, source_path: &str, source_id: &str, origin_h
         .expect("insert conversation tree");
 }
 
-fn run_view_json(db_path: &Path, source_path: &str, source_id: &str) -> (Value, std::process::Output) {
+fn run_view_json(
+    db_path: &Path,
+    source_path: &str,
+    source_id: &str,
+) -> (Value, std::process::Output) {
     let output = Command::new(cass_bin())
         .env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1")
         .env("CASS_IGNORE_SOURCES_CONFIG", "1")
@@ -84,15 +88,20 @@ fn run_view_json(db_path: &Path, source_path: &str, source_id: &str) -> (Value, 
         .output()
         .expect("run cass view");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let value = serde_json::from_str::<Value>(stdout.trim()).unwrap_or_else(|e| {
-        panic!("view stdout not valid JSON ({e}); stdout:\n{stdout}")
-    });
+    let value = serde_json::from_str::<Value>(stdout.trim())
+        .unwrap_or_else(|e| panic!("view stdout not valid JSON ({e}); stdout:\n{stdout}"));
     (value, output)
 }
 
 fn assert_archive_only(label: &str, json: &Value) {
-    assert_eq!(json["source_exists"], false, "{label}: source_exists should be false: {json}");
-    assert_eq!(json["archive_only"], true, "{label}: archive_only should be true: {json}");
+    assert_eq!(
+        json["source_exists"], false,
+        "{label}: source_exists should be false: {json}"
+    );
+    assert_eq!(
+        json["archive_only"], true,
+        "{label}: archive_only should be true: {json}"
+    );
     let content: String = json["lines"]
         .as_array()
         .expect("lines array")
@@ -144,13 +153,22 @@ fn view_marks_present_file_as_source_exists() {
     let db = tmp.path().join("agent_search.db");
     // A real file on disk: view should read it directly and NOT mark archive_only.
     let present = tmp.path().join("present.jsonl");
-    std::fs::write(&present, "{\"role\":\"user\",\"content\":\"live file line\"}\n")
-        .expect("write present file");
+    std::fs::write(
+        &present,
+        "{\"role\":\"user\",\"content\":\"live file line\"}\n",
+    )
+    .expect("write present file");
     let present_str = present.to_string_lossy().to_string();
     seed_archive_row(&db, &present_str, "local", None);
     let (json, _) = run_view_json(&db, &present_str, "local");
-    assert_eq!(json["source_exists"], true, "present file => source_exists=true: {json}");
-    assert_eq!(json["archive_only"], false, "present file => archive_only=false: {json}");
+    assert_eq!(
+        json["source_exists"], true,
+        "present file => source_exists=true: {json}"
+    );
+    assert_eq!(
+        json["archive_only"], false,
+        "present file => archive_only=false: {json}"
+    );
 }
 
 #[test]
@@ -164,12 +182,21 @@ fn view_distinguishes_missing_archive_row_from_missing_file() {
         .env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1")
         .env("CASS_IGNORE_SOURCES_CONFIG", "1")
         .args([
-            "view", missing, "--source", "local", "--json", "--db", db.to_str().unwrap(),
+            "view",
+            missing,
+            "--source",
+            "local",
+            "--json",
+            "--db",
+            db.to_str().unwrap(),
         ])
         .output()
         .expect("run cass view");
     // Non-zero exit; the error names the missing archive row distinctly.
-    assert!(!output.status.success(), "missing archive row + missing file should error");
+    assert!(
+        !output.status.success(),
+        "missing archive row + missing file should error"
+    );
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),

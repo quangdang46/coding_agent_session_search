@@ -591,7 +591,9 @@ fn status_triage_doctor_emit_root_cause_attribution() {
 
     let assert_root_cause = |rc: &serde_json::Value, surface: &str| {
         assert!(
-            rc.get("schema_version").and_then(serde_json::Value::as_u64).is_some(),
+            rc.get("schema_version")
+                .and_then(serde_json::Value::as_u64)
+                .is_some(),
             "{surface} root_cause needs schema_version: {rc}"
         );
         assert_eq!(
@@ -604,9 +606,21 @@ fn status_triage_doctor_emit_root_cause_attribution() {
             Some("unknown"),
             "{surface} clean dir => unknown confidence: {rc}"
         );
-        assert!(rc.get("locus").and_then(serde_json::Value::as_str).is_some());
-        assert!(rc.get("evidence_refs").map(serde_json::Value::is_array).unwrap_or(false));
-        assert!(rc.get("summary").and_then(serde_json::Value::as_str).is_some());
+        assert!(
+            rc.get("locus")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        );
+        assert!(
+            rc.get("evidence_refs")
+                .map(serde_json::Value::is_array)
+                .unwrap_or(false)
+        );
+        assert!(
+            rc.get("summary")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        );
     };
 
     for surface in ["status", "triage"] {

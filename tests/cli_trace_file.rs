@@ -84,19 +84,32 @@ fn trace_file_keeps_stdout_clean_and_captures_to_file() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     let json = parse_stdout_json(&stdout);
-    assert!(json.is_object(), "status --json should be a JSON object: {json}");
+    assert!(
+        json.is_object(),
+        "status --json should be a JSON object: {json}"
+    );
     assert_stderr_has_no_dependency_tracing("status+trace-file", &stderr);
 
     // The trace file is the explicit surface: it must exist and carry content
     // (at minimum the per-invocation summary line; plus any captured diagnostics).
-    assert!(trace_path.exists(), "trace file should be created when --trace-file is set");
+    assert!(
+        trace_path.exists(),
+        "trace file should be created when --trace-file is set"
+    );
     let trace = std::fs::read_to_string(&trace_path).expect("read trace file");
     assert!(!trace.trim().is_empty(), "trace file should not be empty");
     // The last line is the structured per-command summary written by the CLI.
-    let last = trace.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let last = trace
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("");
     let summary: Value = serde_json::from_str(last.trim())
         .unwrap_or_else(|e| panic!("trace summary line not JSON ({e}): {last}"));
-    assert_eq!(summary["cmd"], "status", "trace summary should record the command");
+    assert_eq!(
+        summary["cmd"], "status",
+        "trace summary should record the command"
+    );
 }
 
 #[test]
@@ -113,7 +126,10 @@ fn no_trace_file_created_without_the_flag() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json = parse_stdout_json(&stdout);
-    assert!(json.is_object(), "status --json should be a JSON object: {json}");
+    assert!(
+        json.is_object(),
+        "status --json should be a JSON object: {json}"
+    );
     assert!(
         !trace_path.exists(),
         "no trace file should be created when --trace-file is not passed"
@@ -126,7 +142,12 @@ fn trace_file_does_not_corrupt_stdout_for_api_version() {
     let trace_path = tmp.path().join("trace.jsonl");
 
     let output = noisy_robot_cmd()
-        .args(["api-version", "--json", "--trace-file", trace_path.to_str().unwrap()])
+        .args([
+            "api-version",
+            "--json",
+            "--trace-file",
+            trace_path.to_str().unwrap(),
+        ])
         .output()
         .expect("run cass");
 
