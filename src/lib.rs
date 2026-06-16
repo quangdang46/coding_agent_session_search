@@ -90695,6 +90695,72 @@ struct SourceDiagnostics {
     failed: usize,
 }
 
+/// The `sources doctor --json` envelope (bead uojcg.8.6): the
+/// `source_doctor_health` classification report (per-source explicit state +
+/// preservation-safe next command + `mutation_free` marker) flattened at the
+/// top level, with the detailed raw per-source checks under `diagnostics`.
+#[derive(serde::Serialize)]
+struct SourcesDoctorOutput<'a> {
+    #[serde(flatten)]
+    health: &'a crate::source_doctor_health::SourceDoctorReport,
+    diagnostics: &'a [SourceDiagnostics],
+}
+
+/// Project the read-only per-source checks gathered by `run_sources_doctor` into
+/// a [`crate::source_doctor_health::SourceDoctorObservation`] (bead uojcg.8.6).
+///
+/// Only facts this slice actually observed are populated: SSH reachability and
+/// the resulting connection error, plus source-root readability from the remote
+/// path checks. A local source (no host) is reachable by definition. The deeper
+/// remote-binary/version, index, and mirror/sync observations are owned by bead
+/// uojcg.8.7; here they stay at their not-observed defaults so the report never
+/// claims a health dimension this slice did not check. Pure: no I/O, no mutation.
+fn source_doctor_observation_from_checks(
+    source: &crate::sources::config::SourceDefinition,
+    checks: &[DiagnosticCheck],
+) -> crate::source_doctor_health::SourceDoctorObservation {
+    let host = source.host.clone();
+    let is_remote = host.is_some();
+    let ssh = checks
+        .iter()
+        .find(|c| matches!(c.name.as_str(), "SSH Connectivity"));
+    let host_reachable = if is_remote {
+        ssh.is_some_and(|c| matches!(c.status.as_str(), "pass"))
+    } else {
+        true
+    };
+    let connection_error = if is_remote && !host_reachable {
+        ssh.map(|c| c.message.clone())
+    } else {
+        None
+    };
+    let source_root_readable = if is_remote && host_reachable {
+        let path_checks: Vec<&DiagnosticCheck> = checks
+            .iter()
+            .filter(|c| c.name.starts_with("Remote Path"))
+            .collect();
+        if path_checks.is_empty() {
+            None
+        } else {
+            Some(
+                path_checks
+                    .iter()
+                    .all(|c| !matches!(c.status.as_str(), "fail")),
+            )
+        }
+    } else {
+        None
+    };
+    crate::source_doctor_health::SourceDoctorObservation {
+        source_id: source.name.clone(),
+        host,
+        host_reachable,
+        connection_error,
+        source_root_readable,
+        ..Default::default()
+    }
+}
+
 /// Diagnose source connectivity and configuration issues (P5.6)
 fn run_sources_doctor(
     source_filter: Option<&str>,
@@ -90753,6 +90819,7 @@ fn run_sources_doctor(
     }
 
     let mut all_diagnostics = Vec::new();
+    let mut observations = Vec::new();
 
     for source in sources_to_check {
         let source_start = std::time::Instant::now();
@@ -90812,6 +90879,11 @@ fn run_sources_doctor(
             &source_checks,
         );
 
+        // Bead uojcg.8.6: project the read-only checks into the source-doctor
+        // health observation (built before `checks` is moved into the diagnostics
+        // entry) for the explicit per-source state + safe next command.
+        observations.push(source_doctor_observation_from_checks(source, &checks));
+
         all_diagnostics.push(SourceDiagnostics {
             source_id: source.name.clone(),
             host_report,
@@ -90821,6 +90893,11 @@ fn run_sources_doctor(
             failed,
         });
     }
+
+    // Bead uojcg.8.6: classify the read-only observations into the explicit
+    // source-doctor health report (per-source state, preservation-safe next
+    // command, mutation-free marker). Pure: building the report performs no I/O.
+    let health_report = crate::source_doctor_health::SourceDoctorReport::build(&observations);
 
     // Output results
     let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
@@ -90832,9 +90909,13 @@ fn run_sources_doctor(
     });
 
     if let Some(_fmt) = structured_format {
+        let output = SourcesDoctorOutput {
+            health: &health_report,
+            diagnostics: &all_diagnostics,
+        };
         println!(
             "{}",
-            serde_json::to_string_pretty(&all_diagnostics).unwrap_or_default()
+            serde_json::to_string_pretty(&output).unwrap_or_default()
         );
     } else {
         for diag in &all_diagnostics {

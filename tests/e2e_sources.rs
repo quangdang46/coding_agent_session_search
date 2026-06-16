@@ -1601,21 +1601,41 @@ paths = ["~/.claude/projects"]
         "verify_json",
         Some("Verify JSON array with laptop diagnostics"),
     );
-    // Should output valid JSON (even if connectivity fails)
-    // Note: The output is an array of source diagnostics
+    // Should output valid JSON (even if connectivity fails). Bead uojcg.8.6:
+    // the envelope is now the source-doctor health report (flattened: explicit
+    // per-source state + safe next command + mutation_free) plus the detailed
+    // raw checks under `diagnostics`.
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("valid JSON output");
 
-    // JSON should be an array of source diagnostics
     assert!(
-        json.is_array(),
-        "Expected array of source diagnostics, got: {}",
+        json.is_object(),
+        "Expected source-doctor health object, got: {}",
         String::from_utf8_lossy(&output.stdout)
     );
+    assert_eq!(json["schema_version"], 1, "stable schema version");
+    assert_eq!(json["mutation_free"], true, "diagnosis is read-only");
 
-    let arr = json.as_array().unwrap();
-    assert_eq!(arr.len(), 1, "Expected one source in diagnostics");
-    assert_eq!(arr[0]["source_id"], "laptop");
+    let sources = json["sources"]
+        .as_array()
+        .expect("sources array in health report");
+    assert_eq!(sources.len(), 1, "Expected one source in health report");
+    assert_eq!(sources[0]["source_id"], "laptop");
+    assert!(
+        sources[0]["state"].is_string(),
+        "each source carries an explicit doctor state"
+    );
+    assert_eq!(json["summary"]["total"], 1, "summary counts the source");
+
+    let diagnostics = json["diagnostics"]
+        .as_array()
+        .expect("diagnostics array of raw checks");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "raw checks retained under diagnostics"
+    );
+    assert_eq!(diagnostics[0]["source_id"], "laptop");
     tracker.end(
         "verify_json",
         Some("Verify JSON array with laptop diagnostics"),
@@ -1678,15 +1698,118 @@ paths = ["~/.claude/projects"]
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("valid JSON output");
 
-    // Should only contain laptop diagnostics
-    if let Some(sources) = json.get("sources").and_then(|s| s.as_array()) {
-        assert_eq!(sources.len(), 1, "Should only have one source in output");
-        assert_eq!(sources[0]["name"], "laptop");
-    }
+    // Bead uojcg.8.6: filtered output contains only the laptop source, in the
+    // health report's `sources` array (each entry keyed by `source_id`).
+    let sources = json["sources"]
+        .as_array()
+        .expect("sources array in health report");
+    assert_eq!(sources.len(), 1, "Should only have one source in output");
+    assert_eq!(sources[0]["source_id"], "laptop");
+    assert_eq!(json["summary"]["total"], 1);
     tracker.end(
         "verify_filtered_output",
         Some("Verify only laptop in output"),
         start,
+    );
+
+    tracker.complete();
+}
+
+/// Bead uojcg.8.6: `sources doctor --json` classifies an unreachable remote into
+/// an explicit *unreached* state (never folded into healthy), offers a
+/// preservation-safe (non-destructive) next command, reports the diagnosis as
+/// mutation-free, and in fact does not rewrite the sources config.
+#[test]
+fn sources_doctor_health_unreachable_is_mutation_free_and_safe() {
+    let tracker = tracker_for("sources_doctor_health_unreachable_is_mutation_free_and_safe");
+    let _trace_guard = tracker.trace_env_guard();
+
+    let start = tracker.start("setup", Some("Config with an unreachable remote"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    let data_dir = tmp.path().join("data");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::create_dir_all(&data_dir).unwrap();
+
+    // `.invalid` is a reserved TLD (RFC 6761): DNS resolution always fails, so
+    // the host is deterministically unreachable in any environment.
+    create_sources_config(
+        &config_dir,
+        r#"
+[[sources]]
+name = "retired-laptop"
+type = "ssh"
+host = "user@retired-laptop.invalid"
+paths = ["~/.claude/projects"]
+"#,
+    );
+
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let before = read_sources_config(&config_dir);
+    tracker.end("setup", Some("Config with an unreachable remote"), start);
+
+    let start = tracker.start("run", Some("Run sources doctor --json"));
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "doctor", "--json"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .env("CASS_DATA_DIR", &data_dir)
+        .output()
+        .expect("sources doctor --json command");
+    tracker.end("run", Some("Run sources doctor --json"), start);
+
+    let start = tracker.start("verify", Some("Verify unreached classification + safety"));
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("valid JSON output");
+
+    assert_eq!(json["mutation_free"], true, "diagnosis must be read-only");
+
+    let sources = json["sources"].as_array().expect("sources array");
+    assert_eq!(sources.len(), 1, "one source diagnosed");
+    let entry = &sources[0];
+    assert_eq!(entry["source_id"], "retired-laptop");
+    assert_eq!(
+        entry["host_reached"], false,
+        "an unreachable host must not be reported as reached"
+    );
+    let state = entry["state"].as_str().expect("explicit state string");
+    assert!(
+        matches!(state, "unreachable" | "timeout" | "auth_denied"),
+        "unreachable host must classify as an unreached state, got {state}"
+    );
+
+    // Unreached is counted in its own bucket, never as healthy.
+    assert_eq!(json["summary"]["unreached"], 1, "counted as unreached");
+    assert_eq!(json["summary"]["healthy"], 0, "never folded into healthy");
+
+    // The offered next command is preservation-safe (never destructive).
+    let next = entry["safe_next_command"]
+        .as_str()
+        .expect("safe next command for an unreached host");
+    let lower = next.to_ascii_lowercase();
+    for needle in [
+        "--delete",
+        "rm -rf",
+        "rm -r ",
+        "prune",
+        "shred",
+        "--remove-source-files",
+    ] {
+        assert!(
+            !lower.contains(needle),
+            "safe next command must not be destructive: {next:?}"
+        );
+    }
+    tracker.end(
+        "verify",
+        Some("Verify unreached classification + safety"),
+        start,
+    );
+
+    // Mutation-free in fact: the config file is byte-identical after the run.
+    let after = read_sources_config(&config_dir);
+    assert_eq!(
+        before, after,
+        "sources doctor must not rewrite sources.toml"
     );
 
     tracker.complete();
