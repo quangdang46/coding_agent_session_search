@@ -2,6 +2,7 @@ pub(crate) mod lexical_generation;
 pub(crate) mod memoization;
 pub(crate) mod parallel_wal_shadow;
 pub mod quarantine;
+pub mod quarantine_retry;
 pub mod redact_secrets;
 pub mod refresh_ledger;
 pub(crate) mod responsiveness;
