@@ -1172,6 +1172,83 @@ fn diag_shape_matches_golden() {
 }
 
 #[test]
+fn storage_json_matches_golden() {
+    // `cass storage --json` (#292.4) is the read-only footprint surface:
+    // per-component bytes that sum to a total. Against an isolated empty
+    // HOME with an absent data dir every component is zero and the layout
+    // is fully deterministic, so freezing it catches drift on any
+    // component key, ordering, or the bytes-sum-to-total invariant.
+    let test_home = tempfile::tempdir().expect("create temp home");
+    let scrubbed = capture_robot_json(
+        test_home.path(),
+        &["storage", "--json"],
+        ExpectStatus::ExitOk,
+    );
+    assert_golden("robot/storage.json.golden", &scrubbed);
+}
+
+#[test]
+fn storage_shape_matches_golden() {
+    let test_home = tempfile::tempdir().expect("create temp home");
+    let storage = capture_robot_json_value(
+        test_home.path(),
+        &["storage", "--json"],
+        ExpectStatus::ExitOk,
+    );
+    let canonical =
+        serde_json::to_string_pretty(&json_value_schema(&storage)).expect("pretty-print JSON");
+    assert_golden("robot/storage_shape.json.golden", &canonical);
+}
+
+#[test]
+fn dedup_dry_run_no_db_matches_golden() {
+    // `cass dedup --json` (#302 ask #2) defaults to a dry-run. Against an
+    // isolated empty HOME the database is absent, so the surface reports a
+    // deterministic "nothing to do" envelope (db_exists=false, zero
+    // counts, dry_run=true) that we freeze to catch contract drift.
+    let test_home = tempfile::tempdir().expect("create temp home");
+    let scrubbed = capture_robot_json(test_home.path(), &["dedup", "--json"], ExpectStatus::ExitOk);
+    assert_golden("robot/dedup_no_db.json.golden", &scrubbed);
+}
+
+#[test]
+fn dedup_shape_matches_golden() {
+    let test_home = tempfile::tempdir().expect("create temp home");
+    let dedup =
+        capture_robot_json_value(test_home.path(), &["dedup", "--json"], ExpectStatus::ExitOk);
+    let canonical =
+        serde_json::to_string_pretty(&json_value_schema(&dedup)).expect("pretty-print JSON");
+    assert_golden("robot/dedup_shape.json.golden", &canonical);
+}
+
+#[test]
+fn quarantine_list_empty_matches_golden() {
+    // `cass quarantine list --json` (#292 ask #3) against an isolated empty
+    // HOME has no quarantine_state.json, so the surface reports an empty,
+    // deterministic envelope (zero entries, breaker inactive) that we freeze.
+    let test_home = tempfile::tempdir().expect("create temp home");
+    let scrubbed = capture_robot_json(
+        test_home.path(),
+        &["quarantine", "list", "--json"],
+        ExpectStatus::ExitOk,
+    );
+    assert_golden("robot/quarantine_list_empty.json.golden", &scrubbed);
+}
+
+#[test]
+fn quarantine_clear_shape_matches_golden() {
+    let test_home = tempfile::tempdir().expect("create temp home");
+    let clear = capture_robot_json_value(
+        test_home.path(),
+        &["quarantine", "clear", "--json"],
+        ExpectStatus::ExitOk,
+    );
+    let canonical =
+        serde_json::to_string_pretty(&json_value_schema(&clear)).expect("pretty-print JSON");
+    assert_golden("robot/quarantine_clear_shape.json.golden", &canonical);
+}
+
+#[test]
 fn diag_quarantine_json_matches_golden() {
     let test_home = tempfile::tempdir().expect("create temp home");
     let data_dir = seed_diag_quarantine_fixture(test_home.path());

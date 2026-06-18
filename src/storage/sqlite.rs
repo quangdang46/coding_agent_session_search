@@ -7552,6 +7552,132 @@ impl FrankenStorage {
         })
     }
 
+    /// `coding_agent_session_search-uhhxy` (gh #302 ask #2): collapse
+    /// PRE-EXISTING duplicate conversation rows created before the
+    /// external_id `projects/` canonicalization fix. The watcher and
+    /// full-rebuild ingest paths historically derived `external_id` with
+    /// and without a leading `projects/` segment for the SAME session file,
+    /// so a single `source_path` accumulated two conversation rows that
+    /// differ only by that prefix. This collapses each such pair: it keeps
+    /// the bare (canonical, `projects/`-free) row and drops the
+    /// `projects/`-prefixed twin AND all of its child rows (messages cascade
+    /// via the FK, plus the non-cascading external-lookup tables deleted
+    /// explicitly). The lexical FTS index is NOT rebuilt here — the caller
+    /// rebuilds it after `--apply` so callers can batch.
+    ///
+    /// `dry_run=true` (the default at the CLI) inspects only: it reports the
+    /// duplicate pairs and the row/message counts that WOULD be removed
+    /// without mutating anything. `dry_run=false` performs the deletion in a
+    /// single transaction.
+    pub fn collapse_external_id_prefix_duplicates(
+        &self,
+        dry_run: bool,
+    ) -> Result<ExternalIdDuplicateCleanupResult> {
+        // Find every (source_id, agent_id, source_path) group that holds BOTH
+        // a `projects/`-prefixed external_id row and a bare twin whose
+        // external_id equals the prefixed id with the leading `projects/`
+        // stripped. We match the twin by value so we never drop a prefixed row
+        // that lacks a real bare counterpart (that would be data loss, not
+        // dedup). Only the prefixed row is a deletion candidate.
+        let candidate_rows: Vec<ExternalIdDuplicateCandidate> = self.conn.query_map_collect(
+            "SELECT dup.id, keep.id, dup.source_path, dup.external_id, keep.external_id
+             FROM conversations dup
+             JOIN conversations keep
+               ON keep.source_id = dup.source_id
+              AND keep.agent_id = dup.agent_id
+              AND keep.source_path = dup.source_path
+              AND keep.id <> dup.id
+             WHERE dup.external_id LIKE 'projects/%'
+               AND keep.external_id = SUBSTR(dup.external_id, 10)
+             ORDER BY dup.id",
+            fparams![],
+            |row| {
+                Ok(ExternalIdDuplicateCandidate {
+                    drop_conversation_id: row.get_typed(0)?,
+                    keep_conversation_id: row.get_typed(1)?,
+                    source_path: row.get_typed(2)?,
+                    drop_external_id: row.get_typed(3)?,
+                    keep_external_id: row.get_typed(4)?,
+                })
+            },
+        )?;
+
+        let mut result = ExternalIdDuplicateCleanupResult {
+            dry_run,
+            ..Default::default()
+        };
+
+        if candidate_rows.is_empty() {
+            return Ok(result);
+        }
+
+        // Tally the message rows that belong to the drop candidates so the
+        // dry-run report is faithful to what `--apply` would remove.
+        let drop_ids: Vec<i64> = candidate_rows
+            .iter()
+            .map(|candidate| candidate.drop_conversation_id)
+            .collect();
+        let mut messages_affected: i64 = 0;
+        for drop_id in &drop_ids {
+            let count: i64 = self.conn.query_row_map(
+                "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1",
+                fparams![*drop_id],
+                |row| row.get_typed(0),
+            )?;
+            messages_affected = messages_affected.saturating_add(count);
+        }
+        result.conversations_affected = candidate_rows.len();
+        result.messages_affected = messages_affected.max(0) as usize;
+        result.pairs = candidate_rows;
+
+        if dry_run {
+            return Ok(result);
+        }
+
+        // Apply: delete each prefixed twin and its children in one
+        // transaction. Messages, snippets, conversation_tags, token_usage,
+        // etc. carry `ON DELETE CASCADE`; the two external-lookup tables do
+        // not, so delete them explicitly first (mirrors `purge_agent_archive`).
+        let mut tx = self.conn.transaction()?;
+        for candidate in &result.pairs {
+            let drop_id = candidate.drop_conversation_id;
+            tx.execute_compat(
+                "DELETE FROM conversation_external_lookup WHERE conversation_id = ?1",
+                fparams![drop_id],
+            )?;
+            tx.execute_compat(
+                "DELETE FROM conversation_external_tail_lookup WHERE conversation_id = ?1",
+                fparams![drop_id],
+            )?;
+            // Explicit message delete (do not rely solely on cascade) so the
+            // operation is correct even if FK enforcement is toggled off.
+            tx.execute_compat(
+                "DELETE FROM messages WHERE conversation_id = ?1",
+                fparams![drop_id],
+            )?;
+            tx.execute_compat(
+                "DELETE FROM conversation_tail_state WHERE conversation_id = ?1",
+                fparams![drop_id],
+            )?;
+            tx.execute_compat(
+                "DELETE FROM token_usage WHERE conversation_id = ?1",
+                fparams![drop_id],
+            )?;
+            // NOTE: `embedding_jobs` is a per-(db_path, model_id) job table,
+            // NOT a per-conversation table — it has no conversation_id column,
+            // so there is nothing conversation-scoped to delete there.
+            tx.execute_compat("DELETE FROM conversations WHERE id = ?1", fparams![drop_id])?;
+        }
+        tx.commit()?;
+
+        // The derived FTS shadow rows for the dropped messages are now stale.
+        // Invalidate the presence cache; the caller is responsible for the
+        // actual lexical rebuild (so multi-step cleanups rebuild once).
+        self.invalidate_fts_messages_present_cache();
+
+        Ok(result)
+    }
+
     /// List all registered workspaces.
     pub fn list_workspaces(&self) -> Result<Vec<crate::model::types::Workspace>> {
         self.conn
@@ -10595,6 +10721,17 @@ impl FrankenStorage {
         self.set_fts_messages_present_cache(true);
 
         self.stream_fts_rows_via_frankensqlite(false)
+    }
+
+    /// `coding_agent_session_search-uhhxy`: rebuild the in-DB FTS5 shadow
+    /// (`fts_messages`) after `cass dedup --apply` drops duplicate
+    /// conversation rows, so the canonical-DB-backed full-text shadow no
+    /// longer references messages that were deleted. The separate on-disk
+    /// lexical search index (frankensearch) is rebuilt by the blessed
+    /// `cass index --full` path; this wrapper only reconciles the in-DB
+    /// shadow that the dedup deletion left stale.
+    pub fn rebuild_lexical_index_after_dedup(&self) -> Result<()> {
+        self.rebuild_fts_via_frankensqlite().map(|_| ())
     }
 
     fn stream_fts_rows_via_frankensqlite(&self, missing_only: bool) -> Result<usize> {
@@ -15716,6 +15853,38 @@ pub struct AgentArchivePurgeResult {
     pub messages_deleted: usize,
 }
 
+/// A single PRE-EXISTING duplicate conversation pair detected by
+/// `collapse_external_id_prefix_duplicates`: a `projects/`-prefixed row
+/// (the drop candidate) and its bare canonical twin (kept), both pointing
+/// at the same `source_path`. See gh #302 ask #2 / bead uhhxy.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExternalIdDuplicateCandidate {
+    /// Conversation row id of the `projects/`-prefixed twin to drop.
+    pub drop_conversation_id: i64,
+    /// Conversation row id of the bare canonical row to keep.
+    pub keep_conversation_id: i64,
+    /// Shared source path of the duplicated pair.
+    pub source_path: String,
+    /// external_id of the dropped (prefixed) row.
+    pub drop_external_id: String,
+    /// external_id of the kept (bare) row.
+    pub keep_external_id: String,
+}
+
+/// Result of `collapse_external_id_prefix_duplicates`. In `dry_run` mode
+/// the counts/pairs describe what WOULD be removed; otherwise they describe
+/// what was removed.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ExternalIdDuplicateCleanupResult {
+    pub dry_run: bool,
+    /// Number of `projects/`-prefixed conversation rows collapsed.
+    pub conversations_affected: usize,
+    /// Number of message rows belonging to the dropped twins.
+    pub messages_affected: usize,
+    /// The detected duplicate pairs (drop + keep ids, paths, external_ids).
+    pub pairs: Vec<ExternalIdDuplicateCandidate>,
+}
+
 /// Health status of daily stats table.
 #[derive(Debug, Clone)]
 pub struct DailyStatsHealth {
@@ -16575,6 +16744,135 @@ mod tests {
             !opcodes.iter().any(|opcode| opcode == "SorterOpen"),
             "expected lexical rebuild message fetch to avoid sorter temp b-trees, got {opcodes:?}"
         );
+    }
+
+    /// `coding_agent_session_search-uhhxy` (gh #302 ask #2): the dedup
+    /// cleanup must detect a `projects/<rel>` twin of a bare `<rel>`
+    /// conversation sharing one source_path, report it on dry-run without
+    /// mutating, and on apply drop ONLY the prefixed twin + its message rows
+    /// while leaving the canonical row and its messages intact.
+    #[test]
+    fn collapse_external_id_prefix_duplicates_drops_prefixed_twin_only() {
+        use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
+        use std::path::PathBuf;
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("agent_search.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let agent = Agent {
+            id: None,
+            slug: "claude_code".into(),
+            name: "Claude Code".into(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).unwrap();
+
+        let make_conv = |external_id: &str| Conversation {
+            id: None,
+            agent_slug: "claude_code".into(),
+            workspace: Some(PathBuf::from("/tmp/workspace")),
+            external_id: Some(external_id.to_string()),
+            title: Some("Dedup".into()),
+            source_path: PathBuf::from("/home/u/.claude/projects/-proj/abc.jsonl"),
+            started_at: Some(1_700_000_000_000),
+            ended_at: Some(1_700_000_000_100),
+            approx_tokens: None,
+            metadata_json: serde_json::Value::Null,
+            messages: vec![
+                Message {
+                    id: None,
+                    idx: 0,
+                    role: MessageRole::User,
+                    author: Some("user".into()),
+                    created_at: Some(1_700_000_000_010),
+                    content: format!("first {external_id}"),
+                    extra_json: serde_json::Value::Null,
+                    snippets: Vec::new(),
+                },
+                Message {
+                    id: None,
+                    idx: 1,
+                    role: MessageRole::Agent,
+                    author: Some("assistant".into()),
+                    created_at: Some(1_700_000_000_020),
+                    content: format!("second {external_id}"),
+                    extra_json: serde_json::Value::Null,
+                    snippets: Vec::new(),
+                },
+            ],
+            source_id: LOCAL_SOURCE_ID.into(),
+            origin_host: None,
+        };
+
+        // Bare canonical row (kept) + projects/-prefixed twin (dropped).
+        storage
+            .insert_conversation_tree(agent_id, None, &make_conv("-proj/abc.jsonl"))
+            .unwrap();
+        storage
+            .insert_conversation_tree(agent_id, None, &make_conv("projects/-proj/abc.jsonl"))
+            .unwrap();
+
+        let conv_count = |storage: &FrankenStorage| -> i64 {
+            storage
+                .conn
+                .query_row_map("SELECT COUNT(*) FROM conversations", fparams![], |row| {
+                    row.get_typed(0)
+                })
+                .unwrap()
+        };
+        let msg_count = |storage: &FrankenStorage| -> i64 {
+            storage
+                .conn
+                .query_row_map("SELECT COUNT(*) FROM messages", fparams![], |row| {
+                    row.get_typed(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(conv_count(&storage), 2, "two rows seeded");
+        assert_eq!(msg_count(&storage), 4, "two messages per row");
+
+        // Dry-run: detects the pair, mutates nothing.
+        let dry = storage
+            .collapse_external_id_prefix_duplicates(true)
+            .unwrap();
+        assert!(dry.dry_run);
+        assert_eq!(dry.conversations_affected, 1);
+        assert_eq!(dry.messages_affected, 2);
+        assert_eq!(dry.pairs.len(), 1);
+        assert_eq!(dry.pairs[0].drop_external_id, "projects/-proj/abc.jsonl");
+        assert_eq!(dry.pairs[0].keep_external_id, "-proj/abc.jsonl");
+        assert_eq!(conv_count(&storage), 2, "dry-run must not delete rows");
+        assert_eq!(msg_count(&storage), 4, "dry-run must not delete messages");
+
+        // Apply: drops the prefixed twin + its 2 messages; keeps canonical.
+        let applied = storage
+            .collapse_external_id_prefix_duplicates(false)
+            .unwrap();
+        assert!(!applied.dry_run);
+        assert_eq!(applied.conversations_affected, 1);
+        assert_eq!(applied.messages_affected, 2);
+        assert_eq!(conv_count(&storage), 1, "twin row dropped");
+        assert_eq!(msg_count(&storage), 2, "twin's messages dropped");
+
+        let surviving: String = storage
+            .conn
+            .query_row_map("SELECT external_id FROM conversations", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        assert_eq!(
+            surviving, "-proj/abc.jsonl",
+            "the bare canonical row must survive, not the projects/ twin"
+        );
+
+        // Idempotent: a second apply finds nothing.
+        let again = storage
+            .collapse_external_id_prefix_duplicates(false)
+            .unwrap();
+        assert_eq!(again.conversations_affected, 0);
+        assert!(again.pairs.is_empty());
     }
 
     #[test]

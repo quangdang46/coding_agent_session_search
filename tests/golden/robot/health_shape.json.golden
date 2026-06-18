@@ -903,6 +903,12 @@
             "fresh": {
               "type": "boolean"
             },
+            "partial": {
+              "type": "boolean"
+            },
+            "partial_reason": {
+              "type": "null"
+            },
             "last_indexed_at": {
               "type": "null"
             },

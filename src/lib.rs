@@ -673,6 +673,30 @@ pub enum Commands {
         #[arg(long, short)]
         verbose: bool,
     },
+    /// On-disk storage footprint breakdown by component (DB, WAL, lexical index, raw mirror, semantic, quarantine)
+    Storage {
+        /// Override data dir
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
+    },
+    /// Collapse pre-existing duplicate conversation rows (projects/<rel> vs <rel> external_id twins) created before the dedup fix
+    Dedup {
+        /// Override data dir
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
+
+        /// Actually delete the duplicate rows. Without this, runs as a dry-run (inspect only, no mutation).
+        #[arg(long, default_value_t = false)]
+        apply: bool,
+    },
     /// Quick health check for agents: index freshness, db stats, recommended action
     Status {
         /// Override data dir
@@ -1317,6 +1341,9 @@ pub enum Commands {
         #[arg(long)]
         example_config: bool,
     },
+    /// Inspect and manage the conversation-ingest quarantine (list / clear)
+    #[command(subcommand)]
+    Quarantine(QuarantineCommand),
     /// Inspect and prune raw-mirror evidence under explicit operator control
     #[command(subcommand)]
     Mirror(MirrorCommand),
@@ -1402,6 +1429,39 @@ pub enum Commands {
         /// Override data dir for model storage
         #[arg(long)]
         data_dir: Option<PathBuf>,
+    },
+}
+
+/// Conversation-ingest quarantine inspection and management (#292 ask #3).
+#[derive(Subcommand, Debug, Clone)]
+pub enum QuarantineCommand {
+    /// List quarantined conversations: id, schema version, attempt count, reason, age.
+    List {
+        /// Override data dir
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
+    },
+    /// Remove quarantine entries (dry-run by default; `--apply` to clear). Optionally filter by a conversation-id substring.
+    Clear {
+        /// Override data dir
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+
+        /// Only clear entries whose conversation_id contains this substring. Omit to target all entries.
+        #[arg(long)]
+        filter: Option<String>,
+
+        /// Actually remove the matching entries. Without this, runs as a dry-run (inspect only).
+        #[arg(long, default_value_t = false)]
+        apply: bool,
+
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
     },
 }
 
@@ -2635,6 +2695,7 @@ fn command_accepts_leading_structured_flag(command: &str) -> bool {
             | "api-version"
             | "capabilities"
             | "context"
+            | "dedup"
             | "diag"
             | "doctor"
             | "expand"
@@ -2655,6 +2716,7 @@ fn command_accepts_leading_structured_flag(command: &str) -> bool {
             | "state"
             | "stats"
             | "status"
+            | "storage"
             | "swarm"
             | "timeline"
             | "triage"
@@ -2666,10 +2728,9 @@ fn command_accepts_leading_structured_flag(command: &str) -> bool {
 fn data_dir_insertion_index(rest: &[String], command_index: usize) -> Option<usize> {
     let command = rest.get(command_index)?.to_ascii_lowercase();
     match command.as_str() {
-        "tui" | "index" | "search" | "pack" | "stats" | "diag" | "status" | "triage" | "state"
-        | "health" | "doctor" | "context" | "sessions" | "timeline" | "daemon" => {
-            Some(command_index + 1)
-        }
+        "tui" | "index" | "search" | "pack" | "stats" | "diag" | "storage" | "dedup" | "status"
+        | "triage" | "state" | "health" | "doctor" | "context" | "sessions" | "timeline"
+        | "daemon" => Some(command_index + 1),
         "mirror" => rest
             .get(command_index + 1)
             .is_some_and(|action| action.eq_ignore_ascii_case("prune"))
@@ -5502,6 +5563,8 @@ const CANONICAL_TOP_LEVEL_COMMANDS: &[&str] = &[
     "state",
     "health",
     "diag",
+    "storage",
+    "dedup",
     "doctor",
     "sessions",
     "view",
@@ -5515,6 +5578,7 @@ const CANONICAL_TOP_LEVEL_COMMANDS: &[&str] = &[
     "release-verify",
     "robot-docs",
     "models",
+    "quarantine",
     "sources",
     "analytics",
     "context",
@@ -6190,6 +6254,8 @@ async fn execute_cli(
         | Commands::Pack { .. }
         | Commands::Stats { .. }
         | Commands::Diag { .. }
+        | Commands::Storage { .. }
+        | Commands::Dedup { .. }
         | Commands::Status { .. }
         | Commands::Triage { .. }
         | Commands::View { .. }
@@ -6486,6 +6552,18 @@ async fn execute_cli(
                         quarantine,
                         verbose,
                     )?;
+                }
+                Commands::Storage { data_dir, json } => {
+                    let structured_format = resolve_subcommand_structured_format(cli, json);
+                    run_storage(&data_dir, cli.db.clone(), structured_format)?;
+                }
+                Commands::Dedup {
+                    data_dir,
+                    json,
+                    apply,
+                } => {
+                    let structured_format = resolve_subcommand_structured_format(cli, json);
+                    run_dedup(&data_dir, cli.db.clone(), structured_format, apply)?;
                 }
                 Commands::Status {
                     data_dir,
@@ -7551,6 +7629,9 @@ async fn execute_cli(
                         source,
                     )?;
                 }
+                Commands::Quarantine(subcmd) => {
+                    run_quarantine_command(subcmd, cli)?;
+                }
                 Commands::Mirror(subcmd) => {
                     run_mirror_command(subcmd, cli)?;
                 }
@@ -7622,6 +7703,237 @@ fn run_mirror_command(cmd: MirrorCommand, cli: &Cli) -> CliResult<()> {
             )
         }
     }
+}
+
+/// `cass quarantine` (#292 ask #3): inspect and manage the
+/// conversation-ingest quarantine without hand-editing
+/// `quarantine_state.json`. `list` is read-only; `clear` is dry-run by
+/// default and only mutates with `--apply`.
+fn run_quarantine_command(cmd: QuarantineCommand, cli: &Cli) -> CliResult<()> {
+    match cmd {
+        QuarantineCommand::List { data_dir, json } => {
+            let structured_format = resolve_subcommand_structured_format(cli, json);
+            run_quarantine_list(data_dir, structured_format)
+        }
+        QuarantineCommand::Clear {
+            data_dir,
+            filter,
+            apply,
+            json,
+        } => {
+            let structured_format = resolve_subcommand_structured_format(cli, json);
+            run_quarantine_clear(data_dir, filter, apply, structured_format)
+        }
+    }
+}
+
+/// Build the deterministic per-entry JSON view used by both `list` and the
+/// `clear` plan. Each entry reports its conversation_id, schema version,
+/// attempt count, last reason, the wall-clock timestamps, and whether it is
+/// retry-eligible under the current binary (version-stale/legacy).
+fn quarantine_entries_json(data_dir: &Path) -> Vec<serde_json::Value> {
+    use crate::indexer::quarantine::QuarantineState;
+    let state = QuarantineState::load(data_dir);
+    let current_version = env!("CARGO_PKG_VERSION");
+    state
+        .iter()
+        .map(|(key, record)| {
+            serde_json::json!({
+                "conversation_id": key.conversation_id,
+                "schema_version": key.schema_version,
+                "attempt_count": record.attempt_count,
+                "last_reason": record.last_reason,
+                "first_attempt_at": record.first_attempt_at.to_rfc3339(),
+                "last_attempt_at": record.last_attempt_at.to_rfc3339(),
+                "cass_version_at_quarantine": record.cass_version_at_quarantine,
+                "retry_eligible": record.is_version_stale_for_retry(current_version),
+            })
+        })
+        .collect()
+}
+
+fn run_quarantine_list(
+    data_dir_override: Option<PathBuf>,
+    output_format: Option<RobotFormat>,
+) -> CliResult<()> {
+    let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
+    let entries = quarantine_entries_json(&data_dir);
+    let summary = crate::indexer::conversation_ingest_quarantine_summary(&data_dir);
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+
+    if let Some(fmt) = structured_format {
+        let payload = serde_json::json!({
+            "schema_version": 1,
+            "data_dir": data_dir.display().to_string(),
+            "quarantined_conversations": entries.len(),
+            "circuit_breaker_active": summary.circuit_breaker_active,
+            "recommended_action": summary.recommended_action,
+            "entries": entries,
+        });
+        return output_structured_value(payload, fmt);
+    }
+
+    println!("CASS Conversation Quarantine");
+    println!("============================");
+    println!();
+    if entries.is_empty() {
+        println!("No quarantined conversations.");
+        return Ok(());
+    }
+    println!("Quarantined conversations: {}", entries.len());
+    if summary.circuit_breaker_active {
+        println!("Circuit breaker: ACTIVE (a recent burst of quarantines tripped the breaker)");
+    }
+    println!();
+    for entry in &entries {
+        println!(
+            "  {} (schema v{}, attempts={}, retry_eligible={})",
+            entry
+                .get("conversation_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown>"),
+            entry
+                .get("schema_version")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            entry
+                .get("attempt_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            entry
+                .get("retry_eligible")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        );
+        if let Some(reason) = entry.get("last_reason").and_then(|v| v.as_str()) {
+            println!("      reason: {reason}");
+        }
+    }
+    Ok(())
+}
+
+fn run_quarantine_clear(
+    data_dir_override: Option<PathBuf>,
+    filter: Option<String>,
+    apply: bool,
+    output_format: Option<RobotFormat>,
+) -> CliResult<()> {
+    use crate::indexer::quarantine::{QuarantineKey, QuarantineState};
+
+    let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
+    let mut state = QuarantineState::load(&data_dir);
+
+    // Collect the keys that match the optional conversation-id substring
+    // filter. With no filter, every entry is targeted.
+    let matched: Vec<QuarantineKey> = state
+        .iter()
+        .filter(|(key, _)| {
+            filter
+                .as_deref()
+                .is_none_or(|needle| key.conversation_id.contains(needle))
+        })
+        .map(|(key, _)| key)
+        .collect();
+
+    let mut cleared = 0usize;
+    let mut save_error: Option<String> = None;
+    if apply && !matched.is_empty() {
+        for key in &matched {
+            if state.clear(key) {
+                cleared += 1;
+            }
+        }
+        if let Err(err) = state.save(&data_dir) {
+            save_error = Some(err.to_string());
+        }
+    }
+
+    let matched_json: Vec<serde_json::Value> = matched
+        .iter()
+        .map(|key| {
+            serde_json::json!({
+                "conversation_id": key.conversation_id,
+                "schema_version": key.schema_version,
+            })
+        })
+        .collect();
+
+    let recommended_action = if matched.is_empty() {
+        "No quarantine entries match. Nothing to clear.".to_string()
+    } else if apply {
+        if let Some(err) = &save_error {
+            format!("Cleared {cleared} entr(ies) in memory but failed to persist: {err}")
+        } else {
+            format!(
+                "Cleared {cleared} quarantine entr(ies). They will be re-attempted on the next index/watch pass."
+            )
+        }
+    } else {
+        format!(
+            "{} quarantine entr(ies) match. Re-run with --apply to clear them.",
+            matched.len()
+        )
+    };
+
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+
+    if let Some(fmt) = structured_format {
+        let payload = serde_json::json!({
+            "schema_version": 1,
+            "applied": apply,
+            "dry_run": !apply,
+            "data_dir": data_dir.display().to_string(),
+            "filter": filter,
+            "matched": matched.len(),
+            "cleared": cleared,
+            "persist_error": save_error,
+            "entries": matched_json,
+            "recommended_action": recommended_action,
+        });
+        return output_structured_value(payload, fmt);
+    }
+
+    println!("CASS Quarantine Clear");
+    println!("=====================");
+    println!();
+    println!(
+        "Mode: {}",
+        if apply {
+            "APPLY (mutating)"
+        } else {
+            "dry-run (inspect only)"
+        }
+    );
+    if let Some(needle) = &filter {
+        println!("Filter: conversation_id contains {needle:?}");
+    }
+    println!();
+    if matched.is_empty() {
+        println!("No matching quarantine entries.");
+        return Ok(());
+    }
+    println!("Matching entries: {}", matched.len());
+    for key in matched.iter().take(20) {
+        println!("  {} (schema v{})", key.conversation_id, key.schema_version);
+    }
+    if matched.len() > 20 {
+        println!("  ... and {} more", matched.len() - 20);
+    }
+    println!();
+    println!("{recommended_action}");
+    Ok(())
 }
 
 fn run_mirror_prune(
@@ -15865,18 +16177,53 @@ fn probe_state_db(
     timeout: Duration,
     include_counts: bool,
 ) -> StateDbSnapshot {
+    probe_state_db_modes(db_path, reason, timeout, include_counts, false)
+}
+
+/// `coding_agent_session_search` (#301 truthfulness reconciliation):
+/// `watermarks_only` opens the canonical DB but reads ONLY the two
+/// cheap single-row `meta` watermarks (`last_scan_ts`,
+/// `last_indexed_at`) — never the COUNT(*) full-table scans. It is the
+/// bridge that lets `cass health` consume the SAME staleness inputs as
+/// `cass status` (so the two truth surfaces can no longer disagree)
+/// while still honoring health's <50ms budget. The returned snapshot
+/// keeps `open_skipped=true` + `counts_skipped=true` + zero counts so
+/// the gi4oy/d0rmo health contract (null counts, assumed-good open
+/// signal) is preserved byte-for-byte — only the watermark fields are
+/// populated. When the open fails, the watermark-only path degrades to
+/// the assumed-good elision (open_skipped=true) rather than surfacing
+/// the open error, matching the prior skip-open semantics on the fast
+/// readiness surface (corrupt-DB detection stays doctor/diag's job).
+fn probe_state_db_modes(
+    db_path: &Path,
+    reason: &str,
+    timeout: Duration,
+    include_counts: bool,
+    watermarks_only: bool,
+) -> StateDbSnapshot {
     if !db_path.exists() {
         return StateDbSnapshot::default();
     }
 
     let mut snapshot = StateDbSnapshot {
-        counts_skipped: !include_counts,
+        counts_skipped: !include_counts || watermarks_only,
+        open_skipped: watermarks_only,
         ..StateDbSnapshot::default()
     };
 
     let conn = match open_franken_cli_read_db(db_path.to_path_buf(), reason, timeout) {
         Ok(conn) => conn,
         Err(err) => {
+            if watermarks_only {
+                // Preserve the pre-#301 skip-open semantics on the fast
+                // readiness surface: an open failure here is not a
+                // degraded-state signal (that is doctor/diag's job).
+                // Report the assumed-good elision so health's contract
+                // (opened=true + open_skipped=true) is unchanged when the
+                // watermark read cannot complete.
+                snapshot.opened = true;
+                return snapshot;
+            }
             snapshot.open_error = Some(err.message);
             snapshot.open_retryable = err.retryable;
             return snapshot;
@@ -15903,7 +16250,7 @@ fn probe_state_db(
     )
     .ok()
     .and_then(|s| s.parse::<i64>().ok());
-    if include_counts {
+    if include_counts && !watermarks_only {
         snapshot.conversation_count = franken_query_row_map_retry(
             &conn,
             "SELECT COUNT(*) FROM conversations",
@@ -16487,12 +16834,26 @@ fn state_meta_json_inner(
     // counts come from `..default()` (i.e. zero). Reporting
     // counts_skipped=false alongside message_count=0 would be a lie.
     let db_snapshot = if skip_db_open && db_exists && db_is_regular_file {
-        StateDbSnapshot {
-            opened: true,
-            counts_skipped: true,
-            open_skipped: true,
-            ..StateDbSnapshot::default()
-        }
+        // [coding_agent_session_search #301 truthfulness reconciliation]
+        // Previously this branch synthesized a fully-empty snapshot
+        // (last_scan_ts=None), which is exactly why `cass health`
+        // could report `fresh`/`healthy` while `cass status` reported
+        // `stale` on the SAME DB: the scan-ahead-of-projection check
+        // below requires `last_scan_ts.is_some()`, and health never
+        // read it. Now health does a watermarks-only probe — it opens
+        // the DB but reads ONLY the two cheap single-row `meta`
+        // watermarks (no COUNT(*) scans), so the staleness inputs are
+        // IDENTICAL to status. The snapshot still reports
+        // open_skipped=true + counts_skipped=true + zero counts, so the
+        // gi4oy/d0rmo health contract (null counts, assumed-good open)
+        // is preserved byte-for-byte.
+        probe_state_db_modes(
+            db_path,
+            "state-meta-watermarks",
+            STATE_DB_OPEN_TIMEOUT,
+            false,
+            true,
+        )
     } else if allow_db_open && db_exists {
         probe_state_db(db_path, "state-meta", STATE_DB_OPEN_TIMEOUT, include_counts)
     } else {
@@ -16795,12 +17156,51 @@ fn state_meta_json_inner(
         .unwrap_or_else(chrono::Utc::now)
         .to_rfc3339();
 
+    // [coding_agent_session_search #301 partial-index marker] When
+    // `cass index --full` is aborted by the stall watchdog (exit 70) or
+    // otherwise interrupted, it leaves a SEARCHABLE-but-incomplete lexical
+    // index: the checkpoint is present but never marked completed. Search
+    // then queries it with results that silently omit a fraction of
+    // conversations. Surface a dedicated `partial` boolean (and reason)
+    // distinct from age-staleness so `cass search --robot-meta` can warn
+    // that the index is incomplete, not merely old. The condition is: the
+    // index exists, is not actively rebuilding right now, and its
+    // checkpoint is present-but-not-completed (the durable abort/interrupt
+    // signature) — OR the live scan watermark is ahead of the projected
+    // index (scan advanced without a completed projection). Both are the
+    // exact signatures #301 produces after an aborted full index.
+    let index_partial = lexical.exists
+        && !lexical.rebuilding
+        && ((lexical.checkpoint.present && lexical.checkpoint.completed == Some(false))
+            || last_scan_ts.is_some_and(|scan_ts| {
+                last_indexed_at
+                    .map(|indexed_at| scan_ts > indexed_at.saturating_add(1_000))
+                    .unwrap_or(true)
+            }));
+    let index_partial_reason: Option<&'static str> = if index_partial {
+        if lexical.checkpoint.present && lexical.checkpoint.completed == Some(false) {
+            Some(
+                "lexical index is PARTIAL: a prior `cass index --full` was aborted or interrupted before its checkpoint completed; search results omit conversations indexed after the abort. Re-run `cass index --full` to complete it.",
+            )
+        } else {
+            Some(
+                "lexical index is PARTIAL: a scan advanced past the last completed projection (scan watermark ahead of indexed watermark); search results may omit recently scanned conversations. Re-run `cass index --full` to reconcile.",
+            )
+        }
+    } else {
+        None
+    };
+
     serde_json::json!({
         "index": {
             "exists": lexical.exists,
             "status": lexical.status,
             "reason": lexical.status_reason,
             "fresh": lexical.fresh,
+            // [coding_agent_session_search #301] explicit incomplete-index
+            // signal, distinct from age-staleness (`stale`).
+            "partial": index_partial,
+            "partial_reason": index_partial_reason,
             "last_indexed_at": last_indexed_at.map(|ts| {
                 chrono::DateTime::from_timestamp_millis(ts)
                     .unwrap_or_else(chrono::Utc::now)
@@ -17007,6 +17407,11 @@ fn state_index_freshness(state: &serde_json::Value) -> Option<serde_json::Value>
         "stale": index.get("stale"),
         "stale_threshold_seconds": index.get("stale_threshold_seconds"),
         "rebuilding": index.get("rebuilding"),
+        // [coding_agent_session_search #301] propagate the incomplete-index
+        // markers so `cass search --robot-meta` can warn that the index is
+        // PARTIAL (aborted/interrupted full index), not merely stale.
+        "partial": index.get("partial"),
+        "partial_reason": index.get("partial_reason"),
         "pending_sessions": pending.and_then(|p| p.get("sessions"))
     }))
 }
@@ -17938,6 +18343,8 @@ fn describe_command(cli: &Cli) -> String {
         Some(Commands::Pack { .. }) => "pack".to_string(),
         Some(Commands::Stats { .. }) => "stats".to_string(),
         Some(Commands::Diag { .. }) => "diag".to_string(),
+        Some(Commands::Storage { .. }) => "storage".to_string(),
+        Some(Commands::Dedup { .. }) => "dedup".to_string(),
         Some(Commands::Status { .. }) => "status".to_string(),
         Some(Commands::Triage { .. }) => "triage".to_string(),
         Some(Commands::View { .. }) => "view".to_string(),
@@ -17959,6 +18366,7 @@ fn describe_command(cli: &Cli) -> String {
         Some(Commands::ExportHtml { .. }) => "export-html".to_string(),
         Some(Commands::Expand { .. }) => "expand".to_string(),
         Some(Commands::Timeline { .. }) => "timeline".to_string(),
+        Some(Commands::Quarantine(..)) => "quarantine".to_string(),
         Some(Commands::Mirror(..)) => "mirror".to_string(),
         Some(Commands::Sources(..)) => "sources".to_string(),
         Some(Commands::Models(..)) => "models".to_string(),
@@ -18222,6 +18630,8 @@ fn is_robot_mode(command: &Commands, cli: &Cli) -> bool {
         }
         Commands::Stats { json, .. }
         | Commands::Diag { json, .. }
+        | Commands::Storage { json, .. }
+        | Commands::Dedup { json, .. }
         | Commands::Status { json, .. }
         | Commands::Triage { json, .. }
         | Commands::ApiVersion { json }
@@ -18320,6 +18730,9 @@ fn is_robot_mode(command: &Commands, cli: &Cli) -> bool {
             resolve_subcommand_structured_format(cli, *json).is_some()
         }
         Commands::Sources(_) => false,
+        Commands::Quarantine(
+            QuarantineCommand::List { json, .. } | QuarantineCommand::Clear { json, .. },
+        ) => resolve_subcommand_structured_format(cli, *json).is_some(),
         Commands::Import(cmd) => match cmd {
             ImportCommand::Chatgpt { .. } => cli.robot_format.is_some() || env_robot_mode,
         },
@@ -21631,25 +22044,47 @@ fn run_cli_search(
         None
     };
     let index_freshness = state_meta.as_ref().and_then(state_index_freshness);
-    let warning = index_freshness
+    // [coding_agent_session_search #301] A PARTIAL (aborted/interrupted)
+    // index is a stronger, distinct signal than age-staleness: search
+    // results silently omit conversations indexed after the abort. Prefer
+    // the partial warning and surface its dedicated reason so agents stop
+    // trusting the result set as complete.
+    let partial_warning = index_freshness
         .as_ref()
-        .and_then(|f: &serde_json::Value| f.get("stale"))
+        .and_then(|f: &serde_json::Value| f.get("partial"))
         .and_then(|v: &serde_json::Value| v.as_bool())
-        .filter(|stale| *stale)
+        .filter(|partial| *partial)
         .map(|_| {
-            let age = index_freshness
+            index_freshness
                 .as_ref()
-                .and_then(|f: &serde_json::Value| f.get("age_seconds"))
-                .and_then(|v: &serde_json::Value| v.as_u64()).map_or_else(|| "an unknown age".to_string(), |s| format!("{s} seconds"));
-            let pending = index_freshness
-                .as_ref()
-                .and_then(|f: &serde_json::Value| f.get("pending_sessions"))
-                .and_then(|v: &serde_json::Value| v.as_u64())
-                .unwrap_or(0);
-            format!(
-                "Index may be stale (age: {age}; pending sessions: {pending}). Run `cass index --full` or enable watch mode for fresh results."
-            )
+                .and_then(|f: &serde_json::Value| f.get("partial_reason"))
+                .and_then(|v: &serde_json::Value| v.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    "Lexical index is PARTIAL (a prior `cass index --full` was aborted); results may omit conversations. Re-run `cass index --full`.".to_string()
+                })
         });
+    let warning = partial_warning.or_else(|| {
+        index_freshness
+            .as_ref()
+            .and_then(|f: &serde_json::Value| f.get("stale"))
+            .and_then(|v: &serde_json::Value| v.as_bool())
+            .filter(|stale| *stale)
+            .map(|_| {
+                let age = index_freshness
+                    .as_ref()
+                    .and_then(|f: &serde_json::Value| f.get("age_seconds"))
+                    .and_then(|v: &serde_json::Value| v.as_u64()).map_or_else(|| "an unknown age".to_string(), |s| format!("{s} seconds"));
+                let pending = index_freshness
+                    .as_ref()
+                    .and_then(|f: &serde_json::Value| f.get("pending_sessions"))
+                    .and_then(|v: &serde_json::Value| v.as_u64())
+                    .unwrap_or(0);
+                format!(
+                    "Index may be stale (age: {age}; pending sessions: {pending}). Run `cass index --full` or enable watch mode for fresh results."
+                )
+            })
+    });
 
     let index_freshness_for_closure = index_freshness.clone();
     let state_meta_with_warning = state_meta.map(|mut meta| {
@@ -23615,6 +24050,12 @@ fn search_cursor_manifest_json(input: SearchCursorManifestInput<'_>) -> serde_js
             "lexical_shard_generation": lexical_shard_generation,
             "freshness": index_freshness,
             "stale": input.index_freshness.and_then(|f| f.get("stale")).cloned().unwrap_or(serde_json::Value::Null),
+            // [coding_agent_session_search #301] surface the incomplete-index
+            // signal so robot callers can tell an aborted/partial full index
+            // apart from a merely stale one. `partial=true` means results
+            // omit conversations indexed after a `cass index --full` abort.
+            "partial": input.index_freshness.and_then(|f| f.get("partial")).cloned().unwrap_or(serde_json::Value::Null),
+            "partial_reason": input.index_freshness.and_then(|f| f.get("partial_reason")).cloned().unwrap_or(serde_json::Value::Null),
             "rebuilding": index_rebuilding,
             "pending_sessions": input.index_freshness.and_then(|f| f.get("pending_sessions")).cloned().unwrap_or(serde_json::Value::Null),
         },
@@ -25098,6 +25539,474 @@ fn run_stats(
     }
 
     Ok(())
+}
+
+/// Stable component identifiers for the `cass storage` breakdown. The
+/// order here is the order they appear in the JSON `components` array and
+/// the human table (golden-frozen). Each variant maps a user-meaningful
+/// on-disk component to the data-dir entries that compose it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StorageComponent {
+    CanonicalDb,
+    DbWal,
+    DbShm,
+    LexicalIndex,
+    RawMirror,
+    SemanticIndex,
+    Quarantine,
+    Backups,
+    Other,
+}
+
+impl StorageComponent {
+    /// Stable robot key (kebab-case-free snake to match other cass JSON).
+    fn key(self) -> &'static str {
+        match self {
+            Self::CanonicalDb => "canonical_db",
+            Self::DbWal => "db_wal",
+            Self::DbShm => "db_shm",
+            Self::LexicalIndex => "lexical_index",
+            Self::RawMirror => "raw_mirror",
+            Self::SemanticIndex => "semantic_index",
+            Self::Quarantine => "quarantine",
+            Self::Backups => "backups",
+            Self::Other => "other",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::CanonicalDb => "Canonical DB (agent_search.db)",
+            Self::DbWal => "DB WAL (agent_search.db-wal)",
+            Self::DbShm => "DB shared-memory (agent_search.db-shm)",
+            Self::LexicalIndex => "Lexical index (index/)",
+            Self::RawMirror => "Raw mirror (raw-mirror/)",
+            Self::SemanticIndex => "Semantic index (vector_index/, semantic/)",
+            Self::Quarantine => "Quarantine (quarantine/, doctor-quarantine/)",
+            Self::Backups => "Backups (backups/)",
+            Self::Other => "Other (remotes, caches, locks, misc)",
+        }
+    }
+
+    /// Whether this component is a derived asset that can be safely rebuilt
+    /// from the canonical DB (advisory, mirrors the search-asset contract).
+    fn derived(self) -> bool {
+        matches!(
+            self,
+            Self::DbWal
+                | Self::DbShm
+                | Self::LexicalIndex
+                | Self::SemanticIndex
+                | Self::Quarantine
+                | Self::Backups
+        )
+    }
+
+    /// All components in stable display order.
+    fn ordered() -> [Self; 9] {
+        [
+            Self::CanonicalDb,
+            Self::DbWal,
+            Self::DbShm,
+            Self::LexicalIndex,
+            Self::RawMirror,
+            Self::SemanticIndex,
+            Self::Quarantine,
+            Self::Backups,
+            Self::Other,
+        ]
+    }
+}
+
+/// Classify a top-level data-dir entry name into a storage component.
+/// Anything unrecognized rolls into `Other` so the per-component bytes
+/// always sum to the total accounted footprint.
+fn classify_storage_entry(name: &str) -> StorageComponent {
+    match name {
+        "agent_search.db" => StorageComponent::CanonicalDb,
+        "agent_search.db-wal" => StorageComponent::DbWal,
+        "agent_search.db-shm" => StorageComponent::DbShm,
+        "index" => StorageComponent::LexicalIndex,
+        "raw-mirror" | "raw_mirror" => StorageComponent::RawMirror,
+        "vector_index" | "semantic" | "semantic-cache" => StorageComponent::SemanticIndex,
+        "quarantine" | "doctor-quarantine" => StorageComponent::Quarantine,
+        "backups" | "backup" => StorageComponent::Backups,
+        _ => StorageComponent::Other,
+    }
+}
+
+/// `cass storage` (#292.4): read-only on-disk footprint breakdown by
+/// component. Sums per-component bytes from the data dir so operators can
+/// answer "what is my N GB and what is safe to reclaim" without manual
+/// `du` + `sqlite3`. Mutates nothing; pairs with `mirror prune` /
+/// `cass forget` for actual reclamation.
+fn run_storage(
+    data_dir_override: &Option<PathBuf>,
+    db_override: Option<PathBuf>,
+    output_format: Option<RobotFormat>,
+) -> CliResult<()> {
+    use std::collections::BTreeMap;
+
+    let data_dir = data_dir_override.clone().unwrap_or_else(default_data_dir);
+    let db_path = db_override
+        .clone()
+        .unwrap_or_else(|| data_dir.join("agent_search.db"));
+    let data_dir_exists = data_dir.exists();
+
+    let mut bytes_by_component: BTreeMap<&'static str, u64> = BTreeMap::new();
+    let mut files_by_component: BTreeMap<&'static str, u64> = BTreeMap::new();
+    for component in StorageComponent::ordered() {
+        bytes_by_component.insert(component.key(), 0);
+        files_by_component.insert(component.key(), 0);
+    }
+
+    // Walk the top-level data-dir entries once. Each entry (file or dir)
+    // is attributed wholesale to a single component; nested files are
+    // counted via fs_dir_size. The canonical DB may live OUTSIDE the data
+    // dir when --db is overridden, so account it explicitly below.
+    if data_dir_exists && let Ok(entries) = std::fs::read_dir(&data_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let path = entry.path();
+            // When --db points back into the data dir, the canonical-DB
+            // entry is handled by the explicit accounting below to keep a
+            // single source of truth; skip it here to avoid double count.
+            if path == db_path && classify_storage_entry(&name) == StorageComponent::CanonicalDb {
+                continue;
+            }
+            let component = classify_storage_entry(&name);
+            let size = fs_dir_size(&path);
+            let file_count = if path.is_dir() {
+                storage_file_count(&path)
+            } else {
+                1
+            };
+            *bytes_by_component.entry(component.key()).or_insert(0) += size;
+            *files_by_component.entry(component.key()).or_insert(0) += file_count;
+        }
+    }
+
+    // Explicit canonical-DB accounting (honors --db override that may sit
+    // outside the data dir). The WAL/SHM sidecars are derived from the
+    // resolved DB path so an overridden DB still reports its sidecars.
+    let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+    if db_size > 0 {
+        *bytes_by_component
+            .entry(StorageComponent::CanonicalDb.key())
+            .or_insert(0) += db_size;
+        *files_by_component
+            .entry(StorageComponent::CanonicalDb.key())
+            .or_insert(0) += 1;
+    }
+    let db_exists = db_path.exists();
+    for (suffix, component) in [
+        ("-wal", StorageComponent::DbWal),
+        ("-shm", StorageComponent::DbShm),
+    ] {
+        let mut sidecar = db_path.clone();
+        let file_name = format!(
+            "{}{suffix}",
+            db_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "agent_search.db".to_string())
+        );
+        sidecar.set_file_name(&file_name);
+        // Only account an overridden-DB sidecar; the in-data-dir sidecar
+        // was already counted by the directory walk above.
+        if sidecar.parent() != Some(data_dir.as_path()) {
+            let size = std::fs::metadata(&sidecar).map(|m| m.len()).unwrap_or(0);
+            if size > 0 {
+                *bytes_by_component.entry(component.key()).or_insert(0) += size;
+                *files_by_component.entry(component.key()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let total_bytes: u64 = bytes_by_component.values().sum();
+    let total_files: u64 = files_by_component.values().sum();
+
+    let components_json: Vec<serde_json::Value> = StorageComponent::ordered()
+        .iter()
+        .map(|component| {
+            let key = component.key();
+            let bytes = *bytes_by_component.get(key).unwrap_or(&0);
+            let files = *files_by_component.get(key).unwrap_or(&0);
+            let percent = if total_bytes > 0 {
+                ((bytes as f64 / total_bytes as f64) * 10000.0).round() / 100.0
+            } else {
+                0.0
+            };
+            serde_json::json!({
+                "component": key,
+                "label": component.label(),
+                "bytes": bytes,
+                "human": format_bytes(bytes),
+                "file_count": files,
+                "percent_of_total": percent,
+                "derived_reclaimable": component.derived(),
+            })
+        })
+        .collect();
+
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+
+    if let Some(fmt) = structured_format {
+        let payload = serde_json::json!({
+            "schema_version": 1,
+            "data_dir": data_dir.display().to_string(),
+            "data_dir_exists": data_dir_exists,
+            "db_path": db_path.display().to_string(),
+            "db_exists": db_exists,
+            "total_bytes": total_bytes,
+            "total_human": format_bytes(total_bytes),
+            "total_file_count": total_files,
+            "components": components_json,
+        });
+        return output_structured_value(payload, fmt);
+    }
+
+    println!("CASS Storage Breakdown");
+    println!("======================");
+    println!();
+    println!("Data directory: {}", data_dir.display());
+    if !data_dir_exists {
+        println!("  (data directory does not exist yet — run 'cass index --full')");
+    }
+    println!("Database: {}", db_path.display());
+    println!();
+    println!("Total on-disk footprint: {}", format_bytes(total_bytes));
+    println!();
+    println!("{:<42} {:>12} {:>7}", "Component", "Size", "Share");
+    println!("{}", "-".repeat(63));
+    for component in StorageComponent::ordered() {
+        let key = component.key();
+        let bytes = *bytes_by_component.get(key).unwrap_or(&0);
+        let percent = if total_bytes > 0 {
+            (bytes as f64 / total_bytes as f64) * 100.0
+        } else {
+            0.0
+        };
+        let derived = if component.derived() {
+            " (reclaimable)"
+        } else {
+            ""
+        };
+        println!(
+            "{:<42} {:>12} {:>6.1}%{}",
+            component.label(),
+            format_bytes(bytes),
+            percent,
+            derived
+        );
+    }
+    println!();
+    println!("Components marked (reclaimable) are derived assets that can be rebuilt");
+    println!("from the canonical DB. Use 'cass mirror prune' or 'cass forget' to reclaim.");
+
+    Ok(())
+}
+
+/// `cass dedup` (#302 ask #2 / bead uhhxy): collapse PRE-EXISTING duplicate
+/// conversation rows where the watcher and full-rebuild ingest paths created
+/// both a `projects/<rel>` and a bare `<rel>` external_id for the same
+/// `source_path`. Dry-run by default (inspect only); `--apply` performs the
+/// deletion and rebuilds the lexical FTS index so search stops returning the
+/// dropped twins.
+fn run_dedup(
+    data_dir_override: &Option<PathBuf>,
+    db_override: Option<PathBuf>,
+    output_format: Option<RobotFormat>,
+    apply: bool,
+) -> CliResult<()> {
+    let data_dir = data_dir_override.clone().unwrap_or_else(default_data_dir);
+    let db_path = db_override.unwrap_or_else(|| data_dir.join("agent_search.db"));
+
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+
+    if !db_path.exists() {
+        // No DB: nothing to dedup. Report an empty, successful result so the
+        // robot contract stays uniform (matches stats/diag missing-DB shape).
+        if let Some(fmt) = structured_format {
+            let payload = serde_json::json!({
+                "schema_version": 1,
+                "applied": false,
+                "dry_run": !apply,
+                "db_path": db_path.display().to_string(),
+                "db_exists": false,
+                "conversations_collapsed": 0,
+                "messages_removed": 0,
+                "lexical_rebuilt": false,
+                "pairs": [],
+                "recommended_action": "No database found. Run 'cass index --full' first.",
+            });
+            return output_structured_value(payload, fmt);
+        }
+        println!("No database found at {}.", db_path.display());
+        println!("Run 'cass index --full' to create it.");
+        return Ok(());
+    }
+
+    let storage =
+        crate::storage::sqlite::FrankenStorage::open(&db_path).map_err(|err| CliError {
+            code: 3,
+            kind: CliErrorKind::DbOpen.kind_str(),
+            message: format!("failed to open canonical DB for dedup: {err}"),
+            hint: Some("Run 'cass doctor check --json' for a read-only diagnosis.".to_string()),
+            retryable: true,
+        })?;
+
+    let result = storage
+        .collapse_external_id_prefix_duplicates(!apply)
+        .map_err(|err| CliError {
+            code: 5,
+            kind: CliErrorKind::Storage.kind_str(),
+            message: format!("duplicate-conversation cleanup failed: {err}"),
+            hint: Some(
+                "Re-run without --apply to inspect, or 'cass doctor check --json' for diagnosis."
+                    .to_string(),
+            ),
+            retryable: false,
+        })?;
+
+    // On apply, rebuild the lexical FTS index so the dropped twins stop
+    // surfacing in search. Only worth doing when something was removed.
+    let mut lexical_rebuilt = false;
+    if apply && result.conversations_affected > 0 {
+        match storage.rebuild_lexical_index_after_dedup() {
+            Ok(()) => lexical_rebuilt = true,
+            Err(err) => {
+                tracing::warn!(
+                    "duplicate cleanup removed rows but lexical rebuild failed: {err}; run 'cass index --full' to refresh search"
+                );
+            }
+        }
+    }
+
+    let recommended_action = if result.conversations_affected == 0 {
+        "No pre-existing duplicate conversations found. Nothing to do.".to_string()
+    } else if apply {
+        if lexical_rebuilt {
+            format!(
+                "Collapsed {} duplicate conversation(s) and rebuilt the in-DB FTS shadow. Run 'cass index --full' to also refresh the on-disk lexical search index.",
+                result.conversations_affected
+            )
+        } else {
+            format!(
+                "Collapsed {} duplicate conversation(s). Run 'cass index --full' to refresh the lexical index.",
+                result.conversations_affected
+            )
+        }
+    } else {
+        format!(
+            "Found {} duplicate conversation(s) ({} message rows). Re-run with --apply to collapse them.",
+            result.conversations_affected, result.messages_affected
+        )
+    };
+
+    if let Some(fmt) = structured_format {
+        let pairs: Vec<serde_json::Value> = result
+            .pairs
+            .iter()
+            .map(|pair| {
+                serde_json::json!({
+                    "keep_conversation_id": pair.keep_conversation_id,
+                    "drop_conversation_id": pair.drop_conversation_id,
+                    "source_path": pair.source_path,
+                    "keep_external_id": pair.keep_external_id,
+                    "drop_external_id": pair.drop_external_id,
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "schema_version": 1,
+            "applied": apply,
+            "dry_run": !apply,
+            "db_path": db_path.display().to_string(),
+            "db_exists": true,
+            "conversations_collapsed": result.conversations_affected,
+            "messages_removed": result.messages_affected,
+            "lexical_rebuilt": lexical_rebuilt,
+            "pairs": pairs,
+            "recommended_action": recommended_action,
+        });
+        return output_structured_value(payload, fmt);
+    }
+
+    println!("CASS Duplicate Conversation Cleanup");
+    println!("===================================");
+    println!();
+    println!("Database: {}", db_path.display());
+    println!(
+        "Mode: {}",
+        if apply {
+            "APPLY (mutating)"
+        } else {
+            "dry-run (inspect only)"
+        }
+    );
+    println!();
+    if result.conversations_affected == 0 {
+        println!("No pre-existing duplicate conversations found.");
+        return Ok(());
+    }
+    println!(
+        "Duplicate conversation pairs (projects/<rel> twin vs bare canonical): {}",
+        result.conversations_affected
+    );
+    println!(
+        "Message rows in the dropped twins: {}",
+        result.messages_affected
+    );
+    println!();
+    for pair in result.pairs.iter().take(20) {
+        println!(
+            "  drop id={:<8} keep id={:<8} {}",
+            pair.drop_conversation_id, pair.keep_conversation_id, pair.source_path
+        );
+    }
+    if result.pairs.len() > 20 {
+        println!("  ... and {} more", result.pairs.len() - 20);
+    }
+    println!();
+    println!("{recommended_action}");
+
+    Ok(())
+}
+
+/// Count files (not bytes) recursively under a directory for the storage
+/// breakdown. Mirrors `fs_dir_size`'s traversal but counts leaf files.
+fn storage_file_count(path: &std::path::Path) -> u64 {
+    if !path.is_dir() {
+        return 1;
+    }
+    std::fs::read_dir(path)
+        .map(|entries| {
+            entries
+                .filter_map(std::result::Result::ok)
+                .map(|e| {
+                    let p = e.path();
+                    if p.is_dir() {
+                        storage_file_count(&p)
+                    } else {
+                        1
+                    }
+                })
+                .sum()
+        })
+        .unwrap_or(0)
 }
 
 fn run_diag(
@@ -68027,6 +68936,82 @@ mod cli_read_db_tests {
         );
     }
 
+    /// [coding_agent_session_search #301 truthfulness reconciliation]
+    /// `cass health` and `cass status` MUST agree on index staleness for
+    /// the SAME DB. Pre-fix, health passed skip_db_open=true and never
+    /// read `last_scan_ts`, so the scan-ahead-of-projection check could
+    /// not fire — health reported `fresh`/`status=ready` while status
+    /// reported `stale`. Now health does a watermarks-only probe so the
+    /// staleness inputs are identical. Guard both halves: the verdicts
+    /// match AND health still honors its gi4oy/d0rmo contract (the open
+    /// is assumed-good with null counts; only the watermarks are read).
+    #[test]
+    fn health_and_status_agree_on_scan_ahead_of_projection_stale() {
+        let (temp, db_path) = seed_cli_db();
+        {
+            let storage = FrankenStorage::open(&db_path).expect("reopen cass db");
+            storage
+                .set_last_scan_ts(1_733_000_010_000)
+                .expect("set scan ahead");
+        }
+
+        let status = state_meta_json_for_status(temp.path(), &db_path, 60);
+        let health = state_meta_json_for_health(temp.path(), &db_path, 60);
+
+        for (label, state) in [("status", &status), ("health", &health)] {
+            let index = state
+                .get("index")
+                .and_then(serde_json::Value::as_object)
+                .unwrap_or_else(|| panic!("{label} index state"));
+            assert_eq!(
+                index.get("fresh").and_then(|v| v.as_bool()),
+                Some(false),
+                "{label} must report fresh=false on scan-ahead-of-projection"
+            );
+            assert_eq!(
+                index.get("stale").and_then(|v| v.as_bool()),
+                Some(true),
+                "{label} must report stale=true on scan-ahead-of-projection"
+            );
+            assert_eq!(
+                index.get("status").and_then(|v| v.as_str()),
+                Some("stale"),
+                "{label} must report status=stale on scan-ahead-of-projection"
+            );
+        }
+
+        // Health must STILL honor the gi4oy/d0rmo fast-surface contract:
+        // the watermarks-only probe reads the meta watermarks but reports
+        // open_skipped=true, counts_skipped=true, and null counts so the
+        // 0-counts are an intentional skip signal, not missing data.
+        let health_db = health
+            .get("database")
+            .and_then(serde_json::Value::as_object)
+            .expect("health database state");
+        assert_eq!(
+            health_db.get("open_skipped").and_then(|v| v.as_bool()),
+            Some(true),
+            "health watermarks-only probe must still report open_skipped=true"
+        );
+        assert_eq!(
+            health_db.get("counts_skipped").and_then(|v| v.as_bool()),
+            Some(true),
+            "health watermarks-only probe must still report counts_skipped=true"
+        );
+        assert!(
+            health_db
+                .get("conversations")
+                .is_some_and(serde_json::Value::is_null),
+            "health must still report conversations=null (counts skipped): {health_db:?}"
+        );
+        assert!(
+            health_db
+                .get("messages")
+                .is_some_and(serde_json::Value::is_null),
+            "health must still report messages=null (counts skipped): {health_db:?}"
+        );
+    }
+
     #[test]
     fn status_state_still_probes_malformed_non_file_db_path() {
         let temp = TempDir::new().expect("tempdir");
@@ -75190,6 +76175,8 @@ fn response_schema_index_state() -> serde_json::Value {
             "status": { "type": "string" },
             "reason": { "type": ["string", "null"] },
             "fresh": { "type": "boolean" },
+            "partial": { "type": "boolean" },
+            "partial_reason": { "type": ["string", "null"] },
             "last_indexed_at": { "type": ["string", "null"] },
             "age_seconds": { "type": ["integer", "null"] },
             "stale": { "type": "boolean" },
@@ -75673,6 +76660,8 @@ fn response_schema_index_freshness() -> serde_json::Value {
             "status": { "type": "string" },
             "reason": { "type": ["string", "null"] },
             "fresh": { "type": "boolean" },
+            "partial": { "type": ["boolean", "null"] },
+            "partial_reason": { "type": ["string", "null"] },
             "last_indexed_at": { "type": ["string", "null"] },
             "age_seconds": { "type": ["integer", "null"] },
             "stale": { "type": "boolean" },
