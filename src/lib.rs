@@ -734,6 +734,28 @@ pub enum Commands {
         #[arg(long, default_value_t = 300)]
         stale_threshold: u64,
     },
+    /// Assemble a redacted, share-safe recovery/support evidence bundle
+    SupportBundle {
+        /// Override data dir
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
+
+        /// Staleness threshold in seconds (default: 300)
+        #[arg(long, default_value_t = 300)]
+        stale_threshold: u64,
+
+        /// Include full filesystem paths in the bundle (default: basename-only)
+        #[arg(long, default_value_t = false)]
+        include_full_paths: bool,
+
+        /// Include raw session/tool payloads in the bundle (default: suppressed)
+        #[arg(long, default_value_t = false)]
+        include_raw_evidence: bool,
+    },
     /// Quick state/health check (alias of status)
     State {
         /// Override data dir
@@ -2717,6 +2739,7 @@ fn command_accepts_leading_structured_flag(command: &str) -> bool {
             | "stats"
             | "status"
             | "storage"
+            | "support-bundle"
             | "swarm"
             | "timeline"
             | "triage"
@@ -2729,8 +2752,8 @@ fn data_dir_insertion_index(rest: &[String], command_index: usize) -> Option<usi
     let command = rest.get(command_index)?.to_ascii_lowercase();
     match command.as_str() {
         "tui" | "index" | "search" | "pack" | "stats" | "diag" | "storage" | "dedup" | "status"
-        | "triage" | "state" | "health" | "doctor" | "context" | "sessions" | "timeline"
-        | "daemon" => Some(command_index + 1),
+        | "triage" | "support-bundle" | "state" | "health" | "doctor" | "context" | "sessions"
+        | "timeline" | "daemon" => Some(command_index + 1),
         "mirror" => rest
             .get(command_index + 1)
             .is_some_and(|action| action.eq_ignore_ascii_case("prune"))
@@ -5573,6 +5596,7 @@ const CANONICAL_TOP_LEVEL_COMMANDS: &[&str] = &[
     "index",
     "capabilities",
     "triage",
+    "support-bundle",
     "introspect",
     "api-version",
     "release-verify",
@@ -6258,6 +6282,7 @@ async fn execute_cli(
         | Commands::Dedup { .. }
         | Commands::Status { .. }
         | Commands::Triage { .. }
+        | Commands::SupportBundle { .. }
         | Commands::View { .. }
         | Commands::Pages { .. }
         | Commands::Analytics(..) => {
@@ -6591,6 +6616,23 @@ async fn execute_cli(
                         cli.db.clone(),
                         structured_format,
                         stale_threshold,
+                    )?;
+                }
+                Commands::SupportBundle {
+                    data_dir,
+                    json,
+                    stale_threshold,
+                    include_full_paths,
+                    include_raw_evidence,
+                } => {
+                    let structured_format = resolve_subcommand_structured_format(cli, json);
+                    run_support_bundle(
+                        &data_dir,
+                        cli.db.clone(),
+                        structured_format,
+                        stale_threshold,
+                        include_full_paths,
+                        include_raw_evidence,
                     )?;
                 }
                 Commands::View {
@@ -18474,6 +18516,7 @@ fn describe_command(cli: &Cli) -> String {
         Some(Commands::Dedup { .. }) => "dedup".to_string(),
         Some(Commands::Status { .. }) => "status".to_string(),
         Some(Commands::Triage { .. }) => "triage".to_string(),
+        Some(Commands::SupportBundle { .. }) => "support-bundle".to_string(),
         Some(Commands::View { .. }) => "view".to_string(),
         Some(Commands::Completions { .. }) => "completions".to_string(),
         Some(Commands::Man) => "man".to_string(),
@@ -18761,6 +18804,7 @@ fn is_robot_mode(command: &Commands, cli: &Cli) -> bool {
         | Commands::Dedup { json, .. }
         | Commands::Status { json, .. }
         | Commands::Triage { json, .. }
+        | Commands::SupportBundle { json, .. }
         | Commands::ApiVersion { json }
         | Commands::ReleaseVerify { json, .. }
         | Commands::State { json, .. }
@@ -68230,6 +68274,176 @@ fn run_triage(
         &state,
         crate::search::readiness_projection::SurfaceKind::Triage,
     );
+
+    Ok(())
+}
+
+/// Assemble and emit the redacted recovery/support evidence bundle (bead
+/// `coding_agent_session_search-6f1lm`; the `.13.3` contract). Composes the
+/// canonical readiness, next-command, source-doctor, quarantine, fleet (when
+/// applicable), and root-cause contracts — verbatim — into one share-safe
+/// bundle via [`crate::recovery_support_bundle::build_support_bundle`], so the
+/// bundle can never contradict the matching robot JSON.
+///
+/// Redaction is share-safe by default (raw payloads suppressed, content
+/// fingerprints hashed, filesystem paths truncated to basenames). `--include-
+/// full-paths` and `--include-raw-evidence` flip the [`RedactionPolicy`] and are
+/// recorded in the bundle's `opt_in_flags`. `ExecutionMode::Live` marks the
+/// provenance as a real on-host run (vs. the deterministic fixture mode the
+/// goldens use).
+fn run_support_bundle(
+    data_dir_override: &Option<PathBuf>,
+    db_override: Option<PathBuf>,
+    output_format: Option<RobotFormat>,
+    stale_threshold: u64,
+    include_full_paths: bool,
+    include_raw_evidence: bool,
+) -> CliResult<()> {
+    use crate::recovery_support_bundle as rsb;
+
+    let data_dir = data_dir_override.clone().unwrap_or_else(default_data_dir);
+    let db_path = db_override.unwrap_or_else(|| data_dir.join("agent_search.db"));
+    let data_dir_str = data_dir.display().to_string();
+
+    // One live state snapshot (status-like: derive from the real DB-open
+    // signal), reused for both the truth table and the root-cause signals so the
+    // bundle is internally consistent and probes the data dir only once.
+    let state = state_meta_json(&data_dir, &db_path, stale_threshold, true);
+    let table = build_truth_table_from_state(&state);
+
+    // Composed canonical contracts (verbatim from the same projections the robot
+    // surfaces serialize).
+    let readiness = crate::search::readiness_projection::project(
+        &table,
+        crate::search::readiness_projection::SurfaceKind::Triage,
+    );
+    let command_envelope = table.next_command_envelope(Some(&data_dir_str));
+    let quarantine = table.quarantine.clone();
+    let root_cause = crate::root_cause_projection::project_root_cause(
+        &gather_projection_signals_from_state(&state, None),
+    );
+
+    // Local source provenance: a single read-only "local" observation derived
+    // from the live truth table — this surface performs no SSH probe, so remote
+    // fields stay at their reachable-local defaults.
+    let local_observation = crate::source_doctor_health::SourceDoctorObservation {
+        source_id: "local".to_string(),
+        host: None,
+        host_reachable: true,
+        cass_present: Some(true),
+        cass_current: Some(true),
+        source_root_readable: Some(db_path.exists()),
+        lexical_metadata_present: Some(table.lexical_metadata.present),
+        ..Default::default()
+    };
+    let source_provenance =
+        crate::source_doctor_health::SourceDoctorReport::build(&[local_observation]);
+
+    let generated_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_millis().min(i64::MAX as u128)) as i64)
+        .unwrap_or(0);
+
+    // Share-safe default; the opt-in flags relax it and are recorded in the
+    // bundle's redaction report.
+    let mut policy = rsb::default_redaction_policy();
+    if include_full_paths {
+        policy.allow_full_paths = true;
+    }
+    if include_raw_evidence {
+        policy.private_text = crate::search::incident_redaction::PrivateTextPolicy::RawOptIn;
+    }
+
+    let inputs = rsb::SupportBundleInputs {
+        bundle_id: format!("support-bundle-{generated_at_ms}"),
+        cass_version: env!("CARGO_PKG_VERSION").to_string(),
+        // Single local host/source: identity fields are fleet/multi-source
+        // concepts and are omitted (not guessed) for the local surface.
+        host_id: None,
+        source_id: None,
+        data_dir: Some(data_dir_str),
+        config_dir: None,
+        model_dir: None,
+        command_provenance: "cass support-bundle".to_string(),
+        generated_at_ms,
+        fixture_id: None,
+        readiness,
+        command_envelope,
+        source_provenance,
+        quarantine,
+        fleet: None,
+        root_cause,
+        proof_logs: Vec::new(),
+    };
+
+    let bundle = rsb::build_support_bundle(inputs, policy, rsb::ExecutionMode::Live);
+
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+
+    if let Some(fmt) = structured_format {
+        let payload = serde_json::to_value(&bundle).unwrap_or(serde_json::Value::Null);
+        return output_structured_value(payload, fmt);
+    }
+
+    // Bounded, share-safety-first human summary. Reuses the v6vuz human
+    // readiness projection for the readiness line so it matches the other
+    // surfaces verbatim.
+    let human = crate::search::human_readiness_summary::project_human_summary(
+        &table,
+        crate::search::readiness_projection::SurfaceKind::Status,
+    );
+    println!("CASS support bundle");
+    println!();
+    println!("  Bundle ID: {}", bundle.manifest.bundle_id);
+    println!("  cass version: {}", bundle.manifest.cass_version);
+    println!("  Mode: live");
+    println!(
+        "  Share-safe: {}",
+        if bundle.is_share_safe() {
+            "yes"
+        } else {
+            "no (opt-in evidence included)"
+        }
+    );
+    println!(
+        "  Manifest complete: {}",
+        if bundle.manifest.is_complete() {
+            "yes"
+        } else {
+            "no"
+        }
+    );
+    println!();
+    println!("{}", human.headline);
+    println!("  Safest next step: {}", human.safest_next_action);
+    println!();
+    println!("Redaction posture:");
+    if !bundle.redaction.fields_suppressed.is_empty() {
+        println!(
+            "  Suppressed: {}",
+            bundle.redaction.fields_suppressed.join(", ")
+        );
+    }
+    if !bundle.redaction.fields_truncated.is_empty() {
+        println!(
+            "  Truncated to basename: {}",
+            bundle.redaction.fields_truncated.join(", ")
+        );
+    }
+    if !bundle.redaction.opt_in_flags.is_empty() {
+        println!(
+            "  Opt-in available: {}",
+            bundle.redaction.opt_in_flags.join(", ")
+        );
+    }
+    println!();
+    println!("Machine output: cass support-bundle --json");
 
     Ok(())
 }
