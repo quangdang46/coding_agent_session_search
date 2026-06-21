@@ -25089,6 +25089,67 @@ fn search_cursor_manifest_json(input: SearchCursorManifestInput<'_>) -> serde_js
     })
 }
 
+/// Map the realized [`SearchMode`] to the trust [`RealizedMode`] vocabulary.
+fn trust_realized_mode(
+    mode: crate::search::query::SearchMode,
+) -> crate::search::trust_scoring::RealizedMode {
+    use crate::search::query::SearchMode;
+    use crate::search::trust_scoring::RealizedMode;
+    match mode {
+        SearchMode::Lexical => RealizedMode::Lexical,
+        SearchMode::Semantic => RealizedMode::Semantic,
+        SearchMode::Hybrid => RealizedMode::Hybrid,
+    }
+}
+
+/// Map a hit's origin to the trust source-kind. Cheap and probe-free: a live
+/// filesystem/archive check (the `LocalMissing` / `ArchiveOnlyPruned` story) is
+/// a provenance follow-on, so local hits report `LocalPresent` and remote hits
+/// `RemoteMirror` for now (both source-healthy).
+fn trust_source_kind_for_hit(
+    hit: &crate::search::query::SearchHit,
+) -> crate::search::trust_scoring::SourceTrustKind {
+    use crate::search::trust_scoring::SourceTrustKind;
+    if normalized_robot_hit_origin_kind(hit)
+        .eq_ignore_ascii_case(crate::sources::provenance::LOCAL_SOURCE_ID)
+    {
+        SourceTrustKind::LocalPresent
+    } else {
+        SourceTrustKind::RemoteMirror
+    }
+}
+
+/// Build the metadata-only trust verdict JSON for one search hit (bead
+/// 5u82n.3). Advisory only — it never affects result ordering. The richer
+/// commit/bead/release correlation signals are not derivable per-hit yet, so
+/// this surfaces the live recency, source, and realized-mode portion of the
+/// verdict; the verdict lights up automatically once correlation lands.
+fn trust_value_for_hit(
+    hit: &crate::search::query::SearchHit,
+    now_ms: i64,
+    realized_mode: crate::search::trust_scoring::RealizedMode,
+) -> serde_json::Value {
+    use crate::search::trust_scoring::{HitTrustContext, assess_trust, derive_trust_signals};
+    let workspace = {
+        let ws = hit.workspace.trim();
+        (!ws.is_empty()).then(|| ws.to_string())
+    };
+    let ctx = HitTrustContext {
+        created_at_ms: hit.created_at,
+        now_ms,
+        workspace,
+        // Hits are already constrained by any `--workspace` filter, so a
+        // filter-relative match is vacuous; cwd-relative workspace trust is a
+        // follow-on. No active comparison => no workspace penalty.
+        query_workspace: None,
+        source_kind: trust_source_kind_for_hit(hit),
+        realized_mode,
+        ..HitTrustContext::default()
+    };
+    serde_json::to_value(assess_trust(&derive_trust_signals(&ctx)))
+        .unwrap_or(serde_json::Value::Null)
+}
+
 /// Output search results in robot-friendly format
 #[allow(clippy::too_many_arguments, unused_variables)]
 fn output_robot_results(
@@ -25477,8 +25538,28 @@ fn output_robot_results(
             || !result.suggestions.is_empty()
             || explanation.is_some());
     let estimate_tokens = max_tokens.is_some() || include_meta || jsonl_meta_emitted;
-    let (filtered_hits, tokens_estimated, hits_clamped) =
+    let (mut filtered_hits, tokens_estimated, hits_clamped) =
         clamp_hits_to_budget(filtered_hits, max_tokens, estimate_tokens);
+
+    // 5u82n.3: attach a metadata-only trust/provenance verdict per hit. Gated on
+    // --robot-meta so the fast paths above stay byte-identical, and skipped for
+    // the minimal projection (intentionally source_path/line_number/agent only).
+    // Advisory metadata — result ordering is untouched. `filtered_hits` is a
+    // prefix projection of `result.hits` (same order; clamp only drops the
+    // tail), so zip aligns each verdict with its hit.
+    if include_meta && !minimal_projection {
+        let now_ms = crate::storage::sqlite::FrankenStorage::now_millis();
+        let realized = trust_realized_mode(search_mode_meta.realized);
+        for (hit, value) in result.hits.iter().zip(filtered_hits.iter_mut()) {
+            if let serde_json::Value::Object(map) = value {
+                map.insert(
+                    "trust".to_string(),
+                    trust_value_for_hit(hit, now_ms, realized),
+                );
+            }
+        }
+    }
+
     let search_page_count = result.hits.len();
     let returned_count = filtered_hits.len();
     let clamped_unemitted_hits = returned_count < search_page_count;
