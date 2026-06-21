@@ -818,6 +818,17 @@ pub enum Commands {
         #[arg(long, default_value_t = 300)]
         stale_threshold: u64,
     },
+    /// First-run source onboarding + readiness wizard. Read-only: explains what
+    /// CASS found, what it will index, what is missing, and the single safest
+    /// next command. Scriptable via `--json`; never launches a bare TUI.
+    Onboarding {
+        /// Override data dir
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        /// Output as JSON (for automation)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
+    },
     /// Diagnose cass installation issues. Legacy `cass doctor --json` maps to the read-only check surface.
     /// Legacy `--fix` maps to safe-auto-run and may only apply contract-declared safe repairs.
     Doctor {
@@ -2853,6 +2864,7 @@ fn command_accepts_leading_structured_flag(command: &str) -> bool {
             | "introspect"
             | "lessons"
             | "models"
+            | "onboarding"
             | "pack"
             | "pages"
             | "release-verify"
@@ -2878,8 +2890,8 @@ fn data_dir_insertion_index(rest: &[String], command_index: usize) -> Option<usi
     let command = rest.get(command_index)?.to_ascii_lowercase();
     match command.as_str() {
         "tui" | "index" | "search" | "pack" | "stats" | "diag" | "storage" | "dedup" | "status"
-        | "triage" | "support-bundle" | "state" | "health" | "doctor" | "context" | "sessions"
-        | "timeline" | "daemon" => Some(command_index + 1),
+        | "triage" | "support-bundle" | "state" | "health" | "onboarding" | "doctor" | "context"
+        | "sessions" | "timeline" | "daemon" => Some(command_index + 1),
         "mirror" => rest
             .get(command_index + 1)
             .is_some_and(|action| action.eq_ignore_ascii_case("prune"))
@@ -5723,6 +5735,7 @@ const CANONICAL_TOP_LEVEL_COMMANDS: &[&str] = &[
     "capabilities",
     "triage",
     "support-bundle",
+    "onboarding",
     "introspect",
     "api-version",
     "release-verify",
@@ -7377,6 +7390,10 @@ async fn execute_cli(
                         stale_threshold,
                         robot_meta,
                     )?;
+                }
+                Commands::Onboarding { data_dir, json } => {
+                    let structured_format = resolve_subcommand_structured_format(cli, json);
+                    run_onboarding(&data_dir, cli.db.clone(), structured_format)?;
                 }
                 Commands::Doctor {
                     data_dir,
@@ -19331,6 +19348,7 @@ fn describe_command(cli: &Cli) -> String {
         Some(Commands::Introspect { .. }) => "introspect".to_string(),
         Some(Commands::RobotDocs { topic }) => format!("robot-docs:{topic:?}"),
         Some(Commands::Health { .. }) => "health".to_string(),
+        Some(Commands::Onboarding { .. }) => "onboarding".to_string(),
         Some(Commands::Doctor { .. }) => "doctor".to_string(),
         Some(Commands::Context { .. }) => "context".to_string(),
         Some(Commands::Sessions { .. }) => "sessions".to_string(),
@@ -19593,6 +19611,9 @@ fn is_robot_mode(command: &Commands, cli: &Cli) -> bool {
         Commands::Pack { json, .. } => resolve_subcommand_structured_format(cli, *json).is_some(),
         Commands::Index { json, .. } => resolve_subcommand_structured_format(cli, *json).is_some(),
         Commands::Health { json, .. } => resolve_subcommand_structured_format(cli, *json).is_some(),
+        Commands::Onboarding { json, .. } => {
+            resolve_subcommand_structured_format(cli, *json).is_some()
+        }
         Commands::Pages { json, .. } => resolve_subcommand_structured_format(cli, *json).is_some(),
         Commands::Sessions { json, .. } => {
             resolve_subcommand_structured_format(cli, *json).is_some()
@@ -68184,6 +68205,196 @@ fn capabilities_connector_names() -> Vec<String> {
     }
 
     connectors
+}
+
+/// Roughly count session-like files under a detected provider root, bounded so
+/// first-run onboarding stays fast even against a large existing corpus (the
+/// estimate is an indexing-cost signal, not an exact total).
+fn count_onboarding_sessions(root: &Path) -> u64 {
+    const MAX_FILES: u64 = 50_000;
+    const MAX_DEPTH: usize = 8;
+    let mut count = 0u64;
+    for entry in walkdir::WalkDir::new(root)
+        .max_depth(MAX_DEPTH)
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let is_session = entry
+            .path()
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("jsonl")
+                    || ext.eq_ignore_ascii_case("json")
+                    || ext.eq_ignore_ascii_case("md")
+                    || ext.eq_ignore_ascii_case("db")
+            });
+        if is_session {
+            count += 1;
+            if count >= MAX_FILES {
+                break;
+            }
+        }
+    }
+    count
+}
+
+/// Gather a read-only [`OnboardingObservation`](crate::source_onboarding::OnboardingObservation)
+/// from live host state — detected agent providers, source-config exclusions and
+/// remote sources, local semantic-model files, and the archive DB. Performs no
+/// mutation (bead 5u82n.6).
+fn gather_onboarding_observation(
+    data_dir: &Path,
+    db_path: &Path,
+) -> crate::source_onboarding::OnboardingObservation {
+    use crate::source_onboarding::{OnboardingObservation, ProviderObservation};
+
+    let sources_config = crate::sources::config::SourcesConfig::load().ok();
+
+    // Detected providers (default opts => detected-only) with per-provider
+    // readability + a bounded session estimate + the config exclusion flag.
+    let opts = franken_agent_detection::AgentDetectOptions::default();
+    let providers: Vec<ProviderObservation> =
+        match franken_agent_detection::detect_installed_agents(&opts) {
+            Ok(report) => report
+                .installed_agents
+                .into_iter()
+                .filter(|entry| entry.detected)
+                .map(|entry| {
+                    let root_readable =
+                        entry.root_paths.iter().any(|p| std::fs::read_dir(p).is_ok());
+                    let estimated_sessions = entry
+                        .root_paths
+                        .iter()
+                        .map(|p| count_onboarding_sessions(Path::new(p)))
+                        .sum();
+                    let excluded = sources_config
+                        .as_ref()
+                        .is_some_and(|cfg| cfg.is_agent_disabled(&entry.slug));
+                    ProviderObservation {
+                        name: entry.slug,
+                        excluded,
+                        root_readable,
+                        estimated_sessions,
+                    }
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+
+    let remote_sources_configured = sources_config
+        .as_ref()
+        .is_some_and(|cfg| cfg.remote_sources().next().is_some());
+
+    let model_dir = crate::search::model_manager::default_model_dir(data_dir);
+    let manifest = crate::search::model_manager::default_model_manifest();
+    let semantic_model_present =
+        crate::search::model_download::check_model_installed(&model_dir, &manifest).is_ready();
+
+    // "Existing indexed DB" means a DB that actually carries content, so an
+    // empty/just-created DB still routes the user to a first index.
+    let indexed_conversation_count = if db_path.exists() {
+        crate::storage::sqlite::FrankenStorage::open(db_path)
+            .ok()
+            .and_then(|storage| storage.total_conversation_count().ok())
+            .unwrap_or(0) as u64
+    } else {
+        0
+    };
+    let existing_indexed_db = indexed_conversation_count > 0;
+
+    OnboardingObservation {
+        providers,
+        semantic_model_present,
+        remote_sources_configured,
+        existing_indexed_db,
+        indexed_conversation_count,
+    }
+}
+
+/// Human-readable onboarding summary (never a bare TUI). The rich interactive
+/// wizard shell is the dependent bead 5u82n.16.
+fn print_onboarding_human(
+    report: &crate::source_onboarding::OnboardingReport,
+    observation: &crate::source_onboarding::OnboardingObservation,
+) {
+    use colored::Colorize;
+    println!("{}", "CASS onboarding".bold());
+    if report.providers.is_empty() {
+        println!("  No agent session providers detected yet.");
+    } else {
+        let lines: Vec<String> = report
+            .providers
+            .iter()
+            .map(|p| {
+                format!(
+                    "    - {} [{}] ~{} sessions",
+                    p.name,
+                    p.readiness.as_str(),
+                    p.estimated_sessions
+                )
+            })
+            .collect();
+        println!("  Detected providers:");
+        println!("{}", lines.join("\n"));
+    }
+    if !report.excluded_providers.is_empty() {
+        println!("  Excluded providers: {}", report.excluded_providers.join(", "));
+    }
+    println!(
+        "  Estimated sessions to index: {}",
+        report.estimated_index_sessions
+    );
+    if observation.existing_indexed_db {
+        println!(
+            "  Already indexed conversations: {}",
+            observation.indexed_conversation_count
+        );
+    }
+    println!("  {}", report.semantic_note());
+    if let Some(hint) = &report.remote_hint {
+        println!("  {hint}");
+    }
+    println!();
+    println!("  {} {}", "Recommended:".bold(), report.recommended_command);
+    println!("  Undo: {}", report.rollback_note);
+}
+
+/// `cass onboarding` — read-only first-run onboarding/readiness surface. Gathers
+/// a live observation, maps it through the pure `source_onboarding::recommend`
+/// core, and emits the deterministic report (`--json` for agents, otherwise a
+/// human summary). Mutation-free (bead 5u82n.6).
+fn run_onboarding(
+    data_dir_override: &Option<PathBuf>,
+    db_override: Option<PathBuf>,
+    output_format: Option<RobotFormat>,
+) -> CliResult<()> {
+    let data_dir = data_dir_override.clone().unwrap_or_else(default_data_dir);
+    let db_path = db_override.unwrap_or_else(|| data_dir.join("agent_search.db"));
+
+    let observation = gather_onboarding_observation(&data_dir, &db_path);
+    let report = crate::source_onboarding::recommend(&observation);
+
+    if let Some(format) = output_format {
+        let mut payload = serde_json::to_value(&report).unwrap_or(serde_json::Value::Null);
+        if let serde_json::Value::Object(map) = &mut payload {
+            map.insert(
+                "data_dir".to_string(),
+                serde_json::Value::String(data_dir.display().to_string()),
+            );
+            map.insert(
+                "indexed_conversation_count".to_string(),
+                serde_json::json!(observation.indexed_conversation_count),
+            );
+        }
+        return output_structured_value(payload, format);
+    }
+
+    print_onboarding_human(&report, &observation);
+    Ok(())
 }
 
 fn diagnostics_connector_paths(
