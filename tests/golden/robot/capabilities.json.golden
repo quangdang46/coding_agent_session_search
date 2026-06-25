@@ -2936,6 +2936,12 @@
       "has_json_output": false
     },
     {
+      "name": "fleet",
+      "description": "Fleet-safe upgrade rehearsal and bounded post-upgrade verification",
+      "arguments": [],
+      "has_json_output": false
+    },
+    {
       "name": "lessons",
       "description": "Mine and query durable lessons from local evidence (commits, beads, proofs)",
       "arguments": [],
@@ -3222,6 +3228,18 @@
     {
       "name": "CASS_OUTPUT_FORMAT",
       "description": "Default structured output format: json, jsonl, compact, sessions, or toon."
+    },
+    {
+      "name": "CASS_SEARCH_TIMEOUT_MS",
+      "description": "Default search/pack timeout in milliseconds (0 = no timeout). The --timeout flag overrides; also configurable via [search].timeout_ms in ~/.config/cass/cass.toml. Alias: CASS_SEARCH_TIMEOUT."
+    },
+    {
+      "name": "CASS_SEARCH_LIMIT",
+      "description": "Default search/pack result limit (0 = no limit, RAM-capped). The --limit flag overrides; also [search].limit in ~/.config/cass/cass.toml."
+    },
+    {
+      "name": "CASS_SEARCH_MODE",
+      "description": "Default search/pack mode: lexical, semantic, or hybrid. The --mode flag overrides; also [search].mode in ~/.config/cass/cass.toml."
     },
     {
       "name": "TOON_DEFAULT_FORMAT",

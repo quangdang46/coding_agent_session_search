@@ -1432,6 +1432,9 @@ pub enum Commands {
     /// Manage semantic search models
     #[command(subcommand)]
     Models(ModelsCommand),
+    /// Fleet-safe upgrade rehearsal and bounded post-upgrade verification
+    #[command(subcommand)]
+    Fleet(FleetCommand),
     /// Mine and query durable lessons from local evidence (commits, beads, proofs)
     #[command(subcommand)]
     Lessons(LessonsCommand),
@@ -2220,6 +2223,44 @@ pub enum ModelsCommand {
     },
 }
 
+/// Subcommands for fleet-safe upgrade rehearsal and bounded post-upgrade
+/// verification (bead coding_agent_session_search-sc8sp). This surfaces the pure
+/// composition core in [`crate::fleet_upgrade_rehearsal`] (beads 6.6/6.3/6.4)
+/// through a read-only, local-by-default CLI command. The rehearsal is a dry run
+/// that never mutates a host; `--live` opt-in adds bounded SSH probes of
+/// configured remote sources, and `--verify` drives the bounded post-upgrade
+/// check battery against the local binary via the shared E2E runner (bead 12.2),
+/// classifying each into a proof artifact (bead 12.3).
+#[derive(Subcommand, Debug, Clone)]
+pub enum FleetCommand {
+    /// Rehearse the fleet-safe upgrade journey (dry run): per-host plan with
+    /// archive-risk preflight, separately gated upgrade actions, and the bounded
+    /// post-upgrade checks each action must clear.
+    UpgradeRehearsal {
+        /// Version the fleet is converging to (default: this binary's version).
+        #[arg(long)]
+        target_version: Option<String>,
+        /// Opt in to live SSH probes of configured remote sources. Without it the
+        /// rehearsal covers the local host from cass-owned local evidence only and
+        /// never contacts a remote machine.
+        #[arg(long)]
+        live: bool,
+        /// With `--live`, limit the probe to a single configured source by name.
+        #[arg(long)]
+        source: Option<String>,
+        /// Also run the bounded post-upgrade check battery against the local host
+        /// and emit a classified `PostUpgradeVerification`.
+        #[arg(long)]
+        verify: bool,
+        /// Override data dir.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        /// Output as JSON (`--robot` also works).
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
+    },
+}
+
 /// Subcommands for the durable lessons graph (bead
 /// coding_agent_session_search-guided-ops-repro-trust-5u82n.4). Lessons are a
 /// derived, advisory surface mined from local cass evidence (landed commit
@@ -2882,6 +2923,7 @@ fn command_accepts_leading_structured_flag(command: &str) -> bool {
             | "doctor"
             | "expand"
             | "export-html"
+            | "fleet"
             | "guide"
             | "health"
             | "import"
@@ -2932,6 +2974,10 @@ fn data_dir_insertion_index(rest: &[String], command_index: usize) -> Option<usi
                     .iter()
                     .any(|candidate| action.eq_ignore_ascii_case(candidate))
             })
+            .then_some(command_index + 2),
+        "fleet" => rest
+            .get(command_index + 1)
+            .is_some_and(|action| action.eq_ignore_ascii_case("upgrade-rehearsal"))
             .then_some(command_index + 2),
         "analytics" => rest
             .get(command_index + 1)
@@ -5769,6 +5815,7 @@ const CANONICAL_TOP_LEVEL_COMMANDS: &[&str] = &[
     "release-verify",
     "robot-docs",
     "models",
+    "fleet",
     "lessons",
     "quarantine",
     "sources",
@@ -7898,6 +7945,15 @@ async fn execute_cli(
                     let cli_clone = cli.clone();
                     let result = asupersync::runtime::spawn_blocking(move || {
                         run_models_command(subcmd, &cli_clone)
+                    })
+                    .await;
+                    result?;
+                }
+                Commands::Fleet(subcmd) => {
+                    let subcmd = subcmd.clone();
+                    let cli_clone = cli.clone();
+                    let result = asupersync::runtime::spawn_blocking(move || {
+                        run_fleet_command(subcmd, &cli_clone)
                     })
                     .await;
                     result?;
@@ -19421,6 +19477,7 @@ fn describe_command(cli: &Cli) -> String {
         Some(Commands::Mirror(..)) => "mirror".to_string(),
         Some(Commands::Sources(..)) => "sources".to_string(),
         Some(Commands::Models(..)) => "models".to_string(),
+        Some(Commands::Fleet(..)) => "fleet".to_string(),
         Some(Commands::Lessons(..)) => "lessons".to_string(),
         Some(Commands::Swarm(..)) => "swarm".to_string(),
         Some(Commands::Pages { .. }) => "pages".to_string(),
@@ -19785,6 +19842,9 @@ fn is_robot_mode(command: &Commands, cli: &Cli) -> bool {
             resolve_subcommand_structured_format(cli, *json).is_some()
         }
         Commands::Models(ModelsCommand::CheckUpdate { json, .. }) => {
+            resolve_subcommand_structured_format(cli, *json).is_some()
+        }
+        Commands::Fleet(FleetCommand::UpgradeRehearsal { json, .. }) => {
             resolve_subcommand_structured_format(cli, *json).is_some()
         }
         Commands::Lessons(
@@ -95424,6 +95484,464 @@ fn run_models_command(cmd: ModelsCommand, cli: &Cli) -> CliResult<()> {
             run_models_check_update(structured_format, data_dir)
         }
     }
+}
+
+/// Dispatch the `cass fleet` subcommand group (bead sc8sp).
+fn run_fleet_command(cmd: FleetCommand, cli: &Cli) -> CliResult<()> {
+    match cmd {
+        FleetCommand::UpgradeRehearsal {
+            target_version,
+            live,
+            source,
+            verify,
+            data_dir,
+            json,
+        } => {
+            let structured_format = resolve_subcommand_structured_format(cli, json);
+            run_fleet_upgrade_rehearsal(
+                target_version,
+                live,
+                source.as_deref(),
+                verify,
+                &data_dir,
+                structured_format,
+            )
+        }
+    }
+}
+
+/// The `cass fleet upgrade-rehearsal` envelope (bead sc8sp): the fleet upgrade
+/// rehearsal plan plus, when `--verify` is requested, a bounded local
+/// post-upgrade verification. Read-only and local-by-default — `mutation_free`
+/// is always true.
+#[derive(serde::Serialize)]
+struct FleetUpgradeRehearsalOutput {
+    schema_version: u32,
+    /// `"fixture"` (local-evidence only, the default) or `"live"` (probed remotes).
+    mode: &'static str,
+    target_version: String,
+    /// Whether any remote host was contacted over SSH (only happens with `--live`).
+    probed_remote_hosts: bool,
+    /// Remote sources skipped because `--live` was not requested — named here, so
+    /// the rehearsal never silently omits a configured host.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    deferred_remote_sources: Vec<String>,
+    rehearsal: crate::fleet_upgrade_rehearsal::FleetUpgradeRehearsal,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_verification: Option<crate::fleet_upgrade_rehearsal::PostUpgradeVerification>,
+    mutation_free: bool,
+    generated_by: &'static str,
+}
+
+/// Run the fleet upgrade rehearsal surface (bead sc8sp): compose the bounded
+/// host probe -> version assessment (6.3) -> archive coverage (6.4) ->
+/// `rehearse_fleet`, and, with `--verify`, drive the bounded post-upgrade check
+/// battery against the local binary through the shared E2E runner (12.2),
+/// classified into proof artifacts (12.3) by `verify_post_upgrade`. The local
+/// host is always covered from cass-owned local evidence (no network); `--live`
+/// opts into bounded SSH probes of configured remote sources. Mutation-free.
+fn run_fleet_upgrade_rehearsal(
+    target_version: Option<String>,
+    live: bool,
+    source_filter: Option<&str>,
+    verify: bool,
+    data_dir_override: &Option<PathBuf>,
+    output_format: Option<RobotFormat>,
+) -> CliResult<()> {
+    use crate::fleet_upgrade_rehearsal::{
+        FLEET_UPGRADE_REHEARSAL_SCHEMA_VERSION, HostRehearsalInput, RehearsalMode, rehearse_fleet,
+    };
+
+    let data_dir = data_dir_override.clone().unwrap_or_else(default_data_dir);
+    let target = target_version
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+    let mode = if live {
+        RehearsalMode::Live
+    } else {
+        RehearsalMode::Fixture
+    };
+
+    // Per-host inputs own their data; `HostRehearsalInput` borrows from this vec.
+    let mut host_data: Vec<(
+        crate::fleet_doctor_schema::HostDoctorReport,
+        crate::fleet_version_skew::VersionAssessment,
+        crate::fleet_archive_coverage::ArchiveCoverageSummary,
+    )> = Vec::new();
+
+    // The local host is always covered, from cass-owned local evidence: the real
+    // running version + detected platform + cheap archive-coverage facts.
+    let local_report = local_host_report();
+    let local_cov = local_archive_coverage(&data_dir);
+    let local_coverage_state = local_cov.coverage_state;
+    let local_assessment = crate::fleet_version_skew::assess_host(&local_report, &target);
+    host_data.push((local_report, local_assessment, local_cov));
+
+    // Remote sources are probed live only with `--live`; otherwise they are named
+    // in `deferred_remote_sources` and never contacted.
+    let mut probed_remote_hosts = false;
+    let mut deferred_remote_sources: Vec<String> = Vec::new();
+    if let Ok(config) = crate::sources::config::SourcesConfig::load() {
+        for source in &config.sources {
+            // Local-type sources are already represented by the local host.
+            let Some(host) = source.host.as_deref() else {
+                continue;
+            };
+            if source_filter
+                .is_some_and(|f| !crate::sources::config::source_names_equal(f, &source.name))
+            {
+                continue;
+            }
+            if !live {
+                deferred_remote_sources.push(source.name.clone());
+                continue;
+            }
+            let (report, coverage) = probe_remote_host_for_rehearsal(&source.name, host);
+            probed_remote_hosts = true;
+            let assessment = crate::fleet_version_skew::assess_host(&report, &target);
+            host_data.push((report, assessment, coverage));
+        }
+    }
+
+    let inputs: Vec<HostRehearsalInput<'_>> = host_data
+        .iter()
+        .map(|(report, assessment, coverage)| HostRehearsalInput {
+            report,
+            assessment,
+            coverage,
+        })
+        .collect();
+    let rehearsal = rehearse_fleet(&inputs, &target, mode);
+
+    // Bounded local post-upgrade verification (opt-in): drive the check battery
+    // against this binary via the shared E2E runner, classified into proof
+    // artifacts. The local coverage state feeds the "still-stale derived assets"
+    // trap so a binary-only swap can never read as a true fix.
+    let local_verification = if verify {
+        Some(verify_local_post_upgrade(&data_dir, local_coverage_state))
+    } else {
+        None
+    };
+
+    let output = FleetUpgradeRehearsalOutput {
+        schema_version: FLEET_UPGRADE_REHEARSAL_SCHEMA_VERSION,
+        mode: mode.as_str(),
+        target_version: target,
+        probed_remote_hosts,
+        deferred_remote_sources,
+        rehearsal,
+        local_verification,
+        mutation_free: true,
+        generated_by: "cass fleet upgrade-rehearsal",
+    };
+
+    if let Some(format) = output_format {
+        let payload = serde_json::to_value(&output).unwrap_or(serde_json::Value::Null);
+        return output_structured_value(payload, format);
+    }
+
+    print_fleet_upgrade_rehearsal_human(&output);
+    Ok(())
+}
+
+/// Build the local host's bounded doctor report from cass-owned local evidence:
+/// the running binary's version and detected platform. No network.
+fn local_host_report() -> crate::fleet_doctor_schema::HostDoctorReport {
+    use crate::fleet_doctor_schema::{HostDoctorReport, HostProbeStatus};
+    let mut report = HostDoctorReport::skeleton("local", local_platform(), HostProbeStatus::Ok, 0);
+    report.cass_version = Some(env!("CARGO_PKG_VERSION").to_string());
+    report
+}
+
+/// Detect this host's platform for the rehearsal (honest os/arch, never guessed).
+fn local_platform() -> crate::fleet_doctor_schema::Platform {
+    use crate::fleet_doctor_schema::{HostOs, PathStyle, Platform};
+    let (os, path_style) = match std::env::consts::OS {
+        "macos" => (HostOs::MacOs, PathStyle::Posix),
+        "windows" => (HostOs::Windows, PathStyle::Windows),
+        "linux" => (HostOs::Linux, PathStyle::Posix),
+        _ => (HostOs::Other, PathStyle::Posix),
+    };
+    Platform {
+        os,
+        arch: std::env::consts::ARCH.to_string(),
+        path_style,
+        tool_notes: Vec::new(),
+    }
+}
+
+/// Cheap, read-only archive-coverage facts for the local data dir: just the
+/// presence of the canonical DB and a searchable lexical index. Approximate by
+/// construction (no full scan) and deterministic for a given data dir.
+fn local_archive_coverage(
+    data_dir: &Path,
+) -> crate::fleet_archive_coverage::ArchiveCoverageSummary {
+    use crate::fleet_archive_coverage::CoverageState;
+    use crate::fleet_doctor_schema::ArchiveRisk;
+    let db_present = data_dir.join("agent_search.db").is_file();
+    let index_present = crate::search::tantivy::searchable_index_exists(
+        &crate::search::tantivy::expected_index_dir(data_dir),
+    );
+    let (coverage_state, archive_risk) = if !db_present {
+        (CoverageState::Unknown, ArchiveRisk::Unknown)
+    } else if !index_present {
+        (CoverageState::MissingDerivedAssets, ArchiveRisk::Medium)
+    } else {
+        (CoverageState::Fresh, ArchiveRisk::Low)
+    };
+    archive_coverage_summary(coverage_state, archive_risk)
+}
+
+/// An "unknown" archive-coverage summary for a host whose archive was not
+/// deep-probed by this bounded surface (e.g. a live-probed remote: its version is
+/// real, but its archive state is not measured).
+fn unknown_archive_coverage() -> crate::fleet_archive_coverage::ArchiveCoverageSummary {
+    use crate::fleet_archive_coverage::CoverageState;
+    use crate::fleet_doctor_schema::ArchiveRisk;
+    archive_coverage_summary(CoverageState::Unknown, ArchiveRisk::Unknown)
+}
+
+/// Build an approximate coverage summary carrying only a derived state + risk.
+fn archive_coverage_summary(
+    coverage_state: crate::fleet_archive_coverage::CoverageState,
+    archive_risk: crate::fleet_doctor_schema::ArchiveRisk,
+) -> crate::fleet_archive_coverage::ArchiveCoverageSummary {
+    crate::fleet_archive_coverage::ArchiveCoverageSummary {
+        schema_version: crate::fleet_archive_coverage::ARCHIVE_COVERAGE_SCHEMA_VERSION,
+        root_kind_counts: std::collections::BTreeMap::new(),
+        total_estimated_sessions: 0,
+        total_estimated_bytes: 0,
+        approximate: true,
+        newest_index_ms: None,
+        newest_sync_ms: None,
+        provenance_gaps: Vec::new(),
+        coverage_state,
+        archive_risk,
+    }
+}
+
+/// Bounded SSH probe of one configured remote source for the rehearsal: one
+/// round trip for the remote `cass` version + `uname` platform (reusing the
+/// sources-doctor probe). The remote archive is not deep-probed, so coverage is
+/// reported as unknown rather than guessed.
+fn probe_remote_host_for_rehearsal(
+    name: &str,
+    host: &str,
+) -> (
+    crate::fleet_doctor_schema::HostDoctorReport,
+    crate::fleet_archive_coverage::ArchiveCoverageSummary,
+) {
+    use crate::fleet_doctor_schema::{HostDoctorReport, HostProbeStatus, Platform};
+    let start = std::time::Instant::now();
+    let probe = check_remote_cass(host);
+    let elapsed = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let platform = probe
+        .os
+        .as_deref()
+        .map(platform_from_uname)
+        .unwrap_or_else(Platform::linux_x86_64);
+    let status = if probe.os.is_none() {
+        // No usable response: the host could not be reached for the probe.
+        HostProbeStatus::Unreachable
+    } else if !probe.cass_found {
+        HostProbeStatus::CommandNotFound
+    } else {
+        HostProbeStatus::Ok
+    };
+    let mut report = HostDoctorReport::skeleton(name, platform, status, elapsed);
+    report.cass_version = probe.cass_version.clone();
+    report.unreachable = matches!(status, HostProbeStatus::Unreachable);
+    (report, unknown_archive_coverage())
+}
+
+/// Drive the bounded post-upgrade check battery against the local binary and
+/// classify each into a proof artifact (bead sc8sp, composing 12.2 + 12.3). Each
+/// distinct check command runs once (facets sharing a command reuse the result),
+/// bounded by its own timeout. Read-only: every battery command is a `--json`
+/// inspection of the local host.
+fn verify_local_post_upgrade(
+    data_dir: &Path,
+    coverage_state: crate::fleet_archive_coverage::CoverageState,
+) -> crate::fleet_upgrade_rehearsal::PostUpgradeVerification {
+    use crate::e2e_runner::{RunExpectation, RunMode, RunSpec, run};
+    use crate::fleet_archive_coverage::CoverageState;
+    use crate::fleet_doctor_schema::ReadinessState;
+    use crate::fleet_upgrade_rehearsal::{
+        PostUpgradeCheck, UpgradeBeforeAfter, verify_post_upgrade,
+    };
+    use crate::proof_artifact::{DEFAULT_STALE_AFTER_MS, ProofRun, ProofStatus, classify};
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    let binary_path = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "cass".to_string());
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut env_overrides: BTreeMap<String, String> = BTreeMap::new();
+    env_overrides.insert("CASS_DATA_DIR".to_string(), data_dir.display().to_string());
+
+    // Run each distinct check command once; facets that share a command (several
+    // read `cass status --json`) reuse the recorded run.
+    let mut run_cache: BTreeMap<String, ProofRun> = BTreeMap::new();
+    let mut checks: Vec<(PostUpgradeCheck, ProofRun)> = Vec::new();
+    for check in PostUpgradeCheck::battery() {
+        let command = check.command().to_string();
+        let timeout_ms = check.timeout_ms();
+        let proof_run = run_cache
+            .entry(command.clone())
+            .or_insert_with(|| {
+                let args: Vec<String> = command
+                    .split_whitespace()
+                    .skip(1) // drop the leading "cass"
+                    .map(str::to_string)
+                    .collect();
+                let spec = RunSpec {
+                    binary_path: binary_path.clone(),
+                    args,
+                    timeout: Duration::from_millis(timeout_ms),
+                    env_overrides: env_overrides.clone(),
+                    cwd: cwd.clone(),
+                    fixture_id: None,
+                    require_path: None,
+                    phase: "post-upgrade-verify".to_string(),
+                    mode: RunMode::Ci,
+                };
+                let expect = RunExpectation {
+                    expect_json: true,
+                    assertions: vec![(
+                        "stdout_non_empty".to_string(),
+                        Box::new(|stdout: &str, _stderr: &str| !stdout.trim().is_empty())
+                            as Box<dyn Fn(&str, &str) -> bool>,
+                    )],
+                };
+                let event = run(&spec, &expect, 0);
+                run_event_to_proof_run(&event, &command, &binary_path, timeout_ms)
+            })
+            .clone();
+        checks.push((check, proof_run));
+    }
+
+    // Derive readiness from the health/status check (the only facet that proves
+    // readiness recovered). A trustworthy pass means the host is ready.
+    let health_pass = run_cache
+        .get(PostUpgradeCheck::HealthStatusReadiness.command())
+        .map(|run| matches!(classify(run, DEFAULT_STALE_AFTER_MS), ProofStatus::Pass))
+        .unwrap_or(false);
+    let after_readiness = if health_pass {
+        ReadinessState::Ready
+    } else {
+        ReadinessState::NotReady
+    };
+
+    let version = env!("CARGO_PKG_VERSION").to_string();
+    let before_after = UpgradeBeforeAfter {
+        before_version: Some(version.clone()),
+        after_version: Some(version),
+        binary_upgraded: false,
+        before_readiness: None,
+        after_readiness: Some(after_readiness),
+        readiness_improved: false,
+        derived_assets_still_stale: matches!(
+            coverage_state,
+            CoverageState::Stale | CoverageState::MissingDerivedAssets
+        ),
+        coverage_before: coverage_state,
+        coverage_after: coverage_state,
+    };
+
+    verify_post_upgrade("local", before_after, checks, DEFAULT_STALE_AFTER_MS)
+}
+
+/// Convert a bounded [`crate::e2e_runner::RunEvent`] into a
+/// [`crate::proof_artifact::ProofRun`]. The post-check command plus its
+/// exit/JSON expectation *is* the assertion, so `assertions_ran` is always true:
+/// a genuine non-zero exit classifies as `Fail`, never the "generated-only" trap.
+fn run_event_to_proof_run(
+    event: &crate::e2e_runner::RunEvent,
+    command: &str,
+    binary_path: &str,
+    timeout_ms: u64,
+) -> crate::proof_artifact::ProofRun {
+    use crate::e2e_runner::RunOutcome;
+    crate::proof_artifact::ProofRun {
+        command: command.to_string(),
+        binary_path: Some(binary_path.to_string()),
+        binary_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        data_dir_or_fixture: event.env_overrides.get("CASS_DATA_DIR").cloned(),
+        exit_code: event.exit_code,
+        elapsed_ms: event.elapsed_ms,
+        timeout_ms,
+        timed_out: event.timed_out,
+        skipped: false,
+        assertions_ran: true,
+        produced_artifact: false,
+        completed: matches!(event.outcome, RunOutcome::Success),
+        artifact_age_ms: None,
+        stdout_path: None,
+        stderr_path: None,
+    }
+}
+
+/// Human-readable rendering of the fleet upgrade rehearsal.
+fn print_fleet_upgrade_rehearsal_human(output: &FleetUpgradeRehearsalOutput) {
+    use colored::Colorize;
+    println!("{}", "Fleet upgrade rehearsal".bold().cyan());
+    println!("  mode: {}", output.mode);
+    println!("  target version: {}", output.target_version);
+    let r = &output.rehearsal;
+    println!(
+        "  hosts: {} total · {} up-to-date · {} need upgrade · {} unreachable",
+        r.hosts.len(),
+        r.hosts_up_to_date,
+        r.hosts_needing_upgrade,
+        r.hosts_unreachable,
+    );
+    if !r.recommended_order.is_empty() {
+        println!(
+            "  recommended upgrade order: {}",
+            r.recommended_order.join(", ")
+        );
+    }
+    for host in &r.hosts {
+        println!(
+            "  - {} [{}] {}",
+            host.host_alias,
+            host.disposition.as_str(),
+            host.observed_version.as_deref().unwrap_or("version-unknown"),
+        );
+        for cmd in &host.safe_next_commands {
+            println!("      next: {cmd}");
+        }
+        for blocked in &host.blocked_next_commands {
+            println!(
+                "      blocked: {}  (unblock: {})",
+                blocked.command, blocked.unblock_precondition
+            );
+        }
+    }
+    if !output.deferred_remote_sources.is_empty() {
+        println!(
+            "  remote sources deferred (run with --live to probe): {}",
+            output.deferred_remote_sources.join(", ")
+        );
+    }
+    if let Some(v) = &output.local_verification {
+        println!("{}", "Local post-upgrade verification".bold().cyan());
+        println!("  overall: {}", v.overall_status.as_str());
+        println!("  {}", v.summary);
+        for proof in &v.check_proofs {
+            println!(
+                "    - {}: {}",
+                proof.check.as_str(),
+                proof.proof.status.as_str()
+            );
+        }
+    }
+    println!(
+        "  {}",
+        "mutation-free: no host was modified by this rehearsal".dimmed()
+    );
 }
 
 /// Show semantic model installation status.

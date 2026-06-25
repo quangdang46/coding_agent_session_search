@@ -2878,6 +2878,12 @@
       "has_json_output": false
     },
     {
+      "name": "fleet",
+      "description": "Fleet-safe upgrade rehearsal and bounded post-upgrade verification",
+      "arguments": [],
+      "has_json_output": false
+    },
+    {
       "name": "lessons",
       "description": "Mine and query durable lessons from local evidence (commits, beads, proofs)",
       "arguments": [],
