@@ -55,6 +55,7 @@ pub mod root_cause_projection;
 pub mod root_cause_taxonomy;
 pub mod search;
 pub mod search_defaults;
+pub mod search_quality_eval;
 pub mod source_doctor_health;
 pub mod source_onboarding;
 pub mod sources;
